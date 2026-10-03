@@ -331,7 +331,7 @@ export class PokerGame {
       }));
 
       for (const winner of winners) {
-        const player = this.state.players.find(p => p.id === winner.playerId);
+        const player = this.state.players.find(p => p.id === winner.id);
         if (player) {
           player.chips += winAmount;
         }
