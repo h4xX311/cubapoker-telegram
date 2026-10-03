@@ -1,0 +1,34 @@
+# Render Blueprint - CubaPoker Telegram Bot
+services:
+  - type: web
+    name: cubapoker-telegram-bot
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build && cd mini-app && npm install && npm run build
+    startCommand: node dist/bot.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: TRONGRID_API_KEY
+        sync: false
+      - key: USDT_CONTRACT_ADDRESS
+        value: TR7NHqjeKQxGTCi8q8ZY4pL8otSzgLj6t
+      - key: ENZONA_CLIENT_ID
+        sync: false
+      - key: ENZONA_CLIENT_SECRET
+        sync: false
+      - key: QVAPAY_APP_ID
+        sync: false
+      - key: QVAPAY_APP_SECRET
+        sync: false
+      - key: EPUSDT_API_URL
+        sync: false
+      - key: MINI_APP_URL
+        sync: false

@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - MONGODB_URI=mongodb://mongo:27017/cubapoker-telegram
+      - TRONGRID_API_KEY=${TRONGRID_API_KEY}
+      - USDT_CONTRACT_ADDRESS=${USDT_CONTRACT_ADDRESS}
+      - ENZONA_CLIENT_ID=${ENZONA_CLIENT_ID}
+      - ENZONA_CLIENT_SECRET=${ENZONA_CLIENT_SECRET}
+      - QVAPAY_APP_ID=${QVAPAY_APP_ID}
+      - QVAPAY_APP_SECRET=${QVAPAY_APP_SECRET}
+      - EPUSDT_API_URL=${EPUSDT_API_URL}
+      - MINI_APP_URL=${MINI_APP_URL}
+    depends_on:
+      - mongo
+    restart: unless-stopped
+    networks:
+      - cubapoker-network
+
+  mongo:
+    image: mongo:6
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    restart: unless-stopped
+    networks:
+      - cubapoker-network
+
+volumes:
+  mongo_data:
+
+networks:
+  cubapoker-network:
+    driver: bridge

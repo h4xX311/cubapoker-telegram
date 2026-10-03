@@ -1,0 +1,8 @@
+node_modules
+npm-debug.log
+dist
+.env
+.env.local
+coverage
+mini-app/node_modules
+mini-app/dist
