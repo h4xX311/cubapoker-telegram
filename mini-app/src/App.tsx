@@ -7,7 +7,8 @@ import { Tournaments } from './pages/Tournaments';
 import { VIP } from './pages/VIP';
 import { Referrals } from './pages/Referrals';
 import { Achievements } from './pages/Achievements';
-import { api, ApiError } from './lib/api';
+import { SimulatePay } from './pages/SimulatePay';
+import { api, ApiError, type DepositOrder } from './lib/api';
 import { pageFromPath as resolvePage, type Page, type Session } from './lib/types';
 
 export default function App() {
@@ -15,6 +16,8 @@ export default function App() {
   const [user, setUser] = useState<Session | null>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'unauthorized' | 'error'>('loading');
   const [errorMessage, setErrorMessage] = useState('');
+  const [errorCode, setErrorCode] = useState<string>('');
+  const [checkout, setCheckout] = useState<DepositOrder | null>(null);
 
   /**
    * El saldo vive en un unico sitio y se refresca tras cada accion que lo
@@ -53,19 +56,24 @@ export default function App() {
         const data = await api.me();
         setUser(data.user);
         setStatus('ready');
-      } catch (error) {
-        if (error instanceof ApiError && error.status === 401) {
-          setStatus('unauthorized');
-          setErrorMessage('No pudimos verificar tu sesion. Reabre la aplicacion desde el bot.');
-        } else {
-          setStatus('error');
-          setErrorMessage(
-            error instanceof Error ? error.message : 'Error de conexion con el servidor.',
-          );
-        }
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setStatus('unauthorized');
+        setErrorCode(error.code ?? '');
+        setErrorMessage(
+          error.code === 'OPEN_FROM_TELEGRAM'
+            ? 'Abre CubaPoker desde el chat del bot. Esta pantalla solo funciona dentro de Telegram.'
+            : 'Tu sesión expiró. Reabre la aplicación desde el bot.',
+        );
+      } else {
+        setStatus('error');
+        setErrorMessage(
+          error instanceof Error ? error.message : 'Error de conexión con el servidor.',
+        );
       }
-    })();
-  }, []);
+    }
+  })();
+}, []);
 
   const navigate = useCallback((next: Page) => {
     setPage(next);
@@ -98,33 +106,63 @@ export default function App() {
   }
 
   if (status === 'unauthorized' || status === 'error') {
+    const openedOutside = errorCode === 'OPEN_FROM_TELEGRAM';
+
     return (
       <div className="min-h-screen flex flex-col items-center justify-center px-6 text-center">
         <div className="w-16 h-16 rounded-full bg-[#ff4757]/20 flex items-center justify-center mb-5">
-          <span className="text-3xl">⚠️</span>
+          <span className="text-3xl">{openedOutside ? '📱' : '⚠️'}</span>
         </div>
         <h1 className="text-xl font-bold mb-2">
-          {status === 'unauthorized' ? 'Acceso restringido' : 'Algo salió mal'}
+          {openedOutside ? 'Ábrelo desde Telegram' : status === 'unauthorized' ? 'Sesión expirada' : 'Algo salió mal'}
         </h1>
-        <p className="text-[#a0a0b0] mb-6 max-w-sm">{errorMessage}</p>
-        <button
-          onClick={() => window.location.reload()}
-          className="btn btn-primary px-6 py-3"
-        >
+        <p className="text-[#a0a0b0] mb-6 max-w-sm leading-relaxed">{errorMessage}</p>
+
+        <button onClick={() => window.location.reload()} className="btn btn-primary px-6 py-3 mb-3">
           Reintentar
         </button>
+
+        <p className="text-xs text-[#6c6c80] max-w-xs">
+          CubaPoker es una Mini App: necesita ejecutarse dentro de Telegram para poder
+          verificar tu identidad de forma segura.
+        </p>
       </div>
     );
   }
 
   const back = () => navigate('home');
 
+  // Checkout de pago (modo simulación): tiene prioridad sobre la navegación
+  if (checkout) {
+    return (
+      <div className="min-h-screen bg-[#0f0f1a]">
+        <SimulatePay
+          order={checkout}
+          onDone={async () => {
+            await refreshUser();
+            setCheckout(null);
+            navigate('deposit');
+          }}
+          onCancel={() => setCheckout(null)}
+          onBack={() => setCheckout(null)}
+        />
+      </div>
+    );
+  }
+
   const renderPage = () => {
     switch (page) {
       case 'home':
         return <Home user={user} onNavigate={navigate} />;
       case 'deposit':
-        return <Deposit user={user} onBack={back} onBalanceChange={refreshUser} />;
+        return (
+          <Deposit
+            user={user}
+            onBack={back}
+            onBalanceChange={refreshUser}
+            onCheckout={setCheckout}
+          />
+        );
       case 'withdraw':
         return <Withdraw user={user} onBack={back} onBalanceChange={refreshUser} />;
       case 'game':

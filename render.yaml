@@ -32,3 +32,17 @@ services:
         sync: false
       - key: MINI_APP_URL
         sync: false
+      # --- Pagos ---
+      # true = pantalla de prueba integrada, no mueve dinero real.
+      # Poner en false SOLO cuando SIMULATE_PAYMENTS y las pasarelas reales
+      # esten conectadas (ver LAUNCH_CHECKLIST.md).
+      - key: SIMULATE_PAYMENTS
+        value: "true"
+      - key: SIMULATION_SECRET
+        generateValue: true
+      # Si no se define, las rutas administrativas quedan deshabilitadas.
+      - key: ADMIN_API_KEY
+        generateValue: true
+      # Nunca activar en produccion: permite suplantar cualquier cuenta.
+      - key: DEV_AUTH_BYPASS
+        value: "false"

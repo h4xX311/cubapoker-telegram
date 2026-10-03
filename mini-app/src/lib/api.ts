@@ -1,19 +1,8 @@
-/**
- * Cliente API del Mini App.
- *
- * Centraliza dos responsabilidades criticas:
- *  1. Enviar el `initData` de Telegram para que el servidor valide la identidad.
- *  2. Dar un unico lugar donde manejar errores y timeouts.
- *
- * El `telegramId` NUNCA se envia: el servidor lo deduce de la firma.
- */
-
 const TIMEOUT_MS = 15000;
 
 export class ApiError extends Error {
   status: number;
   code?: string;
-
   constructor(message: string, status: number, code?: string) {
     super(message);
     this.name = 'ApiError';
@@ -24,26 +13,16 @@ export class ApiError extends Error {
 
 const getInitData = (): string => window.Telegram?.WebApp?.initData || '';
 
-interface RequestOptions {
-  method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
-  body?: any;
-}
-
-async function request<T = any>(endpoint: string, options: RequestOptions = {}): Promise<T> {
+async function request<T = any>(endpoint: string, options: { method?: string; body?: any } = {}): Promise<T> {
   const { method = 'GET', body } = options;
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
   try {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
-
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     const initData = getInitData();
-    if (initData) {
-      headers['X-Telegram-Init-Data'] = initData;
-    }
+    if (initData) headers['X-Telegram-Init-Data'] = initData;
 
     const response = await fetch(`/api${endpoint}`, {
       method,
@@ -61,17 +40,12 @@ async function request<T = any>(endpoint: string, options: RequestOptions = {}):
     }
 
     if (!response.ok) {
-      throw new ApiError(
-        data?.error || `Error ${response.status}`,
-        response.status,
-        data?.code,
-      );
+      throw new ApiError(data?.error || `Error ${response.status}`, response.status, data?.code);
     }
-
     return data as T;
   } catch (error: any) {
-    if (error.name === 'AbortError') {
-      throw new ApiError('La conexión tardó demasiado. Intenta de nuevo.', 0, 'TIMEOUT');
+    if (error?.name === 'AbortError') {
+      throw new ApiError('La conexion tardo demasiado. Intenta de nuevo.', 0, 'TIMEOUT');
     }
     throw error;
   } finally {
@@ -79,50 +53,83 @@ async function request<T = any>(endpoint: string, options: RequestOptions = {}):
   }
 }
 
+// --- Tipos de cadenas ---
+
+export interface ChainInfo {
+  id: string;
+  name: string;
+  nativeSymbol: string;
+  addressExample: string;
+  avgFeeUsd: number;
+  confirmationMinutes: number;
+  recommended: boolean;
+}
+
+export interface DepositOrder {
+  orderId: string;
+  checkoutUrl: string;
+  amount: number;
+  currency: 'CUP' | 'USDT';
+  chain?: string;
+  expiresAt: string;
+  simulated: boolean;
+  instructions: Record<string, string>;
+}
+
 export const api = {
-  // Sesión / perfil
+  // Sesion
   me: () => request<any>('/me'),
 
-  // Dinero
-  deposit: (amount: number, method: string, externalId?: string) =>
-    request<any>('/deposit', { method: 'POST', body: { amount, method, externalId } }),
+  // Pagos
+  chains: () => request<{ chains: ChainInfo[]; simulate: boolean }>('/payment/chains'),
+  createDepositOrder: (amount: number, provider: string, chain?: string) =>
+    request<DepositOrder>('/payment/deposit/order', {
+      method: 'POST',
+      body: { amount, provider, chain },
+    }),
+  confirmDeposit: (orderId: string, txHash?: string) =>
+    request<any>('/payment/deposit/confirm', {
+      method: 'POST',
+      body: { orderId, txHash },
+    }),
+  withdraw: (amount: number, provider: string, chain?: string, walletAddress?: string) =>
+    request<any>('/payment/withdraw', {
+      method: 'POST',
+      body: { amount, provider, chain, walletAddress },
+    }),
+  orders: (type?: 'deposit' | 'withdrawal') =>
+    request<any>(`/payment/orders${type ? `?type=${type}` : ''}`),
 
-  withdraw: (amount: number, method: string, address?: string) =>
-    request<any>('/withdraw', { method: 'POST', body: { amount, method, address } }),
-
-  transactions: () => request<any>('/transactions'),
+  // Simulador (solo desarrollo)
+  getSimulatedOrder: (orderId: string) => request<any>(`/payment/simulate/${orderId}`),
+  confirmSimulated: (orderId: string) =>
+    request<any>(`/payment/simulate/${orderId}/confirm`, { method: 'POST', body: {} }),
 
   // Juego
   createGame: (smallBlind = 1, bigBlind = 2) =>
     request<any>('/game/create', { method: 'POST', body: { smallBlind, bigBlind } }),
-
   joinGame: (gameId: string) =>
     request<any>('/game/join', { method: 'POST', body: { gameId } }),
-
   gameState: (gameId: string, telegramId: number) =>
     request<any>(`/game/state/${gameId}/${telegramId}`),
-
   gameAction: (gameId: string, action: string, amount?: number) =>
     request<any>('/game/action', { method: 'POST', body: { gameId, action, amount } }),
-
-  leaveGame: (gameId: string) =>
-    request<any>('/game/leave', { method: 'POST', body: { gameId } }),
-
+  leaveGame: (gameId: string) => request<any>('/game/leave', { method: 'POST', body: { gameId } }),
   activeGames: () => request<any>('/game/active'),
 
   // Torneos
   tournaments: () => request<any>('/game/tournaments'),
-
   registerTournament: (id: string) =>
     request<any>(`/game/tournaments/${id}/register`, { method: 'POST', body: {} }),
 
-  // Monetización
+  // Monetizacion
   vip: () => request<any>('/monetization/vip'),
   vipConfig: () => request<any>('/monetization/vip/config'),
   purchaseVip: (level: string) =>
     request<any>('/monetization/vip/purchase', { method: 'POST', body: { level } }),
-
   referrals: () => request<any>('/monetization/referrals'),
   achievements: () => request<any>('/monetization/achievements'),
   streaks: () => request<any>('/monetization/streaks'),
 };
+
+export { ApiError as ApiErrorClass };

@@ -79,6 +79,23 @@ function validateInitData(initData: string): { valid: boolean; user?: any; error
  * Identifica al usuario por su Telegram ID real, no por lo que el cliente envie.
  */
 export const requireTelegramAuth = (req: Request, res: Response, next: NextFunction): void => {
+  // --- Bypass de desarrollo ---
+  // Permite probar la API sin Telegram (scripts, Postman, unit tests).
+  // Bloqueado por diseno en produccion: si esto se activara en un entorno
+  // publico, cualquiera suplantaria cualquier cuenta.
+  if (process.env.NODE_ENV !== 'production' && process.env.DEV_AUTH_BYPASS === 'true') {
+    const devId = Number(req.headers['x-dev-auth'] || process.env.DEV_AUTH_ID || 1);
+    if (Number.isFinite(devId) && devId > 0) {
+      (req as any).telegramUser = {
+        id: devId,
+        first_name: 'Dev',
+        username: 'dev_user',
+      };
+      next();
+      return;
+    }
+  }
+
   // Aceptamos el initData en el header o en el body
   const initData =
     (req.headers['x-telegram-init-data'] as string) ||
@@ -88,9 +105,16 @@ export const requireTelegramAuth = (req: Request, res: Response, next: NextFunct
   const result = validateInitData(initData);
 
   if (!result.valid) {
+    // Distinguir los dos casos mas comunes para que el usuario sepa que hacer:
+    //  - sin initData: abrio la URL en un navegador en vez de dentro de Telegram
+    //  - firma invalida: la sesion expiro o el bot token no coincide
+    const outsideTelegram = !initData;
+
     res.status(401).json({
-      error: 'No autorizado',
-      code: 'AUTH_REQUIRED',
+      error: outsideTelegram
+        ? 'Esta aplicacion solo funciona dentro de Telegram.'
+        : 'Tu sesion expiro. Reabre la aplicacion desde el bot.',
+      code: outsideTelegram ? 'OPEN_FROM_TELEGRAM' : 'AUTH_REQUIRED',
       detail: result.error,
     });
     return;

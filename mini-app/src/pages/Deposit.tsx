@@ -1,55 +1,70 @@
-import { useState } from 'react';
-import { api, ApiError } from '../lib/api';
+import { useState, useEffect } from 'react';
+import { api, ApiError, type ChainInfo, type DepositOrder } from '../lib/api';
+import { PageHeader, SectionLabel } from '../components/Layout';
 
 interface Props {
   user: any;
   onBack: () => void;
   onBalanceChange?: () => void | Promise<any>;
+  onCheckout: (order: DepositOrder) => void;
 }
+type Provider = 'enzona' | 'qvapay' | 'usdt';
 
-type Method = 'enzona' | 'qvapay' | 'usdt';
-type Network = 'TRC20' | 'ERC20' | 'BEP20';
-
-const METHODS: { id: Method; flag: string; name: string; note: string; rate: string }[] = [
-  { id: 'enzona', flag: '🇨🇺', name: 'EnZona', note: 'Pago móvil cubano', rate: '1.5% comisión' },
-  { id: 'qvapay', flag: '💳', name: 'QvaPay', note: 'Tarjeta / online', rate: '1.5% comisión' },
-  { id: 'usdt', flag: '₮', name: 'USDT', note: 'Cripto', rate: '0.5% comisión' },
+const PROVIDERS: { id: Provider; icon: string; name: string; note: string; min: number; rate: string }[] = [
+  { id: 'enzona', icon: '🇨🇺', name: 'EnZona', note: 'Pago móvil', min: 500, rate: '1.5%' },
+  { id: 'qvapay', icon: '💳', name: 'QvaPay', note: 'Tarjeta', min: 500, rate: '1.5%' },
+  { id: 'usdt', icon: '₮', name: 'USDT', note: '5 redes', min: 5, rate: '0.5%' },
 ];
 
-const NETWORKS: Network[] = ['TRC20', 'ERC20', 'BEP20'];
 const CUP_PER_USDT = 350;
 
-const MINIMUMS: Record<Method, number> = { enzona: 500, qvapay: 500, usdt: 5 };
-
-export function Deposit({ user, onBack, onBalanceChange }: Props) {
-  const [method, setMethod] = useState<Method>('enzona');
-  const [network, setNetwork] = useState<Network>('TRC20');
+export function Deposit({ user, onBack, onCheckout }: Props) {
+  const [provider, setProvider] = useState<Provider>('usdt');
+  const [chains, setChains] = useState<ChainInfo[]>([]);
+  const [chainId, setChainId] = useState<string>('TRC20');
   const [amount, setAmount] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
-  const numericAmount = Number(amount) || 0;
-  const minimum = MINIMUMS[method];
-  const belowMinimum = numericAmount > 0 && numericAmount < minimum;
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await api.chains();
+        setChains(res.chains || []);
+        const recommended = res.chains?.find((c: ChainInfo) => c.recommended);
+        if (recommended) setChainId(recommended.id);
+      } catch {
+        setChains([]);
+      }
+    })();
+  }, []);
 
-  const presets = method === 'usdt' ? [5, 10, 25, 50, 100] : [500, 1000, 2500, 5000, 10000];
+  const numericAmount = Number(amount) || 0;
+  const config = PROVIDERS.find(p => p.id === provider)!;
+  const belowMinimum = numericAmount > 0 && numericAmount < config.min;
+  const selectedChain = chains.find(c => c.id === chainId);
+
+  const presets =
+    provider === 'usdt' ? [5, 10, 25, 50, 100] : [500, 1000, 2500, 5000, 10000];
 
   const submit = async () => {
     setError('');
 
-    if (!numericAmount || numericAmount < minimum) {
-      setError(`El mínimo es ${minimum} ${method === 'usdt' ? 'USDT' : 'CUP'}.`);
+    if (!numericAmount || belowMinimum) {
+      setError(`El mínimo es ${config.min} ${provider === 'usdt' ? 'USDT' : 'CUP'}.`);
       return;
     }
 
     setSubmitting(true);
     try {
-      await api.deposit(numericAmount, method);
-      await onBalanceChange?.();
-      // Recargamos para que el usuario vea el saldo real ya acreditado
-      window.location.reload();
+      const order = await api.createDepositOrder(
+        numericAmount,
+        provider,
+        provider === 'usdt' ? chainId : undefined,
+      );
+      onCheckout(order);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'No se pudo procesar el depósito.');
+      setError(err instanceof ApiError ? err.message : 'No se pudo generar la orden.');
       setSubmitting(false);
     }
   };
@@ -61,59 +76,83 @@ export function Deposit({ user, onBack, onBalanceChange }: Props) {
       {/* Método */}
       <SectionLabel>Método de pago</SectionLabel>
       <div className="grid grid-cols-3 gap-2 mb-5">
-        {METHODS.map(m => (
+        {PROVIDERS.map(p => (
           <button
-            key={m.id}
+            key={p.id}
             onClick={() => {
-              setMethod(m.id);
+              setProvider(p.id);
               setAmount('');
               setError('');
             }}
-            aria-pressed={method === m.id}
+            aria-pressed={provider === p.id}
             className={`card p-3 flex flex-col items-center gap-1 transition-all ${
-              method === m.id
+              provider === p.id
                 ? 'border-[#00d26a] bg-[#00d26a]/10'
                 : 'hover:border-[#2a2a4a]'
             }`}
           >
-            <span className="text-xl">{m.flag}</span>
-            <span className="text-xs font-semibold text-white">{m.name}</span>
-            <span className="text-[10px] text-[#a0a0b0] text-center leading-tight">{m.note}</span>
+            <span className="text-xl">{p.icon}</span>
+            <span className="text-xs font-semibold text-white">{p.name}</span>
+            <span className="text-[10px] text-[#a0a0b0]">{p.note}</span>
           </button>
         ))}
       </div>
 
       {/* Red (solo USDT) */}
-      {method === 'usdt' && (
+      {provider === 'usdt' && (
         <>
           <SectionLabel>Red</SectionLabel>
-          <div className="grid grid-cols-3 gap-2 mb-5">
-            {NETWORKS.map(n => (
+          <div className="space-y-2 mb-2">
+            {chains.map(c => (
               <button
-                key={n}
-                onClick={() => setNetwork(n)}
-                aria-pressed={network === n}
-                className={`card p-3 text-center transition-all ${
-                  network === n ? 'border-[#00d26a] bg-[#00d26a]/10' : 'hover:border-[#2a2a4a]'
+                key={c.id}
+                onClick={() => setChainId(c.id)}
+                aria-pressed={chainId === c.id}
+                className={`w-full rounded-xl p-3 flex items-center justify-between transition-all ${
+                  chainId === c.id
+                    ? 'border-[#00d26a] bg-[#00d26a]/10'
+                    : 'hover:border-[#2a2a4a]'
                 }`}
+                style={{ background: '#16213e', border: '1px solid' }}
               >
-                <span className="text-sm font-semibold text-white block">{n}</span>
-                {n === 'TRC20' && (
-                  <span className="text-[10px] text-[#00d26a]">Más barato</span>
-                )}
+                <div className="flex items-center gap-3">
+                  <span
+                    className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${
+                      chainId === c.id ? 'border-[#00d26a]' : 'border-[#2a2a4a]'
+                    }`}
+                  >
+                    {chainId === c.id && <span className="w-2 h-2 rounded-full bg-[#00d26a]" />}
+                  </span>
+                  <div className="text-left">
+                    <p className="text-sm font-semibold text-white">
+                      {c.name}
+                      {c.recommended && (
+                        <span className="ml-2 text-[10px] text-[#00d26a] font-normal">
+                          recomendado
+                        </span>
+                      )}
+                    </p>
+                    <p className="text-[10px] text-[#a0a0b0]">
+                      {c.nativeSymbol} · ~{c.avgFeeUsd} USD de comisión
+                    </p>
+                  </div>
+                </div>
+                <span className="text-[10px] text-[#a0a0b0]">
+                  {c.confirmationMinutes} min
+                </span>
               </button>
             ))}
           </div>
-          <p className="text-xs text-[#a0a0b0] mb-5 -mt-3">
-            Envía únicamente {network}. Enviar por otra red puede perder tus fondos.
-          </p>
+          {selectedChain && (
+            <p className="text-[10px] text-[#6c6c80] mb-5">
+              Envía solo por {selectedChain.name}. Otra red puede perder tus fondos.
+            </p>
+          )}
         </>
       )}
 
       {/* Monto */}
-      <SectionLabel>
-        Monto {method === 'usdt' ? '(USDT)' : '(CUP)'}
-      </SectionLabel>
+      <SectionLabel>Monto {provider === 'usdt' ? '(USDT)' : '(CUP)'}</SectionLabel>
       <div className="relative mb-3">
         <input
           type="number"
@@ -123,24 +162,24 @@ export function Deposit({ user, onBack, onBalanceChange }: Props) {
             setAmount(e.target.value);
             setError('');
           }}
-          placeholder={method === 'usdt' ? '10' : '1000'}
+          placeholder={provider === 'usdt' ? '10' : '1000'}
           className="input text-lg pr-16"
           aria-label="Monto a depositar"
         />
         <span className="absolute right-4 top-1/2 -translate-y-1/2 text-sm font-semibold text-[#a0a0b0]">
-          {method === 'usdt' ? 'USDT' : 'CUP'}
+          {provider === 'usdt' ? 'USDT' : 'CUP'}
         </span>
       </div>
 
-      {method === 'usdt' && numericAmount > 0 && (
+      {provider === 'usdt' && numericAmount > 0 && (
         <p className="text-xs text-[#a0a0b0] mb-3">
           ≈ {(numericAmount * CUP_PER_USDT).toLocaleString('es-CU')} CUP
         </p>
       )}
 
       {belowMinimum && (
-        <p className="text-xs text-[#ff4757] mb-3">
-          Mínimo {minimum} {method === 'usdt' ? 'USDT' : 'CUP'}
+        <p className="text-xs text-[#ff8a94] mb-3">
+          Mínimo {config.min} {provider === 'usdt' ? 'USDT' : 'CUP'}
         </p>
       )}
 
@@ -168,43 +207,19 @@ export function Deposit({ user, onBack, onBalanceChange }: Props) {
         disabled={submitting || !numericAmount || belowMinimum}
         className="w-full btn btn-primary py-3.5 text-base disabled:opacity-50 disabled:cursor-not-allowed"
       >
-        {submitting ? 'Procesando…' : `Depositar ${numericAmount || 0}`}
+        {submitting ? 'Generando orden…' : `Continuar · ${numericAmount || 0}`}
       </button>
 
       <div className="mt-5 card">
         <p className="text-xs text-[#a0a0b0] leading-relaxed">
-          <span className="text-white font-semibold">Comisión:</span>{' '}
-          {METHODS.find(m => m.id === method)?.rate}. El saldo se acredita{' '}
-          {method === 'usdt' ? 'tras la confirmación en blockchain' : 'al confirmarse el pago'}.
+          <span className="text-white font-semibold">Comisión:</span> {config.rate}. El
+          saldo se acredita cuando el pago se confirme, no antes.
         </p>
         <p className="text-xs text-[#a0a0b0] leading-relaxed mt-2">
-          <span className="text-white font-semibold">Saldo actual:</span>{' '}
+          <span className="text-white font-semibold">Tu saldo:</span>{' '}
           {user?.balance?.credits ?? 0} CUP
         </p>
       </div>
     </div>
-  );
-}
-
-export function PageHeader({ title, onBack }: { title: string; onBack: () => void }) {
-  return (
-    <div className="flex items-center gap-3 mb-5 pt-1">
-      <button
-        onClick={onBack}
-        className="w-9 h-9 rounded-xl bg-[#16213e] flex items-center justify-center text-white hover:bg-[#1f2b4d] transition-colors"
-        aria-label="Volver"
-      >
-        ←
-      </button>
-      <h1 className="text-xl font-bold text-white">{title}</h1>
-    </div>
-  );
-}
-
-export function SectionLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <h2 className="text-[#a0a0b0] text-xs uppercase tracking-wide mb-2.5">
-      {children}
-    </h2>
   );
 }

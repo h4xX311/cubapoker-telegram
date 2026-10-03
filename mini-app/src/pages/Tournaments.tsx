@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { api, ApiError } from '../lib/api';
-import { PageHeader, SectionLabel } from './Deposit';
+import { PageHeader, SectionLabel } from '../components/Layout';
 
 interface Props {
   user: any;

@@ -7,12 +7,14 @@ import path from 'path';
 import healthRouter from './health';
 import { createGameRoutes } from './game/polling';
 import monetizationRoutes from './routes/monetization.routes';
+import paymentRoutes from './routes/payment.routes';
 import { monetizationService } from './services/monetization.service';
 import { requireTelegramAuth, getAuthedTelegramId } from './middleware/telegramAuth';
 import { User } from './models/User';
 import { Game } from './models/Game';
 import { Transaction } from './models/Transaction';
 import { VIP_CONFIG, VIPLevel } from './models/VIP';
+import { SIMULATION_ENABLED, pruneSimulatedOrders } from './services/payment/gateway';
 
 dotenv.config();
 
@@ -37,6 +39,19 @@ app.use('/api/game', createGameRoutes(bot));
 
 // Monetization Routes
 app.use('/api/monetization', monetizationRoutes);
+
+// Payment Orders (deposit in two steps, withdrawals, simulation)
+app.use('/api/payment', paymentRoutes);
+
+// Liveness / readiness para el orquestador
+app.get('/health', (_req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'cubapoker-telegram-bot',
+    paymentMode: SIMULATION_ENABLED ? 'simulation' : 'live',
+    timestamp: new Date().toISOString(),
+  });
+});
 
 // Commands
 bot.onText(/\/start/, async (msg) => {
@@ -400,60 +415,10 @@ app.get('/api/me', requireTelegramAuth, async (req, res) => {
   }
 });
 
-app.post('/api/deposit', requireTelegramAuth, async (req, res) => {
-  try {
-    const telegramId = getAuthedTelegramId(req);
-    const amount = Number(req.body.amount);
-    const method = req.body.method;
-
-    if (!Number.isFinite(amount) || amount <= 0) {
-      return res.status(400).json({ error: 'Monto inválido' });
-    }
-    if (!['enzona', 'qvapay', 'usdt'].includes(method)) {
-      return res.status(400).json({ error: 'Método de pago inválido' });
-    }
-
-    const result = await monetizationService.processDeposit(
-      telegramId,
-      amount,
-      method,
-      req.body.externalId
-    );
-
-    res.json({ success: true, ...result });
-  } catch (error: any) {
-    console.error('POST /api/deposit error:', error);
-    res.status(500).json({ error: error.message || 'Error al procesar el depósito' });
-  }
-});
-
-app.post('/api/withdraw', requireTelegramAuth, async (req, res) => {
-  try {
-    const telegramId = getAuthedTelegramId(req);
-    const amount = Number(req.body.amount);
-    const method = req.body.method;
-    const address = req.body.address;
-
-    if (!Number.isFinite(amount) || amount <= 0) {
-      return res.status(400).json({ error: 'Monto inválido' });
-    }
-    if (!['enzona', 'qvapay', 'usdt'].includes(method)) {
-      return res.status(400).json({ error: 'Método de retiro inválido' });
-    }
-
-    const result = await monetizationService.processWithdrawal(
-      telegramId,
-      amount,
-      method,
-      address
-    );
-
-    res.json({ success: true, ...result });
-  } catch (error: any) {
-    console.error('POST /api/withdraw error:', error);
-    res.status(400).json({ error: error.message || 'Error al procesar el retiro' });
-  }
-});
+// Nota: los endpoints /api/deposit y /api/withdraw conackers directos se
+// eliminaron a proposito. Acreditar saldo sin una orden pagada era un agujero:
+// el flujo correcto es /api/payment/deposit/order -> confirmar -> acreditar,
+// y /api/payment/withdraw -> revision del operador -> liquidar.
 
 // Historial de transacciones del usuario autenticado
 app.get('/api/transactions', requireTelegramAuth, async (req, res) => {
@@ -479,5 +444,15 @@ app.listen(PORT, () => {
   console.log(`🚀 CubaPoker Telegram Bot running on port ${PORT}`);
   console.log(`📱 Mini App URL: ${process.env.MINI_APP_URL}`);
   console.log(`🔒 Autenticación de Mini App: activa`);
+  console.log(
+    `💳 Modo de pago: ${SIMULATION_ENABLED ? 'SIMULACIÓN (sin dinero real)' : 'PRODUCCIÓN'}`,
+  );
   console.log(`💰 Monetization system initialized`);
+
+  // Limpieza periodica de ordenes simuladas caducadas
+  const pruneTimer = setInterval(
+    () => pruneSimulatedOrders(),
+    5 * 60 * 1000,
+  );
+  pruneTimer.unref();
 });
