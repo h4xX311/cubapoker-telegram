@@ -199,10 +199,6 @@ export const Game: React.FC<GameProps> = ({ user, onBack }) => {
     return symbols[suit] || suit;
   };
 
-  const getSuitColor = (suit: string) => {
-    return suit === 'hearts' || suit === 'diamonds' ? 'text-red-500' : 'text-gray-900';
-  };
-
   return (
     <div className="p-4 animate-fadeIn">
       {/* Header */}

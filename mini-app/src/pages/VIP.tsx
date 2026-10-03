@@ -17,7 +17,6 @@ interface VIPConfig {
 export const VIP: React.FC<VIPProps> = ({ user, onBack }) => {
   const [vipLevel, setVipLevel] = useState<string | null>(null);
   const [configs, setConfigs] = useState<Record<string, VIPConfig>>({});
-  const [loading, setLoading] = useState(false);
   const [purchasing, setPurchasing] = useState<string | null>(null);
 
   useEffect(() => {
