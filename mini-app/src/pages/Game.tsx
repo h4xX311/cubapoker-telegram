@@ -39,7 +39,7 @@ export const Game: React.FC<GameProps> = ({ user, onBack }) => {
   const [gameState, setGameState] = useState<GameState | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [pollingInterval, setPollingInterval] = useState<NodeJS.Timeout | null>(null);
+  const [pollingInterval, setPollingInterval] = useState<ReturnType<typeof setInterval> | null>(null);
 
   const fetchGameState = useCallback(async (gameId: string) => {
     try {
