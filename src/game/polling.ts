@@ -6,6 +6,7 @@ import { User } from '../models/User';
 import { Game } from '../models/Game';
 import { Transaction } from '../models/Transaction';
 import TelegramBot from 'node-telegram-bot-api';
+import { requireTelegramAuth, getAuthedTelegramId } from '../middleware/telegramAuth';
 
 const activeGames: Map<string, PokerGame> = new Map();
 const playerGames: Map<number, string> = new Map();
@@ -15,10 +16,16 @@ const tournamentManager = new TournamentManager();
 export const createGameRoutes = (bot: TelegramBot): Router => {
   const router = Router();
 
+  // Todas las rutas exigen Mini App autenticado por Telegram.
+  // El telegramId SIEMPRE se toma de la firma verificada, nunca del body.
+  router.use(requireTelegramAuth);
+
   // Crear nueva mesa
   router.post('/create', async (req: Request, res: Response) => {
     try {
-      const { telegramId, smallBlind = 1, bigBlind = 2 } = req.body;
+      const telegramId = getAuthedTelegramId(req);
+      const smallBlind = Number(req.body.smallBlind) || 1;
+      const bigBlind = Number(req.body.bigBlind) || 2;
 
       const user = await User.findOne({ telegramId });
       if (!user) {
@@ -26,7 +33,11 @@ export const createGameRoutes = (bot: TelegramBot): Router => {
       }
 
       if (user.balance.credits < bigBlind * 10) {
-        return res.status(400).json({ error: 'Balance insuficiente' });
+        return res.status(400).json({
+          error: 'Balance insuficiente para esta mesa',
+          required: bigBlind * 10,
+          current: user.balance.credits,
+        });
       }
 
       const gameId = `game-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -55,7 +66,8 @@ export const createGameRoutes = (bot: TelegramBot): Router => {
   // Unirse a mesa
   router.post('/join', async (req: Request, res: Response) => {
     try {
-      const { telegramId, gameId } = req.body;
+      const telegramId = getAuthedTelegramId(req);
+      const { gameId } = req.body;
 
       const user = await User.findOne({ telegramId });
       if (!user) {
@@ -117,14 +129,20 @@ export const createGameRoutes = (bot: TelegramBot): Router => {
   // Obtener estado del juego (polling)
   router.get('/state/:gameId/:telegramId', async (req: Request, res: Response) => {
     try {
-      const { gameId, telegramId } = req.params;
+      const { gameId } = req.params;
+      const telegramId = getAuthedTelegramId(req);
+
+      // Solo se puede consultar la propia partida
+      if (String(req.params.telegramId) !== String(telegramId)) {
+        return res.status(403).json({ error: 'No autorizado' });
+      }
 
       const game = activeGames.get(gameId);
       if (!game) {
         return res.status(404).json({ error: 'Mesa no encontrada' });
       }
 
-      const playerState = game.getPlayerState(telegramId);
+      const playerState = game.getPlayerState(String(telegramId));
       if (!playerState) {
         return res.status(403).json({ error: 'No estás en esta mesa' });
       }
@@ -142,7 +160,8 @@ export const createGameRoutes = (bot: TelegramBot): Router => {
   // Realizar acción
   router.post('/action', async (req: Request, res: Response) => {
     try {
-      const { telegramId, gameId, action, amount } = req.body;
+      const telegramId = getAuthedTelegramId(req);
+      const { gameId, action, amount } = req.body;
 
       const game = activeGames.get(gameId);
       if (!game) {
@@ -181,7 +200,8 @@ export const createGameRoutes = (bot: TelegramBot): Router => {
   // Salir de la mesa
   router.post('/leave', async (req: Request, res: Response) => {
     try {
-      const { telegramId, gameId } = req.body;
+      const telegramId = getAuthedTelegramId(req);
+      const { gameId } = req.body;
 
       const game = activeGames.get(gameId);
       if (!game) {
@@ -235,9 +255,25 @@ export const createGameRoutes = (bot: TelegramBot): Router => {
   // === TORNEOS ===
 
   // Obtener torneos activos
+  // Los objetos Tournament contienen Maps, que JSON.stringify devuelve como {}.
+  // Serializamos explicitamente al shape que el frontend espera.
   router.get('/tournaments', async (req: Request, res: Response) => {
     try {
-      const tournaments = tournamentManager.getActiveTournaments();
+      const tournaments = tournamentManager.getActiveTournaments().map(t => ({
+        id: t.id,
+        name: t.config.name,
+        type: t.config.type,
+        buyIn: t.config.buyIn,
+        maxPlayers: t.config.maxPlayers,
+        minPlayers: t.config.minPlayers,
+        playerCount: t.players.size,
+        status: t.status,
+        prizePool: t.prizes.size
+          ? Array.from(t.prizes.values()).reduce((a, b) => a + b, 0)
+          : t.players.size * t.config.buyIn,
+        prizeStructure: t.config.prizeStructure,
+      }));
+
       res.json({ success: true, tournaments });
     } catch (error) {
       console.error('Get tournaments error:', error);
@@ -266,7 +302,7 @@ export const createGameRoutes = (bot: TelegramBot): Router => {
   router.post('/tournaments/:id/register', async (req: Request, res: Response) => {
     try {
       const { id } = req.params;
-      const { telegramId } = req.body;
+      const telegramId = getAuthedTelegramId(req);
 
       const user = await User.findOne({ telegramId });
       if (!user) {
@@ -351,24 +387,74 @@ async function handleGameEnd(gameId: string, bot: TelegramBot): Promise<void> {
   if (!game) return;
 
   const state = game.getState();
+  const winnerIds = new Set((state.winners || []).map(w => w.playerId));
+
+  // --- Sincronizacion de economia ---
+  // El 'chips' de cada jugador en memoria YA descuenta lo que apostó y el
+  // ganador YA sumo su parte del bote. Para que MongoDB refleje la misma
+  // realidad: descontamos lo TDS (totalBet) a todos y acreditamos el bote
+  // neto a los ganadores. Asi neither el rake ni las apuestas quedan huerfanos.
+  const loserDebits: { telegramId: number; amount: number }[] = [];
+  for (const player of state.players) {
+    if (player.totalBet > 0 && !winnerIds.has(player.id)) {
+      loserDebits.push({ telegramId: parseInt(player.id), amount: player.totalBet });
+    }
+  }
 
   // Calcular rake
   const { rake, netPot } = rakeManager.splitPot(state.pot);
 
-  // Actualizar balances
+  // 1) Descontar lo aportado por los perdedores (nunca mas de lo que tienen)
+  for (const { telegramId, amount } of loserDebits) {
+    if (isNaN(telegramId)) continue;
+    const user = await User.findOne({ telegramId });
+    if (!user) continue;
+    const debit = Math.min(amount, user.balance.credits);
+    if (debit > 0) {
+      await User.findOneAndUpdate({ telegramId }, { $inc: { 'balance.credits': -debit } });
+    }
+  }
+
+  // 2) Acreditar el bote neto a los ganadores
   for (const winner of state.winners || []) {
     const winnerShare = Math.floor(netPot / (state.winners?.length || 1));
+    const telegramId = parseInt(winner.playerId);
+    if (isNaN(telegramId)) continue;
+
+    // Al ganador tambien se le descuenta su propia aportacion antes de
+    // acreditar la parte ganada, para no contar el doble.
+    const winnerPlayer = state.players.find(p => p.id === winner.playerId);
+    if (winnerPlayer && winnerPlayer.totalBet > 0) {
+      await User.findOneAndUpdate(
+        { telegramId },
+        { $inc: { 'balance.credits': -winnerPlayer.totalBet } }
+      );
+    }
+
     await User.findOneAndUpdate(
-      { telegramId: parseInt(winner.playerId) },
+      { telegramId },
       { $inc: { 'balance.credits': winnerShare } }
     );
 
-    const playerId = parseInt(winner.playerId);
-    if (!isNaN(playerId)) {
-      bot.sendMessage(
-        playerId,
-        `🎉 *¡Ganaste ${winnerShare} CUP!*\n\nMano: ${winner.hand.name}\nRake: ${rake} CUP`,
-        { parse_mode: 'Markdown' }
+    bot.sendMessage(
+      telegramId,
+      `🎉 *¡Ganaste ${winnerShare} CUP!*\n\nMano: ${winner.hand.name}\nRake: ${rake} CUP`,
+      { parse_mode: 'Markdown' }
+    );
+
+    // Notificar al resto el resultado (transparencia)
+    const losers = state.players.filter(p => p.id !== winner.playerId && !p.folded);
+    if (losers.length > 0) {
+      await Promise.all(
+        losers.map(l => {
+          const loserId = parseInt(l.id);
+          if (isNaN(loserId)) return Promise.resolve();
+          return bot.sendMessage(
+            loserId,
+            `🏁 *Partida terminada*\n\nGanó ${winner.hand.name} (${winnerShare} CUP)\nRake: ${rake} CUP`,
+            { parse_mode: 'Markdown' }
+          );
+        })
       );
     }
   }

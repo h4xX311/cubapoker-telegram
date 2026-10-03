@@ -1,198 +1,158 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
+import { api } from '../lib/api';
+import { PageHeader, SectionLabel } from './Deposit';
 
-interface ReferralsProps {
+interface Props {
   user: any;
   onBack: () => void;
 }
 
-interface ReferralStats {
-  totalReferrals: number;
-  activeReferrals: number;
-  totalCommission: number;
-  referrals: any[];
-}
+const TIERS = [
+  { level: 1, rate: '10%', label: 'Directos', color: '#00d26a' },
+  { level: 2, rate: '5%', label: 'Segundo nivel', color: '#3498db' },
+  { level: 3, rate: '2%', label: 'Tercer nivel', color: '#9b59b6' },
+];
 
-export const Referrals: React.FC<ReferralsProps> = ({ user, onBack }) => {
-  const [stats, setStats] = useState<ReferralStats | null>(null);
+export function Referrals({ user, onBack }: Props) {
+  const [stats, setStats] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
 
+  const link = `https://t.me/CubaPokerBot?start=ref_${user?.telegramId ?? ''}`;
+
   useEffect(() => {
-    fetchReferralStats();
+    (async () => {
+      try {
+        const res = await api.referrals();
+        setStats(res);
+      } catch {
+        setStats({ totalReferrals: 0, activeReferrals: 0, totalCommission: 0, referrals: [] });
+      } finally {
+        setLoading(false);
+      }
+    })();
   }, []);
 
-  const fetchReferralStats = async () => {
+  const copy = async () => {
     try {
-      const response = await fetch(`/api/monetization/referrals/${user?.id}`);
-      const data = await response.json();
-      if (data.success) {
-        setStats(data);
-      }
-    } catch (error) {
-      console.error('Error fetching referral stats:', error);
-    } finally {
-      setLoading(false);
+      await navigator.clipboard.writeText(link);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopied(false);
     }
   };
 
-  const copyReferralLink = () => {
-    const link = `https://t.me/CubaPokerBot?start=ref_${user?.id}`;
-    navigator.clipboard.writeText(link);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  if (loading) {
-    return (
-      <div className="p-4">
-        <div className="flex items-center mb-6">
-          <button onClick={onBack} className="text-white mr-4 text-xl">←</button>
-          <h1 className="text-xl font-bold text-[#ffd700]">👥 Referidos</h1>
-        </div>
-        <div className="text-center py-12">
-          <div className="spinner mx-auto mb-4"></div>
-          <p className="text-[#a0a0b0]">Cargando...</p>
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="p-4 animate-fadeIn">
-      {/* Header */}
-      <div className="flex items-center mb-6">
-        <button onClick={onBack} className="text-white mr-4 text-xl">←</button>
-        <h1 className="text-xl font-bold text-[#ffd700]">👥 Referidos</h1>
-      </div>
+    <div className="p-4 pb-10 animate-fadeIn">
+      <PageHeader title="Referidos" onBack={onBack} />
 
-      {/* Referral Link */}
-      <div className="glass rounded-2xl p-5 mb-6">
-        <h3 className="text-[#a0a0b0] text-sm mb-3">Tu enlace de referido</h3>
+      {/* Enlace */}
+      <div className="rounded-2xl p-4 mb-5" style={{ background: '#16213e', border: '1px solid #2a2a4a' }}>
+        <SectionLabel>Tu enlace</SectionLabel>
         <div className="flex gap-2">
           <input
-            type="text"
-            value={`https://t.me/CubaPokerBot?start=ref_${user?.id}`}
             readOnly
-            className="flex-1 bg-[#0f0f1a] border border-[#2a2a4a] rounded-xl px-4 py-3 text-white text-sm"
+            value={link}
+            className="input flex-1 text-xs font-mono"
+            onFocus={e => e.currentTarget.select()}
+            aria-label="Tu enlace de referido"
           />
-          <button
-            onClick={copyReferralLink}
-            className={`btn ${copied ? 'btn-primary' : 'btn-outline'}`}
-          >
-            {copied ? '✓' : '📋'}
+          <button onClick={copy} className={`btn px-4 ${copied ? 'btn-primary' : 'btn-outline'}`}>
+            {copied ? '✓' : 'Copiar'}
           </button>
         </div>
+        <p className="text-[10px] text-[#a0a0b0] mt-2">
+          Ganas 50 CUP de bienvenida por cada amigo que se registra.
+        </p>
       </div>
 
-      {/* Stats */}
-      <div className="grid grid-cols-3 gap-3 mb-6">
-        <div className="card text-center p-4">
-          <p className="text-3xl font-bold text-[#00d26a]">{stats?.totalReferrals || 0}</p>
-          <p className="text-xs text-[#a0a0b0]">Total</p>
-        </div>
-        <div className="card text-center p-4">
-          <p className="text-3xl font-bold text-[#ffd700]">{stats?.activeReferrals || 0}</p>
-          <p className="text-xs text-[#a0a0b0]">Activos</p>
-        </div>
-        <div className="card text-center p-4">
-          <p className="text-3xl font-bold text-[#3498db]">{stats?.totalCommission || 0}</p>
-          <p className="text-xs text-[#a0a0b0]">CUP ganados</p>
-        </div>
+      {/* Métricas */}
+      <div className="grid grid-cols-3 gap-2 mb-5">
+        <Metric label="Total" value={stats?.totalReferrals ?? 0} color="#ffffff" />
+        <Metric label="Activos" value={stats?.activeReferrals ?? 0} color="#ffd700" />
+        <Metric label="Ganado" value={stats?.totalCommission ?? 0} unit="CUP" color="#00d26a" />
       </div>
 
-      {/* Commission Structure */}
-      <div className="card mb-6">
-        <h3 className="text-[#a0a0b0] text-sm mb-4">Estructura de comisiones</h3>
+      {/* Estructura */}
+      <SectionLabel>Estructura de comisiones</SectionLabel>
+      <div className="card mb-5">
         <div className="space-y-3">
-          <div className="flex justify-between items-center p-3 bg-[#0f0f1a] rounded-xl">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[#00d26a] to-[#00b894] flex items-center justify-center">
-                <span className="text-white font-bold">1</span>
+          {TIERS.map(tier => (
+            <div key={tier.level} className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div
+                  className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold"
+                  style={{ background: tier.color }}
+                >
+                  {tier.level}
+                </div>
+                <span className="text-sm text-white">{tier.label}</span>
               </div>
-              <div>
-                <p className="font-semibold text-white">Referidos directos</p>
-                <p className="text-xs text-[#a0a0b0]">Tus invitados</p>
-              </div>
+              <span className="text-lg font-bold" style={{ color: tier.color }}>
+                {tier.rate}
+              </span>
             </div>
-            <span className="text-xl font-bold text-[#00d26a]">10%</span>
-          </div>
-
-          <div className="flex justify-between items-center p-3 bg-[#0f0f1a] rounded-xl">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[#3498db] to-[#2980b9] flex items-center justify-center">
-                <span className="text-white font-bold">2</span>
-              </div>
-              <div>
-                <p className="font-semibold text-white">Segundo nivel</p>
-                <p className="text-xs text-[#a0a0b0]">Referidos de referidos</p>
-              </div>
-            </div>
-            <span className="text-xl font-bold text-[#3498db]">5%</span>
-          </div>
-
-          <div className="flex justify-between items-center p-3 bg-[#0f0f1a] rounded-xl">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[#9b59b6] to-[#8e44ad] flex items-center justify-center">
-                <span className="text-white font-bold">3</span>
-              </div>
-              <div>
-                <p className="font-semibold text-white">Tercer nivel</p>
-                <p className="text-xs text-[#a0a0b0]">Red extendida</p>
-              </div>
-            </div>
-            <span className="text-xl font-bold text-[#9b59b6]">2%</span>
-          </div>
+          ))}
         </div>
+        <p className="text-[10px] text-[#a0a0b0] mt-4 pt-3 border-t border-[#2a2a4a]">
+          Las comisiones se calculan sobre el rake generado por tus referidos y se
+          abonan a tu saldo automáticamente.
+        </p>
       </div>
 
-      {/* Referral List */}
-      {stats && stats.referrals.length > 0 && (
-        <div className="card mb-6">
-          <h3 className="text-[#a0a0b0] text-sm mb-4">Tus referidos</h3>
+      {/* Lista */}
+      {loading ? (
+        <div className="text-center py-8">
+          <div className="spinner mx-auto" />
+        </div>
+      ) : stats?.referrals?.length > 0 ? (
+        <>
+          <SectionLabel>Tus referidos</SectionLabel>
           <div className="space-y-2">
-            {stats.referrals.slice(0, 10).map((referral, index) => (
-              <div key={index} className="flex justify-between items-center p-3 bg-[#0f0f1a] rounded-xl">
+            {stats.referrals.slice(0, 10).map((r: any, i: number) => (
+              <div
+                key={i}
+                className="rounded-xl p-3 flex items-center justify-between"
+                style={{ background: '#16213e', border: '1px solid #2a2a4a' }}
+              >
                 <div className="flex items-center gap-3">
-                  <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#00d26a] to-[#00b894] flex items-center justify-center text-white text-sm font-bold">
-                    {referral.level}
+                  <div className="w-7 h-7 rounded-full bg-[#0f3460] flex items-center justify-center text-xs font-bold text-white">
+                    {r.level}
                   </div>
-                  <div>
-                    <p className="font-semibold text-white">Usuario #{referral.referredId}</p>
-                    <p className="text-xs text-[#a0a0b0]">Nivel {referral.level}</p>
-                  </div>
+                  <span className="text-sm text-white">Nivel {r.level}</span>
                 </div>
                 <div className="text-right">
-                  <p className="text-[#00d26a] font-bold">{referral.commission} CUP</p>
-                  <p className="text-xs text-[#a0a0b0]">{referral.totalRake} CUP rake</p>
+                  <p className="text-sm font-bold text-[#00d26a]">{r.commission} CUP</p>
+                  <p className="text-[10px] text-[#a0a0b0]">{r.totalRake} CUP rake</p>
                 </div>
               </div>
             ))}
           </div>
+        </>
+      ) : (
+        <div className="card text-center py-8">
+          <div className="text-3xl mb-2">👥</div>
+          <p className="text-sm text-white font-semibold mb-1">Aún sin referidos</p>
+          <p className="text-xs text-[#a0a0b0]">
+            Comparte tu enlace. Empiezas a ganar en cuanto jueguen.
+          </p>
         </div>
       )}
-
-      {/* How it works */}
-      <div className="card">
-        <h3 className="text-[#a0a0b0] text-sm mb-3">¿Cómo funciona?</h3>
-        <ol className="text-sm text-[#a0a0b0] space-y-2">
-          <li className="flex gap-2">
-            <span className="text-[#00d26a] font-bold">1.</span>
-            Comparte tu enlace de referido
-          </li>
-          <li className="flex gap-2">
-            <span className="text-[#00d26a] font-bold">2.</span>
-            Tus amigos se registran y juegan
-          </li>
-          <li className="flex gap-2">
-            <span className="text-[#00d26a] font-bold">3.</span>
-            Ganas comisiones por cada mano que jueguen
-          </li>
-          <li className="flex gap-2">
-            <span className="text-[#00d26a] font-bold">4.</span>
-            Retira tus comisiones cuando quieras
-          </li>
-        </ol>
-      </div>
     </div>
   );
-};
+}
+
+function Metric({ label, value, unit, color }: { label: string; value: number; unit?: string; color: string }) {
+  return (
+    <div className="card text-center p-3">
+      <p className="text-2xl font-bold" style={{ color }}>
+        {value}
+      </p>
+      <p className="text-[10px] text-[#a0a0b0]">
+        {label}
+        {unit && ` (${unit})`}
+      </p>
+    </div>
+  );
+}

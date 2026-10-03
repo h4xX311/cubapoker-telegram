@@ -7,17 +7,21 @@ import { Achievement } from '../models/Achievement';
 import { Streak } from '../models/Achievement';
 import { VIP_CONFIG, VIPLevel } from '../models/VIP';
 import { monetizationConfig } from '../config/monetization';
+import { requireTelegramAuth, getAuthedTelegramId } from '../middleware/telegramAuth';
 
 const router = Router();
 
+// Toda la monetizacion exige identidad verificada de Telegram.
+router.use(requireTelegramAuth);
+
 // === VIP ===
 
-// Obtener nivel VIP del usuario
-router.get('/vip/:telegramId', async (req: Request, res: Response) => {
+// Obtener nivel VIP del usuario autenticado
+router.get('/vip', async (req: Request, res: Response) => {
   try {
-    const { telegramId } = req.params;
-    const level = await monetizationService.getVIPLevel(parseInt(telegramId));
-    
+    const telegramId = getAuthedTelegramId(req);
+    const level = await monetizationService.getVIPLevel(telegramId);
+
     res.json({
       success: true,
       level,
@@ -32,8 +36,9 @@ router.get('/vip/:telegramId', async (req: Request, res: Response) => {
 // Comprar VIP
 router.post('/vip/purchase', async (req: Request, res: Response) => {
   try {
-    const { telegramId, level } = req.body;
-    
+    const telegramId = getAuthedTelegramId(req);
+    const { level } = req.body;
+
     if (!['basic', 'premium', 'elite'].includes(level)) {
       return res.status(400).json({ error: 'Nivel VIP inválido' });
     }
@@ -68,12 +73,12 @@ router.get('/vip/config', async (req: Request, res: Response) => {
 
 // === REFERIDOS ===
 
-// Obtener estadísticas de referidos
-router.get('/referrals/:telegramId', async (req: Request, res: Response) => {
+// Obtener estadísticas de referidos del usuario autenticado
+router.get('/referrals', async (req: Request, res: Response) => {
   try {
-    const { telegramId } = req.params;
-    const stats = await monetizationService.getReferralStats(parseInt(telegramId));
-    
+    const telegramId = getAuthedTelegramId(req);
+    const stats = await monetizationService.getReferralStats(telegramId);
+
     res.json({
       success: true,
       ...stats,
@@ -84,20 +89,31 @@ router.get('/referrals/:telegramId', async (req: Request, res: Response) => {
   }
 });
 
-// Registrar referido
+// Registrar referido: ambos usuarios deben venir autenticados desde Telegram
 router.post('/referrals/register', async (req: Request, res: Response) => {
   try {
-    const { referrerId, referredId } = req.body;
-    
-    const success = await monetizationService.registerReferral(referrerId, referredId);
-    
+    const referredId = getAuthedTelegramId(req);
+    const { referrerId } = req.body;
+
+    const referrer = Number(referrerId);
+    if (!Number.isFinite(referrer) || referrer <= 0) {
+      return res.status(400).json({ error: 'Referidor inválido' });
+    }
+    if (referrer === referredId) {
+      return res.status(400).json({ error: 'No puedes referirte a ti mismo' });
+    }
+
+    const exists = await User.findOne({ telegramId: referrer });
+    if (!exists) {
+      return res.status(404).json({ error: 'El referidor no existe' });
+    }
+
+    const success = await monetizationService.registerReferral(referrer, referredId);
+
     if (success) {
-      res.json({
-        success: true,
-        message: 'Referido registrado exitosamente',
-      });
+      res.json({ success: true, message: 'Referido registrado exitosamente' });
     } else {
-      res.status(400).json({ error: 'No se pudo registrar referido' });
+      res.status(400).json({ error: 'Ya tienes un referidor registrado' });
     }
   } catch (error) {
     console.error('Register referral error:', error);
@@ -107,12 +123,12 @@ router.post('/referrals/register', async (req: Request, res: Response) => {
 
 // === LOGROS ===
 
-// Obtener logros del usuario
-router.get('/achievements/:telegramId', async (req: Request, res: Response) => {
+// Obtener logros del usuario autenticado
+router.get('/achievements', async (req: Request, res: Response) => {
   try {
-    const { telegramId } = req.params;
-    const achievements = await monetizationService.getUserAchievements(parseInt(telegramId));
-    
+    const telegramId = getAuthedTelegramId(req);
+    const achievements = await monetizationService.getUserAchievements(telegramId);
+
     res.json({
       success: true,
       achievements,
@@ -123,20 +139,18 @@ router.get('/achievements/:telegramId', async (req: Request, res: Response) => {
   }
 });
 
-// Desbloquear logro
+// Desbloquear logro (identidad verificada)
 router.post('/achievements/unlock', async (req: Request, res: Response) => {
   try {
-    const { telegramId, achievementId } = req.body;
-    
+    const telegramId = getAuthedTelegramId(req);
+    const { achievementId } = req.body;
+
     const success = await monetizationService.unlockAchievement(telegramId, achievementId);
-    
+
     if (success) {
-      res.json({
-        success: true,
-        message: 'Logro desbloqueado',
-      });
+      res.json({ success: true, message: 'Logro desbloqueado' });
     } else {
-      res.status(400).json({ error: 'No se pudo desbloquear logro' });
+      res.status(400).json({ error: 'Logro no disponible o ya desbloqueado' });
     }
   } catch (error) {
     console.error('Unlock achievement error:', error);
@@ -146,12 +160,12 @@ router.post('/achievements/unlock', async (req: Request, res: Response) => {
 
 // === RACHAS ===
 
-// Obtener racha del usuario
-router.get('/streaks/:telegramId', async (req: Request, res: Response) => {
+// Obtener racha del usuario autenticado
+router.get('/streaks', async (req: Request, res: Response) => {
   try {
-    const { telegramId } = req.params;
-    const streak = await monetizationService.getStreak(parseInt(telegramId));
-    
+    const telegramId = getAuthedTelegramId(req);
+    const streak = await monetizationService.getStreak(telegramId);
+
     res.json({
       success: true,
       ...streak,
@@ -162,13 +176,13 @@ router.get('/streaks/:telegramId', async (req: Request, res: Response) => {
   }
 });
 
-// Actualizar racha
+// Actualizar racha (identidad verificada)
 router.post('/streaks/update', async (req: Request, res: Response) => {
   try {
-    const { telegramId } = req.body;
-    
+    const telegramId = getAuthedTelegramId(req);
+
     const result = await monetizationService.updateWinStreak(telegramId);
-    
+
     res.json({
       success: true,
       ...result,
@@ -181,15 +195,25 @@ router.post('/streaks/update', async (req: Request, res: Response) => {
 
 // === ESTADÍSTICAS ===
 
-// Obtener estadísticas de monetización (solo admin)
+// Estadísticas globales de la plataforma.
+// Datos financieros internos: requieren clave de administrador.
+// Nunca deben quedar expuestos al publico.
 router.get('/stats', async (req: Request, res: Response) => {
+  const adminKey = process.env.ADMIN_API_KEY;
+
+  if (!adminKey) {
+    res.status(503).json({ error: 'Estadísticas deshabilitadas: falta ADMIN_API_KEY' });
+    return;
+  }
+
+  if (req.headers['x-admin-key'] !== adminKey) {
+    res.status(401).json({ error: 'No autorizado' });
+    return;
+  }
+
   try {
     const stats = await monetizationService.getMonetizationStats();
-    
-    res.json({
-      success: true,
-      ...stats,
-    });
+    res.json({ success: true, ...stats });
   } catch (error) {
     console.error('Get stats error:', error);
     res.status(500).json({ error: 'Error al obtener estadísticas' });

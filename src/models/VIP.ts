@@ -22,8 +22,7 @@ const vipSchema = new Schema<IVIP>({
   tournamentDiscount: { type: Number, default: 0 },
 }, { timestamps: true });
 
-// Índice para búsquedas rápidas
-vipSchema.index({ telegramId: 1 });
+// telegramId ya es unique por esquema; indexamos solo para consultas por vencimiento
 vipSchema.index({ endDate: 1 });
 
 export const VIP = mongoose.model<IVIP>('VIP', vipSchema);

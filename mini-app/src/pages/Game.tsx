@@ -1,405 +1,388 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { api, ApiError } from '../lib/api';
+import { PageHeader } from './Deposit';
 
-interface GameProps {
+interface Props {
   user: any;
   onBack: () => void;
+  onBalanceChange?: () => void | Promise<any>;
 }
 
-interface Player {
-  id: string;
-  username: string;
-  chips: number;
-  bet: number;
-  folded: boolean;
-  allIn: boolean;
-  isDealer: boolean;
-  isSmallBlind: boolean;
-  isBigBlind: boolean;
-  lastAction?: string;
-  cardCount: number;
-}
+const POLL_MS = 2000;
+const MIN_BUYIN = 10;
 
-interface GameState {
-  gameId: string;
-  phase: string;
-  players: Player[];
-  communityCards: any[];
-  pot: number;
-  currentBet: number;
-  currentPlayerIndex: number;
-  smallBlind: number;
-  bigBlind: number;
-  winners?: { playerId: string; amount: number; hand: any }[];
-  lastAction?: { playerId: string; action: string; amount?: number };
-  myCards: any[];
-  myHand?: any;
-}
+const PHASE_LABEL: Record<string, string> = {
+  waiting: 'Esperando jugadores',
+  preflop: 'Preflop',
+  flop: 'Flop',
+  turn: 'Turn',
+  river: 'River',
+  showdown: 'Showdown',
+  finished: 'Finalizada',
+};
 
-export const Game: React.FC<GameProps> = ({ user, onBack }) => {
-  const [gameState, setGameState] = useState<GameState | null>(null);
+const SUIT_SYMBOL: Record<string, string> = {
+  hearts: '♥',
+  diamonds: '♦',
+  clubs: '♣',
+  spades: '♠',
+};
+
+export function Game({ user, onBack, onBalanceChange }: Props) {
+  const [gameId, setGameId] = useState<string | null>(null);
+  const [state, setState] = useState<any>(null);
+  const [gameIdInput, setGameIdInput] = useState('');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [pollingInterval, setPollingInterval] = useState<ReturnType<typeof setInterval> | null>(null);
+  const [acting, setActing] = useState(false);
+  const [error, setError] = useState('');
 
-  const fetchGameState = useCallback(async (gameId: string) => {
-    try {
-      const response = await fetch(`/api/game/state/${gameId}/${user?.id}`);
-      const data = await response.json();
-      if (data.success) {
-        setGameState(data.state);
-        setError(null);
-      }
-    } catch (err) {
-      console.error('Error fetching game state:', err);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const telegramId = user?.telegramId;
+
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
     }
-  }, [user?.id]);
+  }, []);
+
+  const startPolling = useCallback(
+    (id: string) => {
+      stopPolling();
+      pollRef.current = setInterval(async () => {
+        try {
+          const res = await api.gameState(id, telegramId);
+          if (res.state) setState(res.state);
+        } catch {
+          // La partida pudo expirar; el siguiente ciclo lo reflejara
+        }
+      }, POLL_MS);
+    },
+    [stopPolling, telegramId],
+  );
+
+  useEffect(() => stopPolling, [stopPolling]);
+
+  // Al terminar la partida, el saldo en MongoDB cambio: lo refrescamos
+  const previousPhase = useRef<string | null>(null);
+  useEffect(() => {
+    if (state?.phase === 'finished' && previousPhase.current !== 'finished') {
+      onBalanceChange?.();
+    }
+    previousPhase.current = state?.phase ?? null;
+  }, [state?.phase, onBalanceChange]);
+
+  const enterGame = (id: string) => {
+    setGameId(id);
+    setState(null);
+    setError('');
+    startPolling(id);
+    // Primera carga inmediata
+    api
+      .gameState(id, telegramId)
+      .then(res => setState(res.state))
+      .catch(() => {});
+  };
 
   const createGame = async () => {
     setLoading(true);
-    setError(null);
+    setError('');
     try {
-      const response = await fetch('/api/game/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          telegramId: user?.id,
-          smallBlind: 1,
-          bigBlind: 2,
-        }),
-      });
-
-      const data = await response.json();
-      if (data.success) {
-        setGameState({
-          gameId: data.gameId,
-          phase: 'waiting',
-          players: [],
-          communityCards: [],
-          pot: 0,
-          currentBet: 0,
-          currentPlayerIndex: 0,
-          smallBlind: 1,
-          bigBlind: 2,
-          myCards: [],
-        });
-        const interval = setInterval(() => fetchGameState(data.gameId), 2000);
-        setPollingInterval(interval);
-      } else {
-        setError(data.error || 'Error al crear la mesa');
-      }
+      const res = await api.createGame(1, 2);
+      enterGame(res.gameId);
     } catch (err) {
-      setError('Error al crear la mesa');
+      setError(
+        err instanceof ApiError ? err.message : 'No se pudo crear la mesa.',
+      );
     } finally {
       setLoading(false);
     }
   };
 
-  const joinGame = async (gameId: string) => {
+  const joinGame = async () => {
+    const id = gameIdInput.trim();
+    if (!id) {
+      setError('Introduce el ID de la mesa.');
+      return;
+    }
     setLoading(true);
-    setError(null);
+    setError('');
     try {
-      const response = await fetch('/api/game/join', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          telegramId: user?.id,
-          gameId,
-        }),
-      });
-
-      const data = await response.json();
-      if (data.success) {
-        setGameState({
-          gameId,
-          phase: 'waiting',
-          players: [],
-          communityCards: [],
-          pot: 0,
-          currentBet: 0,
-          currentPlayerIndex: 0,
-          smallBlind: 1,
-          bigBlind: 2,
-          myCards: [],
-        });
-        const interval = setInterval(() => fetchGameState(gameId), 2000);
-        setPollingInterval(interval);
-      } else {
-        setError(data.error || 'Error al unirse');
-      }
+      await api.joinGame(id);
+      enterGame(id);
     } catch (err) {
-      setError('Error al unirse');
+      setError(err instanceof ApiError ? err.message : 'No se pudo unir a la mesa.');
     } finally {
       setLoading(false);
     }
   };
 
-  const performAction = async (action: string, amount?: number) => {
-    if (!gameState) return;
+  const act = async (action: string, amount?: number) => {
+    if (!gameId || acting) return;
+    setActing(true);
     try {
-      const response = await fetch('/api/game/action', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          telegramId: user?.id,
-          gameId: gameState.gameId,
-          action,
-          amount,
-        }),
-      });
-
-      const data = await response.json();
-      if (data.success) {
-        setGameState(data.state);
-      }
+      const res = await api.gameAction(gameId, action, amount);
+      if (res.state) setState(res.state);
     } catch (err) {
-      console.error('Error performing action:', err);
+      setError(err instanceof ApiError ? err.message : 'Acción no válida.');
+    } finally {
+      setActing(false);
     }
   };
 
-  const leaveGame = async () => {
-    if (!gameState) return;
-    try {
-      await fetch('/api/game/leave', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          telegramId: user?.id,
-          gameId: gameState.gameId,
-        }),
-      });
-
-      if (pollingInterval) {
-        clearInterval(pollingInterval);
-        setPollingInterval(null);
+  const leave = async () => {
+    if (gameId) {
+      try {
+        await api.leaveGame(gameId);
+      } catch {
+        // si la mesa ya no existe, seguimos limpiando el estado local
       }
-      setGameState(null);
-    } catch (err) {
-      console.error('Error leaving game:', err);
     }
+    stopPolling();
+    setGameId(null);
+    setState(null);
+    onBalanceChange?.();
   };
 
-  useEffect(() => {
-    return () => {
-      if (pollingInterval) {
-        clearInterval(pollingInterval);
-      }
-    };
-  }, [pollingInterval]);
+  // --- Selector de mesa ---
+  if (!gameId) {
+    const balance = user?.balance?.credits ?? 0;
+    return (
+      <div className="p-4 pb-10 animate-fadeIn">
+        <PageHeader title="Jugar" onBack={onBack} />
 
-  const currentPlayer = gameState?.players[gameState.currentPlayerIndex];
-  const isMyTurn = currentPlayer?.id === user?.id?.toString();
+        <div className="rounded-2xl p-6 mb-5 text-center" style={{ background: '#16213e', border: '1px solid #2a2a4a' }}>
+          <div className="w-16 h-16 rounded-full bg-gradient-to-br from-[#00d26a] to-[#00b894] flex items-center justify-center mx-auto mb-4">
+            <span className="text-3xl">🃏</span>
+          </div>
+          <h2 className="text-xl font-bold text-white mb-1">Texas Hold'em</h2>
+          <p className="text-sm text-[#a0a0b0]">
+            Saldo: <span className="text-[#00d26a] font-semibold">{balance} CUP</span>
+          </p>
+        </div>
 
-  const getSuitSymbol = (suit: string) => {
-    const symbols: Record<string, string> = {
-      hearts: '♥',
-      diamonds: '♦',
-      clubs: '♣',
-      spades: '♠',
-    };
-    return symbols[suit] || suit;
-  };
+        {error && (
+          <div className="bg-[#ff4757]/15 border border-[#ff4757] rounded-xl p-3 mb-4">
+            <p className="text-sm text-[#ff8a94]">{error}</p>
+          </div>
+        )}
+
+        <button
+          onClick={createGame}
+          disabled={loading || balance < MIN_BUYIN}
+          className="w-full btn btn-primary py-3.5 text-base disabled:opacity-50 disabled:cursor-not-allowed mb-3"
+        >
+          {loading ? 'Creando…' : 'Crear mesa nueva'}
+        </button>
+
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={gameIdInput}
+            onChange={e => setGameIdInput(e.target.value)}
+            placeholder="ID de mesa"
+            className="input flex-1 text-sm"
+            aria-label="ID de mesa"
+          />
+          <button
+            onClick={joinGame}
+            disabled={loading || !gameIdInput.trim()}
+            className="btn btn-outline px-5 disabled:opacity-50"
+          >
+            Unirse
+          </button>
+        </div>
+
+        {balance < MIN_BUYIN && (
+          <p className="text-sm text-[#ff8a94] mt-4 text-center">
+            Necesitas al menos {MIN_BUYIN} CUP para jugar.{' '}
+            <button
+              onClick={() => navigateDeposit(onBack)}
+              className="text-[#00d26a] underline"
+            >
+              Depositar
+            </button>
+          </p>
+        )}
+      </div>
+    );
+  }
+
+  // --- Mesa en curso ---
+  const isMyTurn =
+    state && state.players[state.currentPlayerIndex]?.id === String(telegramId);
+  const inProgress = state && state.phase !== 'finished' && state.phase !== 'waiting';
 
   return (
-    <div className="p-4 animate-fadeIn">
-      {/* Header */}
-      <div className="flex items-center mb-4">
-        <button onClick={onBack} className="text-white mr-4 text-xl">←</button>
-        <h1 className="text-xl font-bold text-[#ffd700]">🎮 Mesa de Poker</h1>
+    <div className="p-4 pb-10 animate-fadeIn">
+      <div className="flex items-center justify-between mb-4">
+        <PageHeader title="Mesa" onBack={leave} />
+        <span className="badge badge-warning text-[10px] uppercase mb-5">
+          {PHASE_LABEL[state?.phase] ?? 'Cargando'}
+        </span>
       </div>
 
-      {!gameState ? (
-        <div>
-          {/* Create or Join */}
-          <div className="text-center py-8">
-            <div className="w-24 h-24 rounded-full bg-gradient-to-br from-[#00d26a] to-[#00b894] flex items-center justify-center mx-auto mb-4 shadow-lg">
-              <span className="text-5xl">🃏</span>
-            </div>
-            <h2 className="text-2xl font-bold mb-2">Texas Hold'em</h2>
-            <p className="text-[#a0a0b0] mb-6">
-              Balance: {user?.balance?.credits || 0} CUP
-            </p>
-
-            {error && (
-              <div className="bg-red-500/20 border border-red-500 rounded-xl p-4 mb-4">
-                <p className="text-red-400">{error}</p>
-              </div>
-            )}
-
-            <div className="space-y-3">
-              <button
-                onClick={createGame}
-                disabled={loading || (user?.balance?.credits || 0) < 100}
-                className="w-full btn btn-primary text-lg"
-              >
-                {loading ? 'Creando...' : 'Crear Nueva Mesa'}
-              </button>
-
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  placeholder="ID de mesa"
-                  className="flex-1 input"
-                  id="gameIdInput"
-                />
-                <button
-                  onClick={() => {
-                    const input = document.getElementById('gameIdInput') as HTMLInputElement;
-                    if (input.value) joinGame(input.value);
-                  }}
-                  disabled={loading}
-                  className="btn btn-outline"
-                >
-                  Unirse
-                </button>
-              </div>
-            </div>
-
-            {(user?.balance?.credits || 0) < 100 && (
-              <p className="text-red-400 text-sm mt-4">
-                Necesitas al menos 100 CUP para jugar
-              </p>
-            )}
-          </div>
+      {/* Pote */}
+      <div className="text-center mb-4">
+        <div
+          className="inline-block rounded-2xl px-8 py-3"
+          style={{ background: '#16213e', border: '1px solid #2a2a4a' }}
+        >
+          <p className="text-[#a0a0b0] text-xs uppercase tracking-wide">Pote</p>
+          <p className="text-2xl font-bold text-[#ffd700]">{state?.pot ?? 0} CUP</p>
         </div>
-      ) : (
-        <div>
-          {/* Game Info */}
-          <div className="flex justify-between items-center mb-4">
-            <div>
-              <p className="text-[#a0a0b0] text-xs">Mesa</p>
-              <p className="font-mono text-sm">{gameState.gameId.slice(0, 20)}...</p>
-            </div>
-            <div className="text-right">
-              <p className="text-[#a0a0b0] text-xs">Fase</p>
-              <p className="text-lg font-bold text-[#00d26a] capitalize">{gameState.phase}</p>
-            </div>
-          </div>
+      </div>
 
-          {/* Pot */}
-          <div className="text-center mb-4">
-            <div className="inline-block glass rounded-2xl px-8 py-4">
-              <p className="text-[#a0a0b0] text-sm">Pote</p>
-              <p className="text-3xl font-bold text-[#ffd700]">{gameState.pot} CUP</p>
-            </div>
-          </div>
+      {/* Cartas comunitarias */}
+      <div className="flex justify-center gap-2 mb-5" aria-label="Cartas comunitarias">
+        {state?.communityCards?.length ? (
+          state.communityCards.map((card: any, i: number) => (
+            <PlayingCard key={i} card={card} />
+          ))
+        ) : (
+          <p className="text-sm text-[#a0a0b0] py-4">Esperando cartas comunitarias…</p>
+        )}
+      </div>
 
-          {/* Community Cards */}
-          <div className="flex justify-center gap-2 mb-6">
-            {gameState.communityCards.length > 0 ? (
-              gameState.communityCards.map((card, index) => (
-                <div
-                  key={index}
-                  className={`playing-card ${card.suit === 'hearts' || card.suit === 'diamonds' ? 'red' : 'black'}`}
-                >
-                  <span className="rank">{card.rank}</span>
-                  <span className="suit">{getSuitSymbol(card.suit)}</span>
+      {/* Jugadores */}
+      <div className="space-y-2 mb-5">
+        {state?.players?.map((player: any, index: number) => {
+          const isTurn = index === state.currentPlayerIndex;
+          const folded = player.folded;
+          return (
+            <div
+              key={player.id}
+              className={`rounded-xl p-3 flex items-center justify-between transition-all ${
+                isTurn ? 'neon-gold' : ''
+              } ${folded ? 'opacity-40' : ''}`}
+              style={{
+                background: '#16213e',
+                border: `1px solid ${isTurn ? '#ffd700' : '#2a2a4a'}`,
+              }}
+            >
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-9 h-9 rounded-full bg-gradient-to-br from-[#00d26a] to-[#00b894] flex items-center justify-center text-white text-sm font-bold flex-shrink-0">
+                  {(player.username || '?').charAt(0).toUpperCase()}
                 </div>
-              ))
-            ) : (
-              <div className="text-[#a0a0b0] py-8">Esperando cartas...</div>
-            )}
-          </div>
-
-          {/* Players */}
-          <div className="space-y-2 mb-4">
-            {gameState.players.map((player, index) => (
-              <div
-                key={player.id}
-                className={`card flex justify-between items-center p-3 ${
-                  index === gameState.currentPlayerIndex ? 'border-[#ffd700] neon-gold' : ''
-                } ${player.folded ? 'opacity-50' : ''}`}
-              >
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[#00d26a] to-[#00b894] flex items-center justify-center text-white font-bold">
-                    {player.username.charAt(0).toUpperCase()}
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-white truncate">
+                    {player.username}
+                  </p>
+                  <div className="flex gap-1 mt-0.5">
+                    {player.isDealer && <Tag label="D" tone="gold" />}
+                    {player.isSmallBlind && <Tag label="SB" tone="blue" />}
+                    {player.isBigBlind && <Tag label="BB" tone="red" />}
+                    {player.allIn && <Tag label="ALL IN" tone="red" />}
                   </div>
-                  <div>
-                    <p className="font-semibold">{player.username}</p>
-                    <div className="flex gap-1">
-                      {player.isDealer && <span className="badge badge-warning text-xs">D</span>}
-                      {player.isSmallBlind && <span className="badge badge-success text-xs">SB</span>}
-                      {player.isBigBlind && <span className="badge badge-danger text-xs">BB</span>}
-                    </div>
-                  </div>
-                </div>
-                <div className="text-right">
-                  <p className="text-[#00d26a] font-bold">{player.chips} CUP</p>
-                  {player.bet > 0 && <p className="text-sm text-[#a0a0b0]">Apuesta: {player.bet}</p>}
-                  {player.lastAction && <p className="text-xs text-[#a0a0b0] capitalize">{player.lastAction}</p>}
-                  {player.allIn && <p className="text-xs text-red-400 font-bold">ALL IN</p>}
                 </div>
               </div>
-            ))}
-          </div>
 
-          {/* My Cards */}
-          {gameState.myCards && gameState.myCards.length > 0 && (
-            <div className="flex justify-center gap-3 mb-4">
-              {gameState.myCards.map((card, index) => (
-                <div
-                  key={index}
-                  className={`playing-card ${card.suit === 'hearts' || card.suit === 'diamonds' ? 'red' : 'black'}`}
-                >
-                  <span className="rank">{card.rank}</span>
-                  <span className="suit">{getSuitSymbol(card.suit)}</span>
-                </div>
-              ))}
+              <div className="text-right flex-shrink-0">
+                <p className="text-sm font-bold text-[#00d26a]">
+                  {player.chips} CUP
+                </p>
+                {player.bet > 0 && (
+                  <p className="text-xs text-[#ffd700]">Apuesta {player.bet}</p>
+                )}
+              </div>
             </div>
-          )}
+          );
+        })}
+      </div>
 
-          {/* Action Buttons */}
-          {isMyTurn && gameState.phase !== 'finished' && (
-            <div className="grid grid-cols-4 gap-2 mb-4">
-              <button
-                onClick={() => performAction('fold')}
-                className="btn btn-danger"
-              >
-                Fold
-              </button>
-              <button
-                onClick={() => performAction('check')}
-                className="btn btn-outline"
-              >
-                Check
-              </button>
-              <button
-                onClick={() => performAction('call')}
-                className="btn btn-primary"
-              >
-                Call
-              </button>
-              <button
-                onClick={() => performAction('raise', gameState.currentBet * 2)}
-                className="btn btn-gold"
-              >
-                Raise
-              </button>
-            </div>
-          )}
+      {/* Mi mano */}
+      {state?.myCards?.length > 0 && (
+        <div className="flex justify-center gap-3 mb-5" aria-label="Tus cartas">
+          {state.myCards.map((card: any, i: number) => (
+            <PlayingCard key={i} card={card} large />
+          ))}
+        </div>
+      )}
 
-          {/* Winners */}
-          {gameState.winners && gameState.winners.length > 0 && (
-            <div className="mt-4 text-center">
-              <h2 className="text-xl font-bold text-[#ffd700] mb-3">🏆 Ganadores</h2>
-              {gameState.winners.map((winner, index) => (
-                <div key={index} className="card inline-block m-1">
-                  <p className="font-bold">{winner.playerId}</p>
-                  <p className="text-[#00d26a]">+{winner.amount} CUP</p>
-                  {winner.hand && <p className="text-sm text-[#a0a0b0]">{winner.hand.name}</p>}
-                </div>
-              ))}
-            </div>
-          )}
+      {error && (
+        <div className="bg-[#ff4757]/15 border border-[#ff4757] rounded-xl p-3 mb-4">
+          <p className="text-sm text-[#ff8a94]">{error}</p>
+        </div>
+      )}
 
-          {/* Leave Button */}
+      {/* Acciones */}
+      {isMyTurn && inProgress && (
+        <div className="grid grid-cols-4 gap-2 mb-4">
+          <button onClick={() => act('fold')} disabled={acting} className="btn btn-danger py-3 text-sm">
+            Fold
+          </button>
+          <button onClick={() => act('check')} disabled={acting} className="btn btn-outline py-3 text-sm">
+            Check
+          </button>
+          <button onClick={() => act('call')} disabled={acting} className="btn btn-primary py-3 text-sm">
+            Call
+          </button>
           <button
-            onClick={leaveGame}
-            className="w-full btn btn-danger mt-4"
+            onClick={() => act('raise', (state.currentBet || 2) * 2)}
+            disabled={acting}
+            className="btn btn-gold py-3 text-sm"
           >
-            Salir de la Mesa
+            Raise
           </button>
         </div>
       )}
+
+      {/* Resultado */}
+      {state?.winners?.length > 0 && (
+        <div className="card mb-4 text-center" style={{ borderColor: '#ffd700' }}>
+          <p className="text-xs text-[#a0a0b0] uppercase tracking-wide mb-2">
+            Ganó la mano
+          </p>
+          {state.winners.map((w: any, i: number) => (
+            <div key={i}>
+              <p className="text-white font-semibold">{w.hand?.name}</p>
+              <p className="text-[#00d26a] font-bold">
+                +{w.amount} CUP
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <button onClick={leave} className="w-full btn btn-outline py-3">
+        Salir de la mesa
+      </button>
     </div>
   );
-};
+}
+
+function PlayingCard({ card, large }: { card: any; large?: boolean }) {
+  const isRed = card.suit === 'hearts' || card.suit === 'diamonds';
+  return (
+    <div
+      className={`bg-white rounded-lg flex flex-col items-center justify-center shadow-lg ${
+        large ? 'w-16 h-24' : 'w-11 h-16'
+      }`}
+    >
+      <span className={`${large ? 'text-2xl' : 'text-lg'} font-bold ${isRed ? 'text-[#e74c3c]' : 'text-[#2c3e50]'}`}>
+        {card.rank}
+      </span>
+      <span className={`${large ? 'text-2xl' : 'text-lg'} ${isRed ? 'text-[#e74c3c]' : 'text-[#2c3e50]'}`}>
+        {SUIT_SYMBOL[card.suit]}
+      </span>
+    </div>
+  );
+}
+
+function Tag({ label, tone }: { label: string; tone: 'gold' | 'blue' | 'red' }) {
+  const colors = {
+    gold: 'bg-[#ffd700] text-black',
+    blue: 'bg-[#3498db] text-white',
+    red: 'bg-[#ff4757] text-white',
+  };
+  return (
+    <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${colors[tone]}`}>
+      {label}
+    </span>
+  );
+}
+
+function navigateDeposit(onBack: () => void) {
+  window.history.pushState({}, '', '/deposit');
+  onBack();
+}

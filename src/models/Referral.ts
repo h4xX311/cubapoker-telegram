@@ -18,8 +18,7 @@ const referralSchema = new Schema<IReferral>({
   level: { type: Number, default: 1 },
 }, { timestamps: true });
 
-// Índice para búsquedas rápidas
+// Índices para consultas por referidor (referredId ya es unique por esquema)
 referralSchema.index({ referrerId: 1 });
-referralSchema.index({ referredId: 1 });
 
 export const Referral = mongoose.model<IReferral>('Referral', referralSchema);

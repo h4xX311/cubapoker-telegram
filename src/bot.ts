@@ -8,6 +8,7 @@ import healthRouter from './health';
 import { createGameRoutes } from './game/polling';
 import monetizationRoutes from './routes/monetization.routes';
 import { monetizationService } from './services/monetization.service';
+import { requireTelegramAuth, getAuthedTelegramId } from './middleware/telegramAuth';
 import { User } from './models/User';
 import { Game } from './models/Game';
 import { Transaction } from './models/Transaction';
@@ -79,14 +80,23 @@ La primera plataforma de poker con blockchain y métodos de pagos cubanos.
 • USDT (TRC20)
   `;
 
+  // Las URLs deben coincidir con las rutas que la Mini App resuelve en App.tsx.
+  const app = process.env.MINI_APP_URL || '';
   const keyboard = {
     inline_keyboard: [
-      [{ text: '🎮 Jugar', web_app: { url: `${process.env.MINI_APP_URL}/play` } }],
-      [{ text: '🏆 Torneos', web_app: { url: `${process.env.MINI_APP_URL}/tournaments` } }],
-      [{ text: '👑 VIP', web_app: { url: `${process.env.MINI_APP_URL}/vip` } }],
-      [{ text: '💰 Depositar', web_app: { url: `${process.env.MINI_APP_URL}/deposit` } }],
-      [{ text: '💸 Retirar', web_app: { url: `${process.env.MINI_APP_URL}/withdraw` } }],
-    ]
+      [
+        { text: '🎮 Jugar', web_app: { url: `${app}/game` } },
+        { text: '🏆 Torneos', web_app: { url: `${app}/tournaments` } },
+      ],
+      [
+        { text: '💰 Depositar', web_app: { url: `${app}/deposit` } },
+        { text: '💸 Retirar', web_app: { url: `${app}/withdraw` } },
+      ],
+      [
+        { text: '👑 VIP', web_app: { url: `${app}/vip` } },
+        { text: '🎖️ Logros', web_app: { url: `${app}/achievements` } },
+      ],
+    ],
   };
 
   bot.sendMessage(chatId, welcomeMessage, {
@@ -344,22 +354,64 @@ bot.onText(/\/help/, (msg) => {
   bot.sendMessage(chatId, helpMessage, { parse_mode: 'Markdown' });
 });
 
-// API Routes for Mini App
-app.get('/api/user/:telegramId', async (req, res) => {
+// ==========================================================================
+// API del Mini App
+//
+// Regla de seguridad: NINGUN endpoint de dinero acepta `telegramId` del
+// cliente. La identidad se deriva de la firma de Telegram (initData) y se
+// valida en cada request. Sin esto, cualquiera podria acreditar saldo
+// arbitrariamente con un simple curl.
+// ==========================================================================
+
+// Perfil del usuario autenticado + auto-registro si es su primera visita
+app.get('/api/me', requireTelegramAuth, async (req, res) => {
   try {
-    const user = await User.findOne({ telegramId: parseInt(req.params.telegramId) });
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-    res.json({ user });
-  } catch (error) {
-    res.status(500).json({ error: 'Server error' });
+    const tgUser = (req as any).telegramUser;
+
+    const user = await User.findOneAndUpdate(
+      { telegramId: tgUser.id },
+      {
+        $set: {
+          telegramId: tgUser.id,
+          username: tgUser.username,
+          firstName: tgUser.first_name,
+          lastName: tgUser.last_name,
+        },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    ).select('-password');
+
+    const vipLevel = await monetizationService.getVIPLevel(tgUser.id);
+
+    res.json({
+      user: {
+        id: user._id,
+        telegramId: user.telegramId,
+        username: user.username,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        balance: user.balance,
+        vip: vipLevel,
+      },
+    });
+  } catch (error: any) {
+    console.error('GET /api/me error:', error);
+    res.status(500).json({ error: 'No se pudo cargar el perfil' });
   }
 });
 
-app.post('/api/deposit', async (req, res) => {
+app.post('/api/deposit', requireTelegramAuth, async (req, res) => {
   try {
-    const { telegramId, amount, method } = req.body;
+    const telegramId = getAuthedTelegramId(req);
+    const amount = Number(req.body.amount);
+    const method = req.body.method;
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ error: 'Monto inválido' });
+    }
+    if (!['enzona', 'qvapay', 'usdt'].includes(method)) {
+      return res.status(400).json({ error: 'Método de pago inválido' });
+    }
 
     const result = await monetizationService.processDeposit(
       telegramId,
@@ -370,13 +422,24 @@ app.post('/api/deposit', async (req, res) => {
 
     res.json({ success: true, ...result });
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Server error' });
+    console.error('POST /api/deposit error:', error);
+    res.status(500).json({ error: error.message || 'Error al procesar el depósito' });
   }
 });
 
-app.post('/api/withdraw', async (req, res) => {
+app.post('/api/withdraw', requireTelegramAuth, async (req, res) => {
   try {
-    const { telegramId, amount, method, address } = req.body;
+    const telegramId = getAuthedTelegramId(req);
+    const amount = Number(req.body.amount);
+    const method = req.body.method;
+    const address = req.body.address;
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ error: 'Monto inválido' });
+    }
+    if (!['enzona', 'qvapay', 'usdt'].includes(method)) {
+      return res.status(400).json({ error: 'Método de retiro inválido' });
+    }
 
     const result = await monetizationService.processWithdrawal(
       telegramId,
@@ -387,11 +450,26 @@ app.post('/api/withdraw', async (req, res) => {
 
     res.json({ success: true, ...result });
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Server error' });
+    console.error('POST /api/withdraw error:', error);
+    res.status(400).json({ error: error.message || 'Error al procesar el retiro' });
   }
 });
 
-// Serve Mini App
+// Historial de transacciones del usuario autenticado
+app.get('/api/transactions', requireTelegramAuth, async (req, res) => {
+  try {
+    const telegramId = getAuthedTelegramId(req);
+    const transactions = await Transaction.find({ telegramId })
+      .sort({ createdAt: -1 })
+      .limit(50);
+    res.json({ transactions });
+  } catch (error) {
+    console.error('GET /api/transactions error:', error);
+    res.status(500).json({ error: 'Error al obtener el historial' });
+  }
+});
+
+// Serve Mini App (SPA fallback: todas las rutas profundidad -> index.html)
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../mini-app/dist/index.html'));
 });
@@ -400,5 +478,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 CubaPoker Telegram Bot running on port ${PORT}`);
   console.log(`📱 Mini App URL: ${process.env.MINI_APP_URL}`);
+  console.log(`🔒 Autenticación de Mini App: activa`);
   console.log(`💰 Monetization system initialized`);
 });

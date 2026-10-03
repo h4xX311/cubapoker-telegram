@@ -1,232 +1,164 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
+import { api } from '../lib/api';
+import { PageHeader, SectionLabel } from './Deposit';
 
-interface AchievementsProps {
-  user: any;
+interface Props {
   onBack: () => void;
 }
 
-interface Achievement {
-  _id: string;
-  achievementId: string;
-  progress: number;
-  maxProgress: number;
-  reward: number;
-  claimed: boolean;
-  unlockedAt: string;
-}
+const ACHIEVEMENT_META: Record<string, { name: string; icon: string }> = {
+  first_win: { name: 'Primera victoria', icon: '🎯' },
+  win_streak_3: { name: 'Racha de 3', icon: '🔥' },
+  win_streak_5: { name: 'Racha de 5', icon: '🔥' },
+  win_streak_10: { name: 'Racha de 10', icon: '🔥' },
+  royal_flush: { name: 'Escalera real', icon: '👑' },
+  four_of_a_kind: { name: 'Póker', icon: '🎴' },
+  full_house: { name: 'Full house', icon: '🏠' },
+  hands_played_10: { name: '10 manos', icon: '🃏' },
+  hands_played_50: { name: '50 manos', icon: '🃏' },
+  hands_played_100: { name: '100 manos', icon: '🃏' },
+  hands_played_500: { name: '500 manos', icon: '🃏' },
+  tournament_win: { name: 'Campeón de torneo', icon: '🏆' },
+  tournament_finalist: { name: 'Finalista', icon: '🥈' },
+  referral_1: { name: '1 referido', icon: '👥' },
+  referral_5: { name: '5 referidos', icon: '👥' },
+  referral_10: { name: '10 referidos', icon: '👥' },
+  first_deposit: { name: 'Primer depósito', icon: '💰' },
+  deposit_1000: { name: 'Depósito 1000', icon: '💰' },
+  deposit_10000: { name: 'Depósito 10000', icon: '💰' },
+};
 
-interface Streak {
-  current: number;
-  best: number;
-}
+const STREAK_MILESTONES = [
+  { days: 3, reward: 50 },
+  { days: 7, reward: 200 },
+  { days: 14, reward: 500 },
+  { days: 30, reward: 1500 },
+];
 
-export const Achievements: React.FC<AchievementsProps> = ({ user, onBack }) => {
-  const [achievements, setAchievements] = useState<Achievement[]>([]);
-  const [streak, setStreak] = useState<Streak>({ current: 0, best: 0 });
+export function Achievements({ onBack }: Props) {
+  const [achievements, setAchievements] = useState<any[]>([]);
+  const [streak, setStreak] = useState({ current: 0, best: 0 });
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetchAchievements();
+    (async () => {
+      try {
+        const [achRes, streakRes] = await Promise.all([api.achievements(), api.streaks()]);
+        setAchievements(achRes.achievements || []);
+        setStreak({ current: streakRes.current ?? 0, best: streakRes.best ?? 0 });
+      } catch {
+        setAchievements([]);
+      } finally {
+        setLoading(false);
+      }
+    })();
   }, []);
 
-  const fetchAchievements = async () => {
-    try {
-      const [achievementsRes, streakRes] = await Promise.all([
-        fetch(`/api/monetization/achievements/${user?.id}`),
-        fetch(`/api/monetization/streaks/${user?.id}`),
-      ]);
-
-      const achievementsData = await achievementsRes.json();
-      const streakData = await streakRes.json();
-
-      if (achievementsData.success) {
-        setAchievements(achievementsData.achievements);
-      }
-      if (streakData.success) {
-        setStreak(streakData);
-      }
-    } catch (error) {
-      console.error('Error fetching achievements:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const getAchievementName = (id: string) => {
-    const names: Record<string, string> = {
-      first_win: 'Primera Victoria',
-      win_streak_3: 'Racha de 3',
-      win_streak_5: 'Racha de 5',
-      win_streak_10: 'Racha de 10',
-      royal_flush: 'Escalera Real',
-      four_of_a_kind: 'Póker',
-      full_house: 'Full House',
-      hands_played_10: '10 Manos',
-      hands_played_50: '50 Manos',
-      hands_played_100: '100 Manos',
-      hands_played_500: '500 Manos',
-      tournament_win: 'Campeón',
-      tournament_finalist: 'Finalista',
-      referral_1: 'Reclutador',
-      referral_5: 'Embajador',
-      referral_10: 'Leyenda',
-      first_deposit: 'Primer Depósito',
-      deposit_1000: 'Depósito 1000',
-      deposit_10000: 'Depósito 10000',
-    };
-    return names[id] || id;
-  };
-
-  const getAchievementIcon = (id: string) => {
-    if (id.includes('win')) return '🏆';
-    if (id.includes('streak')) return '🔥';
-    if (id.includes('flush')) return '👑';
-    if (id.includes('poker')) return '🎴';
-    if (id.includes('house')) return '🏠';
-    if (id.includes('hands')) return '🃏';
-    if (id.includes('tournament')) return '🏆';
-    if (id.includes('referral')) return '👥';
-    if (id.includes('deposit')) return '💰';
-    return '🎖️';
-  };
-
-  const getStreakReward = (days: number) => {
-    if (days >= 30) return 1500;
-    if (days >= 14) return 500;
-    if (days >= 7) return 200;
-    if (days >= 3) return 50;
-    return 0;
-  };
-
-  if (loading) {
-    return (
-      <div className="p-4">
-        <div className="flex items-center mb-6">
-          <button onClick={onBack} className="text-white mr-4 text-xl">←</button>
-          <h1 className="text-xl font-bold text-[#ffd700]">🏆 Logros</h1>
-        </div>
-        <div className="text-center py-12">
-          <div className="spinner mx-auto mb-4"></div>
-          <p className="text-[#a0a0b0]">Cargando...</p>
-        </div>
-      </div>
-    );
-  }
+  const totalRewards = achievements.reduce((sum, a) => sum + (a.reward ?? 0), 0);
 
   return (
-    <div className="p-4 animate-fadeIn">
-      {/* Header */}
-      <div className="flex items-center mb-6">
-        <button onClick={onBack} className="text-white mr-4 text-xl">←</button>
-        <h1 className="text-xl font-bold text-[#ffd700]">🏆 Logros</h1>
-      </div>
+    <div className="p-4 pb-10 animate-fadeIn">
+      <PageHeader title="Logros" onBack={onBack} />
 
-      {/* Streak Card */}
-      <div className="glass rounded-2xl p-5 mb-6">
-        <div className="flex items-center justify-between mb-4">
+      {/* Racha */}
+      <div
+        className="rounded-2xl p-4 mb-5"
+        style={{
+          background: 'linear-gradient(135deg, #3b2d0d 0%, #0f3460 100%)',
+          border: '1px solid rgba(255,215,0,0.25)',
+        }}
+      >
+        <div className="flex items-start justify-between mb-4">
           <div>
-            <p className="text-[#a0a0b0] text-sm">Tu racha actual</p>
-            <p className="text-4xl font-bold text-[#ffd700]">{streak.current} días</p>
+            <p className="text-xs text-[#a0a0b0] uppercase tracking-wide">Racha actual</p>
+            <p className="text-3xl font-bold text-[#ffd700] leading-tight">
+              {streak.current}
+              <span className="text-base font-normal text-[#a0a0b0] ml-1.5">días</span>
+            </p>
           </div>
           <div className="text-right">
-            <p className="text-[#a0a0b0] text-sm">Mejor racha</p>
-            <p className="text-2xl font-bold text-white">{streak.best} días</p>
+            <p className="text-xs text-[#a0a0b0] uppercase tracking-wide">Mejor</p>
+            <p className="text-xl font-bold text-white">{streak.best}</p>
           </div>
         </div>
 
-        {/* Streak Rewards */}
         <div className="grid grid-cols-4 gap-2">
-          {[3, 7, 14, 30].map((days) => (
-            <div
-              key={days}
-              className={`text-center p-2 rounded-xl ${
-                streak.current >= days
-                  ? 'bg-[#ffd700]/20 border border-[#ffd700]'
-                  : 'bg-[#0f0f1a]'
-              }`}
-            >
-              <p className="text-xs text-[#a0a0b0]">{days} días</p>
-              <p className={`text-sm font-bold ${streak.current >= days ? 'text-[#ffd700]' : 'text-[#a0a0b0]'}`}>
-                {getStreakReward(days)} CUP
-              </p>
-            </div>
-          ))}
+          {STREAK_MILESTONES.map(m => {
+            const reached = streak.current >= m.days;
+            return (
+              <div
+                key={m.days}
+                className={`text-center p-2 rounded-xl ${
+                  reached ? 'bg-[#ffd700]/20' : 'bg-black/30'
+                }`}
+              >
+                <p className="text-[10px] text-[#a0a0b0]">{m.days}d</p>
+                <p className={`text-xs font-bold ${reached ? 'text-[#ffd700]' : 'text-[#a0a0b0]'}`}>
+                  {m.reward}
+                </p>
+              </div>
+            );
+          })}
         </div>
       </div>
 
-      {/* Stats */}
-      <div className="grid grid-cols-2 gap-3 mb-6">
+      {/* Métricas */}
+      <div className="grid grid-cols-2 gap-3 mb-5">
         <div className="card text-center p-4">
-          <p className="text-3xl font-bold text-[#00d26a]">{achievements.length}</p>
-          <p className="text-xs text-[#a0a0b0]">Logros desbloqueados</p>
+          <p className="text-2xl font-bold text-[#00d26a]">{achievements.length}</p>
+          <p className="text-[10px] text-[#a0a0b0]">Desbloqueados</p>
         </div>
         <div className="card text-center p-4">
-          <p className="text-3xl font-bold text-[#ffd700]">
-            {achievements.reduce((sum, a) => sum + a.reward, 0)}
+          <p className="text-2xl font-bold text-[#ffd700]">{totalRewards}</p>
+          <p className="text-[10px] text-[#a0a0b0]">CUP ganados</p>
+        </div>
+      </div>
+
+      <SectionLabel>Tu colección</SectionLabel>
+
+      {loading ? (
+        <div className="text-center py-8">
+          <div className="spinner mx-auto" />
+        </div>
+      ) : achievements.length === 0 ? (
+        <div className="card text-center py-10">
+          <div className="text-3xl mb-2">🎖️</div>
+          <p className="text-sm text-white font-semibold mb-1">Sin logros aún</p>
+          <p className="text-xs text-[#a0a0b0]">
+            Juega, gana manos y mantén tu racha para desbloquearlos.
           </p>
-          <p className="text-xs text-[#a0a0b0]">CUP ganados</p>
         </div>
-      </div>
-
-      {/* Achievements List */}
-      <div className="space-y-3">
-        {achievements.length === 0 ? (
-          <div className="card text-center py-8">
-            <div className="text-4xl mb-3">🎖️</div>
-            <p className="text-[#a0a0b0]">Aún no has desbloqueado logros</p>
-            <p className="text-sm text-[#6c6c80] mt-1">¡Juega para ganar recompensas!</p>
-          </div>
-        ) : (
-          achievements.map((achievement) => (
-            <div
-              key={achievement._id}
-              className={`card flex items-center gap-4 ${
-                achievement.claimed ? 'opacity-60' : ''
-              }`}
-            >
-              <div className="w-14 h-14 rounded-full bg-gradient-to-br from-[#ffd700] to-[#ffb700] flex items-center justify-center text-2xl">
-                {getAchievementIcon(achievement.achievementId)}
-              </div>
-              <div className="flex-1">
-                <h3 className="font-bold text-white">
-                  {getAchievementName(achievement.achievementId)}
-                </h3>
-                <div className="flex items-center gap-2 mt-1">
-                  <div className="flex-1 h-2 bg-[#0f0f1a] rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-gradient-to-r from-[#00d26a] to-[#00b894] rounded-full"
-                      style={{
-                        width: `${(achievement.progress / achievement.maxProgress) * 100}%`,
-                      }}
-                    />
-                  </div>
-                  <span className="text-xs text-[#a0a0b0]">
-                    {achievement.progress}/{achievement.maxProgress}
-                  </span>
+      ) : (
+        <div className="space-y-2">
+          {achievements.map((a, i) => {
+            const meta = ACHIEVEMENT_META[a.achievementId] ?? {
+              name: a.achievementId,
+              icon: '🎖️',
+            };
+            const progress = Math.min(100, (a.progress / a.maxProgress) * 100);
+            return (
+              <div
+                key={a._id ?? i}
+                className="card flex items-center gap-3 p-3 animate-slideUp"
+                style={{ animationDelay: `${i * 30}ms` }}
+              >
+                <div className="w-11 h-11 rounded-full bg-gradient-to-br from-[#ffd700] to-[#ffb700] flex items-center justify-center text-xl flex-shrink-0">
+                  {meta.icon}
                 </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-semibold text-white truncate">{meta.name}</p>
+                  <div className="progress-bar mt-1.5">
+                    <div className="progress-bar-fill" style={{ width: `${progress}%` }} />
+                  </div>
+                </div>
+                <p className="text-sm font-bold text-[#ffd700] flex-shrink-0">
+                  +{a.reward}
+                </p>
               </div>
-              <div className="text-right">
-                <p className="text-[#ffd700] font-bold">+{achievement.reward} CUP</p>
-                {achievement.claimed && (
-                  <span className="badge badge-success text-xs">Reclamado</span>
-                )}
-              </div>
-            </div>
-          ))
-        )}
-      </div>
-
-      {/* Info */}
-      <div className="mt-6 card">
-        <h3 className="text-[#a0a0b0] text-sm mb-3">¿Cómo ganar logros?</h3>
-        <ul className="text-sm text-[#a0a0b0] space-y-2">
-          <li>• Juega manos y gana partidas</li>
-          <li>• Mantén rachas de victorias</li>
-          <li>• Participa en torneos</li>
-          <li>• Invita amigos a la plataforma</li>
-          <li>• Deposita fondos regularmente</li>
-        </ul>
-      </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
-};
+}

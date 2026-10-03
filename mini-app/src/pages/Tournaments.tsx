@@ -1,200 +1,174 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
+import { api, ApiError } from '../lib/api';
+import { PageHeader, SectionLabel } from './Deposit';
 
-interface TournamentsProps {
+interface Props {
   user: any;
   onBack: () => void;
+  onBalanceChange?: () => void | Promise<any>;
 }
 
-interface Tournament {
-  id: string;
-  name: string;
-  type: string;
-  buyIn: number;
-  maxPlayers: number;
-  minPlayers: number;
-  playerCount: number;
-  status: string;
-  prizePool: number;
-}
+const TYPE_META: Record<string, { icon: string; label: string }> = {
+  sit_and_go: { icon: '⚡', label: 'Sit & Go' },
+  scheduled: { icon: '📅', label: 'Programado' },
+  freeroll: { icon: '🎁', label: 'Gratis' },
+};
 
-export const Tournaments: React.FC<TournamentsProps> = ({ user, onBack }) => {
-  const [tournaments, setTournaments] = useState<Tournament[]>([]);
+export function Tournaments({ user, onBack, onBalanceChange }: Props) {
+  const [tournaments, setTournaments] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [registering, setRegistering] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
-  useEffect(() => {
-    fetchTournaments();
-  }, []);
-
-  const fetchTournaments = async () => {
+  const load = async () => {
     try {
-      const response = await fetch('/api/game/tournaments');
-      const data = await response.json();
-      if (data.success) {
-        setTournaments(data.tournaments || []);
-      }
-    } catch (error) {
-      console.error('Error fetching tournaments:', error);
+      const res = await api.tournaments();
+      setTournaments(res.tournaments || []);
+    } catch {
+      setTournaments([]);
     } finally {
       setLoading(false);
     }
   };
 
-  const registerTournament = async (tournamentId: string) => {
-    setRegistering(tournamentId);
+  useEffect(() => {
+    load();
+  }, []);
+
+  const register = async (id: string) => {
+    setBusyId(id);
+    setNotice(null);
     try {
-      const response = await fetch(`/api/game/tournaments/${tournamentId}/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ telegramId: user?.id }),
+      await api.registerTournament(id);
+      setNotice({ type: 'ok', text: 'Te registraste. Te avisaremos cuando empiece.' });
+      await onBalanceChange?.();
+      await load();
+    } catch (err) {
+      setNotice({
+        type: 'err',
+        text: err instanceof ApiError ? err.message : 'No se pudo completar el registro.',
       });
-
-      const data = await response.json();
-      if (data.success) {
-        alert('¡Registrado exitosamente!');
-        fetchTournaments();
-      } else {
-        alert(data.error || 'Error al registrarse');
-      }
-    } catch (error) {
-      console.error('Error registering:', error);
     } finally {
-      setRegistering(null);
-    }
-  };
-
-  const getTypeIcon = (type: string) => {
-    switch (type) {
-      case 'sit_and_go': return '⚡';
-      case 'scheduled': return '📅';
-      case 'freeroll': return '🎁';
-      default: return '🏆';
-    }
-  };
-
-  const getTypeLabel = (type: string) => {
-    switch (type) {
-      case 'sit_and_go': return 'Sit & Go';
-      case 'scheduled': return 'Programado';
-      case 'freeroll': return 'Gratis';
-      default: return 'Torneo';
-    }
-  };
-
-  const getStatusBadge = (status: string) => {
-    switch (status) {
-      case 'registering':
-        return <span className="badge badge-success">Inscripciones</span>;
-      case 'running':
-        return <span className="badge badge-warning">En curso</span>;
-      case 'completed':
-        return <span className="badge badge-danger">Finalizado</span>;
-      default:
-        return <span className="badge">{status}</span>;
+      setBusyId(null);
     }
   };
 
   return (
-    <div className="p-4 animate-fadeIn">
-      {/* Header */}
-      <div className="flex items-center mb-6">
-        <button onClick={onBack} className="text-white mr-4 text-xl">
-          ←
-        </button>
-        <h1 className="text-xl font-bold text-[#ffd700]">🏆 Torneos</h1>
-      </div>
+    <div className="p-4 pb-10 animate-fadeIn">
+      <PageHeader title="Torneos" onBack={onBack} />
 
       {loading ? (
         <div className="text-center py-12">
-          <div className="spinner mx-auto mb-4"></div>
-          <p className="text-[#a0a0b0]">Cargando torneos...</p>
+          <div className="spinner mx-auto mb-3" />
+          <p className="text-sm text-[#a0a0b0]">Cargando torneos…</p>
         </div>
       ) : tournaments.length === 0 ? (
-        <div className="card text-center py-12">
-          <div className="text-6xl mb-4">🏆</div>
-          <h2 className="text-xl font-bold mb-2">No hay torneos activos</h2>
-          <p className="text-[#a0a0b0]">Vuelve más tarde para nuevos torneos</p>
+        <div className="card text-center py-10">
+          <div className="text-4xl mb-3">🏆</div>
+          <h2 className="font-semibold text-white mb-1">No hay torneos abiertos</h2>
+          <p className="text-sm text-[#a0a0b0]">
+            Vuelve pronto. Publicamos nuevos torneos cada día.
+          </p>
         </div>
       ) : (
-        <div className="space-y-4">
-          {tournaments.map((tournament) => (
-            <div key={tournament.id} className="card animate-slideUp">
-              {/* Header */}
-              <div className="flex justify-between items-start mb-4">
-                <div className="flex items-center gap-3">
-                  <div className="w-12 h-12 rounded-full bg-gradient-to-br from-[#ffd700] to-[#ffb700] flex items-center justify-center">
-                    <span className="text-2xl">{getTypeIcon(tournament.type)}</span>
-                  </div>
-                  <div>
-                    <h3 className="font-bold text-white">{tournament.name}</h3>
-                    <p className="text-sm text-[#a0a0b0]">{getTypeLabel(tournament.type)}</p>
-                  </div>
-                </div>
-                {getStatusBadge(tournament.status)}
-              </div>
-
-              {/* Info */}
-              <div className="grid grid-cols-3 gap-4 mb-4">
-                <div className="text-center">
-                  <p className="text-[#a0a0b0] text-xs">Buy-in</p>
-                  <p className="font-bold text-white">
-                    {tournament.buyIn === 0 ? 'Gratis' : `${tournament.buyIn} CUP`}
-                  </p>
-                </div>
-                <div className="text-center">
-                  <p className="text-[#a0a0b0] text-xs">Jugadores</p>
-                  <p className="font-bold text-white">
-                    {tournament.playerCount}/{tournament.maxPlayers}
-                  </p>
-                </div>
-                <div className="text-center">
-                  <p className="text-[#a0a0b0] text-xs">Premio</p>
-                  <p className="font-bold text-[#ffd700]">
-                    {tournament.prizePool} CUP
-                  </p>
-                </div>
-              </div>
-
-              {/* Progress Bar */}
-              <div className="mb-4">
-                <div className="progress-bar">
-                  <div
-                    className="progress-bar-fill"
-                    style={{ width: `${(tournament.playerCount / tournament.maxPlayers) * 100}%` }}
-                  ></div>
-                </div>
-              </div>
-
-              {/* Register Button */}
-              {tournament.status === 'registering' && (
-                <button
-                  onClick={() => registerTournament(tournament.id)}
-                  disabled={registering === tournament.id || (user?.balance?.credits || 0) < tournament.buyIn}
-                  className="w-full btn btn-primary"
-                >
-                  {registering === tournament.id ? 'Registrando...' : 'Registrarse'}
-                </button>
-              )}
-
-              {tournament.status === 'running' && (
-                <button className="w-full btn btn-gold" disabled>
-                  Torneo en curso
-                </button>
-              )}
+        <>
+          {notice && (
+            <div
+              className={`rounded-xl p-3 mb-4 border text-sm ${
+                notice.type === 'ok'
+                  ? 'bg-[#00d26a]/10 border-[#00d26a] text-[#00d26a]'
+                  : 'bg-[#ff4757]/10 border-[#ff4757] text-[#ff8a94]'
+              }`}
+            >
+              {notice.text}
             </div>
-          ))}
-        </div>
+          )}
+
+          <div className="space-y-3">
+            {tournaments.map((t, i) => {
+              const meta = TYPE_META[t.type] ?? { icon: '🏆', label: 'Torneo' };
+              const full = t.playerCount >= t.maxPlayers;
+              const running = t.status === 'running';
+              const isFree = t.buyIn === 0;
+              const canAfford = isFree || (user?.balance?.credits ?? 0) >= t.buyIn;
+              const progress = Math.min(100, (t.playerCount / t.maxPlayers) * 100);
+
+              return (
+                <article
+                  key={t.id}
+                  className="card animate-slideUp"
+                  style={{ animationDelay: `${i * 50}ms` }}
+                >
+                  <header className="flex items-start justify-between mb-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <span className="text-2xl">{meta.icon}</span>
+                      <div className="min-w-0">
+                        <h3 className="font-semibold text-white truncate">{t.name}</h3>
+                        <p className="text-xs text-[#a0a0b0]">{meta.label}</p>
+                      </div>
+                    </div>
+                    <span
+                      className={`badge text-[10px] ${
+                        running ? 'badge-warning' : full ? 'badge-danger' : 'badge-success'
+                      }`}
+                    >
+                      {running ? 'En curso' : full ? 'Llena' : 'Abierto'}
+                    </span>
+                  </header>
+
+                  <div className="grid grid-cols-3 gap-2 mb-3 text-center">
+                    <Stat label="Buy-in" value={isFree ? 'Gratis' : `${t.buyIn}`} unit={isFree ? '' : 'CUP'} />
+                    <Stat label="Jugadores" value={`${t.playerCount}/${t.maxPlayers}`} />
+                    <Stat label="Premio" value={`${t.prizePool ?? 0}`} unit="CUP" gold />
+                  </div>
+
+                  <div className="progress-bar mb-3">
+                    <div className="progress-bar-fill" style={{ width: `${progress}%` }} />
+                  </div>
+
+                  {!running && !full && (
+                    <button
+                      onClick={() => register(t.id)}
+                      disabled={busyId === t.id || !canAfford}
+                      className="w-full btn btn-primary py-2.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {busyId === t.id
+                        ? 'Registrando…'
+                        : !canAfford
+                        ? 'Saldo insuficiente'
+                        : isFree
+                        ? 'Participar gratis'
+                        : `Inscribirse · ${t.buyIn} CUP`}
+                    </button>
+                  )}
+                </article>
+              );
+            })}
+          </div>
+        </>
       )}
 
-      {/* Info */}
       <div className="mt-6 card">
-        <h3 className="text-[#a0a0b0] text-sm mb-3">Tipos de Torneos</h3>
-        <div className="space-y-2 text-sm text-[#a0a0b0]">
-          <p>⚡ <strong>Sit & Go:</strong> Comienza cuando hay suficientes jugadores</p>
-          <p>📅 <strong>Programado:</strong> Horario fijo, premios garantizados</p>
-          <p>🎁 <strong>Freeroll:</strong> Gratis, todos pueden participar</p>
-        </div>
+        <SectionLabel>Cómo funciona</SectionLabel>
+        <ul className="text-xs text-[#a0a0b0] space-y-1.5 leading-relaxed">
+          <li>• <span className="text-white">Sit & Go</span>: empieza cuando se llena la mesa.</li>
+          <li>• <span className="text-white">Programado</span>: fecha y hora fijas, premio garantizado.</li>
+          <li>• <span className="text-white">Freeroll</span>: sin costo, solo para clasificar.</li>
+          <li>• El reparto sigue la estructura estándar 50 / 30 / 20.</li>
+        </ul>
       </div>
     </div>
   );
-};
+}
+
+function Stat({ label, value, unit, gold }: { label: string; value: string; unit?: string; gold?: boolean }) {
+  return (
+    <div>
+      <p className="text-[10px] text-[#a0a0b0] uppercase tracking-wide">{label}</p>
+      <p className={`text-sm font-bold ${gold ? 'text-[#ffd700]' : 'text-white'}`}>
+        {value}
+        {unit && <span className="text-[10px] text-[#a0a0b0] ml-0.5">{unit}</span>}
+      </p>
+    </div>
+  );
+}

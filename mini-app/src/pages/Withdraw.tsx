@@ -1,158 +1,169 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
+import { api, ApiError } from '../lib/api';
+import { PageHeader, SectionLabel } from './Deposit';
 
-interface WithdrawProps {
+interface Props {
   user: any;
   onBack: () => void;
+  onBalanceChange?: () => void | Promise<any>;
 }
 
-export const Withdraw: React.FC<WithdrawProps> = ({ user, onBack }) => {
+type Method = 'enzona' | 'qvapay' | 'usdt';
+
+const METHODS: { id: Method; flag: string; name: string; rate: string }[] = [
+  { id: 'enzona', flag: '🇨🇺', name: 'EnZona', rate: '3% comisión' },
+  { id: 'qvapay', flag: '💳', name: 'QvaPay', rate: '3% comisión' },
+  { id: 'usdt', flag: '₮', name: 'USDT', rate: '1% comisión' },
+];
+
+const MINIMUMS: Record<Method, number> = { enzona: 1000, qvapay: 1000, usdt: 10 };
+
+const TRON_ADDRESS = /^T[1-9A-HJ-NP-Za-km-z]{33}$/;
+
+export function Withdraw({ user, onBack, onBalanceChange }: Props) {
+  const [method, setMethod] = useState<Method>('enzona');
   const [amount, setAmount] = useState('');
-  const [method, setMethod] = useState<'enzona' | 'qvapay' | 'usdt'>('enzona');
   const [address, setAddress] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [success, setSuccess] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
 
-  const handleWithdraw = async () => {
-    setLoading(true);
+  const balance = user?.balance?.credits ?? 0;
+  const numericAmount = Number(amount) || 0;
+  const minimum = MINIMUMS[method];
+
+  const invalidAddress = method === 'usdt' && address.length > 0 && !TRON_ADDRESS.test(address);
+
+  const getError = (): string => {
+    if (!numericAmount) return '';
+    if (numericAmount < minimum) return `El mínimo es ${minimum} CUP.`;
+    if (numericAmount > balance) return 'No tienes saldo suficiente.';
+    if (method === 'usdt' && !address) return 'Introduce tu dirección USDT.';
+    if (invalidAddress) return 'Esa dirección TRC20 no parece válida.';
+    return '';
+  };
+
+  const validationError = getError();
+
+  const submit = async () => {
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+
+    setError('');
+    setSubmitting(true);
     try {
-      const response = await fetch('/api/withdraw', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          telegramId: user?.id,
-          amount: parseFloat(amount),
-          method,
-          address: method === 'usdt' ? address : undefined,
-        }),
-      });
-
-      const data = await response.json();
-      if (data.success) {
-        setSuccess(true);
-      }
-    } catch (error) {
-      console.error('Withdraw error:', error);
-    } finally {
-      setLoading(false);
+      await api.withdraw(numericAmount, method, method === 'usdt' ? address : undefined);
+      await onBalanceChange?.();
+      window.location.reload();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'No se pudo procesar el retiro.');
+      setSubmitting(false);
     }
   };
 
-  if (success) {
-    return (
-      <div className="p-4 text-center animate-fadeIn">
-        <div className="w-20 h-20 rounded-full bg-gradient-to-br from-[#00d26a] to-[#00b894] flex items-center justify-center mx-auto mb-4">
-          <span className="text-4xl">✅</span>
-        </div>
-        <h2 className="text-2xl font-bold text-[#00d26a] mb-2">¡Retiro Exitoso!</h2>
-        <p className="text-[#a0a0b0] mb-6">Tu retiro ha sido procesado</p>
-        <button onClick={onBack} className="w-full btn btn-primary">
-          Volver al Inicio
-        </button>
-      </div>
-    );
-  }
-
   return (
-    <div className="p-4 animate-fadeIn">
-      {/* Header */}
-      <div className="flex items-center mb-6">
-        <button onClick={onBack} className="text-white mr-4 text-xl">←</button>
-        <h1 className="text-xl font-bold text-[#ffd700]">💸 Retirar</h1>
-      </div>
+    <div className="p-4 pb-10 animate-fadeIn">
+      <PageHeader title="Retirar" onBack={onBack} />
 
-      {/* Balance */}
-      <div className="glass rounded-2xl p-5 mb-6">
-        <h3 className="text-[#a0a0b0] text-sm mb-2">Balance Disponible</h3>
-        <p className="text-3xl font-bold text-[#00d26a]">
-          {user?.balance?.credits || 0} CUP
+      {/* Saldo */}
+      <div className="rounded-2xl p-4 mb-5" style={{ background: '#16213e', border: '1px solid #2a2a4a' }}>
+        <p className="text-[#a0a0b0] text-xs uppercase tracking-wide mb-1">
+          Disponible para retirar
         </p>
+        <p className="text-3xl font-bold text-[#00d26a]">{balance} CUP</p>
       </div>
 
-      {/* Payment Method */}
-      <div className="mb-6">
-        <h3 className="text-[#a0a0b0] text-sm mb-3">Método de Retiro</h3>
-        <div className="grid grid-cols-3 gap-2">
+      {/* Método */}
+      <SectionLabel>Método de retiro</SectionLabel>
+      <div className="grid grid-cols-3 gap-2 mb-5">
+        {METHODS.map(m => (
           <button
-            onClick={() => setMethod('enzona')}
-            className={`card flex flex-col items-center p-4 transition-all ${
-              method === 'enzona' ? 'border-[#00d26a] bg-[#00d26a]/10' : ''
+            key={m.id}
+            onClick={() => {
+              setMethod(m.id);
+              setError('');
+            }}
+            aria-pressed={method === m.id}
+            className={`card p-3 flex flex-col items-center gap-1 transition-all ${
+              method === m.id
+                ? 'border-[#00d26a] bg-[#00d26a]/10'
+                : 'hover:border-[#2a2a4a]'
             }`}
           >
-            <span className="text-2xl mb-2">🇨🇺</span>
-            <span className="text-sm font-semibold">EnZona</span>
+            <span className="text-xl">{m.flag}</span>
+            <span className="text-xs font-semibold text-white">{m.name}</span>
+            <span className="text-[10px] text-[#a0a0b0]">{m.rate}</span>
           </button>
-          <button
-            onClick={() => setMethod('qvapay')}
-            className={`card flex flex-col items-center p-4 transition-all ${
-              method === 'qvapay' ? 'border-[#00d26a] bg-[#00d26a]/10' : ''
-            }`}
-          >
-            <span className="text-2xl mb-2">💳</span>
-            <span className="text-sm font-semibold">QvaPay</span>
-          </button>
-          <button
-            onClick={() => setMethod('usdt')}
-            className={`card flex flex-col items-center p-4 transition-all ${
-              method === 'usdt' ? 'border-[#00d26a] bg-[#00d26a]/10' : ''
-            }`}
-          >
-            <span className="text-2xl mb-2">₮</span>
-            <span className="text-sm font-semibold">USDT</span>
-          </button>
-        </div>
+        ))}
       </div>
 
-      {/* Amount */}
-      <div className="mb-6">
-        <h3 className="text-[#a0a0b0] text-sm mb-3">Monto (CUP)</h3>
+      {/* Monto */}
+      <SectionLabel>Monto (CUP)</SectionLabel>
+      <div className="relative mb-2">
         <input
           type="number"
+          inputMode="numeric"
           value={amount}
-          onChange={(e) => setAmount(e.target.value)}
+          onChange={e => {
+            setAmount(e.target.value);
+            setError('');
+          }}
           placeholder="1000"
-          max={user?.balance?.credits}
-          className="input text-lg"
+          className="input text-lg pr-24"
+          aria-label="Monto a retirar"
         />
         <button
-          onClick={() => setAmount(user?.balance?.credits?.toString() || '0')}
-          className="text-sm text-[#00d26a] mt-2"
+          onClick={() => setAmount(String(balance))}
+          className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-semibold text-[#00d26a]"
         >
-          Retirar todo
+          MÁX
         </button>
       </div>
+      <p className="text-xs text-[#a0a0b0] mb-5">Mínimo {minimum} CUP</p>
 
-      {/* USDT Address */}
+      {/* Dirección USDT */}
       {method === 'usdt' && (
-        <div className="mb-6">
-          <h3 className="text-[#a0a0b0] text-sm mb-3">Dirección USDT (TRC20)</h3>
+        <>
+          <SectionLabel>Dirección USDT (TRC20)</SectionLabel>
           <input
             type="text"
             value={address}
-            onChange={(e) => setAddress(e.target.value)}
+            onChange={e => {
+              setAddress(e.target.value);
+              setError('');
+            }}
             placeholder="T..."
-            className="input"
+            className={`input font-mono text-xs ${invalidAddress ? 'border-[#ff4757]' : ''}`}
+            aria-label="Dirección USDT"
           />
+          <p className="text-xs text-[#a0a0b0] mt-2 mb-5">
+            Verifica la red (TRC20) y la dirección. Los envíos erróneos no se pueden
+            revertir.
+          </p>
+        </>
+      )}
+
+      {(error || validationError) && (
+        <div className="bg-[#ff4757]/15 border border-[#ff4757] rounded-xl p-3 mb-4">
+          <p className="text-sm text-[#ff8a94]">{error || validationError}</p>
         </div>
       )}
 
-      {/* Withdraw Button */}
       <button
-        onClick={handleWithdraw}
-        disabled={loading || !amount || (method === 'usdt' && !address)}
-        className="w-full btn btn-primary text-lg"
+        onClick={submit}
+        disabled={submitting || !!validationError || !numericAmount}
+        className="w-full btn btn-primary py-3.5 text-base disabled:opacity-50 disabled:cursor-not-allowed"
       >
-        {loading ? 'Procesando...' : 'Retirar'}
+        {submitting ? 'Procesando…' : 'Solicitar retiro'}
       </button>
 
-      {/* Info */}
-      <div className="mt-6 card">
-        <h3 className="text-[#a0a0b0] text-sm mb-2">Información</h3>
-        <ul className="text-sm text-[#a0a0b0] space-y-1">
-          <li>• Los retiros se procesan en 24-48 horas</li>
-          <li>• USDT: Retiros automáticos en TRC20</li>
-          <li>• EnZona/QvaPay: Verificación manual</li>
-        </ul>
+      <div className="mt-5 card">
+        <p className="text-xs text-[#a0a0b0] leading-relaxed">
+          <span className="text-white font-semibold">Tiempo estimado:</span> 24-48 horas
+          hábiles. USDT se procesa automáticamente; los demás métodos se validan a mano.
+        </p>
       </div>
     </div>
   );
-};
+}
