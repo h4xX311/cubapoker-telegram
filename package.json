@@ -12,6 +12,7 @@
     "test:chains": "node scripts/test-chains.js",
     "test:rules": "node scripts/test-business-rules.js",
     "test:payout": "node scripts/test-payout.js",
+    "test:field": "node scripts/test-field.js",
     "test:engine": "node scripts/test-engine.js"
   },
   "dependencies": {

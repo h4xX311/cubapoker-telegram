@@ -10,7 +10,28 @@ import mongoose, { Document, Schema } from 'mongoose';
  */
 export type SeatKind = 'human' | 'bot';
 
-export type SeatStatus = 'active' | 'folded' | 'all_in' | 'sitting_out' | 'eliminated';
+/**
+ * Estado de un asiento.
+ *
+ * `eliminated` y `out` parecen lo mismo y no lo son. La diferencia importa en
+ * el gestor de campos:
+ *
+ *  - `eliminated`: el jugador se quedo sin fichas. AUN debe recuperar lo que
+ *    tenga en la mesa y su posicion no esta adjudicada. Es transitorio.
+ *  - `out`: ya esta liquidado. Se le devolvio el saldo y se le asigno su
+ *    posicion en el campo. Contarlo otra vez como eliminado le daria una
+ *    segunda posicion y le pagaria dos veces.
+ *
+ * En una mesa cash sin campo, `eliminated` pasa directamente a desaparecer del
+ * asiento: no hay nada que liquidar.
+ */
+export type SeatStatus =
+  | 'active'
+  | 'folded'
+  | 'all_in'
+  | 'sitting_out'
+  | 'eliminated'
+  | 'out';
 
 export interface ISeat {
   index: number;

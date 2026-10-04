@@ -1,4 +1,5 @@
 import { Table, ITable, ISeat, toPublicTable } from '../models/Table';
+import { Field } from '../models/Field';
 import { User } from '../models/User';
 import { PokerGame } from './game.state';
 import { botFactory, BotProfile, decideAction, mulberry32 } from './bot.engine';
@@ -144,8 +145,29 @@ export class TableManager {
    * Devuelve el buy-in a cada jugador humano de la mesa y la marca como
    * waiting. Es la red de seguridad: preferimos devolver fichas antes que
    * arriesgar a que un jugador pierda saldo por un reinicio.
+   *
+   * EXCEPCION: las mesas de un campo NO se reembolsan. Su dinero ya no esta en
+   * la cartera del jugador sino bloqueado en el campo, y el campo es lo que
+   * decide las posiciones. Reembolsar las fichas de una mesa seria devolverle
+   * el dinero al jugador y ademas dejarlo jugando en una mesa de un campo que
+   * ya no sabe que existe: cobraria el buy-in dos veces.
+   *
+   * Ante un reinicio con un campo en juego lo correcto es SUSPENDER el campo y
+   * que el operador decida si se cancela (con devolucion) o se continua. Por
+   * eso la mesa se para en `paused`, que no se procesa en el tick: se queda
+   * congelada hasta que alguien la mire.
    */
   private async refundTable(table: ITable): Promise<void> {
+    if (this.isFieldTable(table)) {
+      table.status = 'paused';
+      await table.save();
+      logger.warn(
+        `Mesa de campo ${table.tableId} pausada tras reinicio. NO se reembolsa: ` +
+        `el dinero es del campo. Requiere decision del operador.`,
+      );
+      return;
+    }
+
     let refunded = 0;
 
     for (const seat of table.seats) {
@@ -198,6 +220,30 @@ export class TableManager {
         logger.error(`Error procesando mesa ${table.tableId}:`, error);
       }
     }
+
+    // Los campos se coordinan aparte de las mesas: eliminaciones, merges y
+    // liquidacion son del campo entero, no de una mesa. Se hace DESPUES de
+    // procesar las mesas, para que las eliminaciones de este ciclo ya esten
+    // escritas en la mesa cuando el campo las recoja.
+    if (this.fieldCoordinator) {
+      try {
+        await this.fieldCoordinator();
+      } catch (error) {
+        logger.error('Error en el ciclo de campos:', error);
+      }
+    }
+  }
+
+  /**
+   * El field manager se inyecta desde `bot.ts`.
+   *
+   * Es una referencia inversa a proposito: el gestor de mesas no importa al
+   * gestor de campos, y asi se puede probar uno sin el otro.
+   */
+  private fieldCoordinator: (() => Promise<void>) | null = null;
+
+  setFieldCoordinator(fn: () => Promise<void>): void {
+    this.fieldCoordinator = fn;
   }
 
   /**
@@ -641,6 +687,16 @@ export class TableManager {
         RAKE.cashMax,
       );
       table.stats.rakeCollected += rake;
+
+      // El rake de las mesas de un campo se acumula ahi. Lo necesita el field
+      // manager para calcular el bote neto del campo: si no, creeria que el
+      // bote es el bruto y pagaria de mas.
+      if (this.isFieldTable(table) && table.field?.fieldId) {
+        await Field.updateOne(
+          { fieldId: table.field.fieldId },
+          { $inc: { rakeCollected: rake } },
+        );
+      }
     }
 
     const netPot = state.pot - rake;
@@ -657,7 +713,6 @@ export class TableManager {
       seat.chips += shareEach;
       seat.handsWon += 1;
       seat.netChips += shareEach;
-
       // Sincronizar con el saldo real del usuario
       if (seat.kind === 'human') {
         await this.settleHumanSeat(table, seat, shareEach);
@@ -685,6 +740,44 @@ export class TableManager {
     // Barajar dealer
     this.rotateDealer(table);
 
+    // ------------------------------------------------------------------
+    // CAMPO vs MESA CASH
+    // ------------------------------------------------------------------
+    // Abajo hay dos caminos distintos y la diferencia no es cosmetica.
+    //
+    // MESA CASH (sin `field`): al cerrar la mano, las fichas vuelven al
+    // monedero y el jugador vuelve a comprar si le alcanza. Se entra y se sale
+    // cuando uno quiere. Es una mesa de cash normal.
+    //
+    // MESA DE CAMPO (con `field.fieldId`): las fichas NO vuelven al monedero.
+    // El buy-in se cobro una vez al registrarse y queda bloqueado hasta que el
+    // jugador es eliminado o gana el campo. Si devolvieran el saldo cada mano,
+    // un "campo de 500" serian 500 partidas sueltas de una mesa de 7: no habria
+    // ni eliminaciones, ni posiciones, ni mesa final.
+    //
+    // Quien decide cuando se devuelve el dinero es `field.manager.ts`, que
+    // conoce las posiciones. Aqui solo se marca al jugador como eliminado y se
+    // le deja el resto de fichas para que el campo lo liquide.
+
+    if (this.isFieldTable(table)) {
+      // Los bots eliminados se van. Los humanos se quedan con su estado para
+      // que el field manager recoja la eliminacion y le asigne posicion.
+      table.seats = table.seats.filter(
+        s => s.status !== 'eliminated' || s.kind === 'human',
+      );
+
+      // Un humano sin fichas queda `eliminated`: es una posicion en el campo.
+      for (const seat of table.seats) {
+        if (seat.kind === 'human' && seat.chips <= 0 && seat.status !== 'eliminated') {
+          seat.status = 'eliminated';
+        }
+      }
+
+      await table.save();
+      return;
+    }
+
+    // --- Mesa cash: el flujo de siempre ---
     // Los bots eliminados se van; los humanos se conservan para decidir
     table.seats = table.seats.filter(
       s => s.status !== 'eliminated' || s.kind === 'human',
@@ -727,15 +820,36 @@ export class TableManager {
   }
 
   /**
+   * Si la mesa pertenece a un campo multi-mesa.
+   *
+   * El criterio es `field.fieldId` Y que el campo este vivo. Una mesa de un
+   * campo ya liquidado tiene que volver al comportamiento cash: si se quedaba
+   * en modo torneo, las fichas de sus jugadores se quedarian bloqueadas para
+   * siempre.
+   */
+  isFieldTable(table: ITable): boolean {
+    return Boolean(table.field?.fieldId);
+  }
+
+  /**
    * Sincroniza el saldo de un humano tras ganar.
    * El dinero que gana en la mesa es retirable (viene de mesas cash con buy-in
    * de saldo real), salvo que la mesa sea freeroll.
+   *
+   * EXCEPCION DEL CAMPO: en una mesa de campo NO se abona aqui. Las fichas se
+   * quedan en el asiento (suben a `seat.chips`) y el `field.manager` las
+   * liquida al final. Si se abonaran al monedero en cada mano, el jugador
+   * tendria su dinero en la cartera mientras sigue sentado, y podria
+   * reiniciarse el servicio y perder el saldo de la mesa sin que nadie lo
+   * supiera.
    */
   private async settleHumanSeat(
     table: ITable,
     seat: ISeat,
     amount: number,
   ): Promise<void> {
+    if (this.isFieldTable(table)) return;
+
     const field = table.kind === 'freeroll' ? 'balance.play' : 'balance.real';
     await User.updateOne(
       { telegramId: Number(seat.playerId) },

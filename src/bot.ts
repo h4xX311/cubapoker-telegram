@@ -16,6 +16,7 @@ import { Transaction } from './models/Transaction';
 import { VIP_CONFIG, VIPLevel } from './models/VIP';
 import { SIMULATION_ENABLED, pruneSimulatedOrders } from './services/payment/gateway';
 import { tableManager } from './game/table.manager';
+import { fieldManager } from './game/field.manager';
 import { SUIT_SYMBOL } from './game/card.utils';
 import { seatingService } from './game/seating.service';
 import { logger } from './utils/logger';
@@ -617,6 +618,13 @@ const start = async () => {
   logger.info('MongoDB conectado');
 
   await seatingService.seedTables();
+
+  // El field manager se inyecta como coordinador del tick de mesas. Se hace
+  // aqui y no con un import directo en table.manager.ts para que el nucleo del
+  // juego no dependa del gestor de campos: se pueden probar y desplegar por
+  // separado.
+  tableManager.setFieldCoordinator(() => fieldManager.tick());
+
   await tableManager.start();
 
   app.listen(PORT, () => {

@@ -18,6 +18,7 @@ const SUITES = [
   { name: 'Cadenas y comisiones', file: 'test-chains.js' },
   { name: 'Reglas de negocio', file: 'test-business-rules.js' },
   { name: 'Reparto y RTP', file: 'test-payout.js' },
+  { name: 'Reglas del campo', file: 'test-field.js' },
   { name: 'Motor de poker', file: 'test-engine.js' },
 ];
 

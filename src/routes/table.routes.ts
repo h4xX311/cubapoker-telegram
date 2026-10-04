@@ -1,6 +1,8 @@
 import { Router, Request, Response } from 'express';
 import { tableManager } from '../game/table.manager';
 import { seatingService, TableError } from '../game/seating.service';
+import { fieldManager, FieldError } from '../game/field.manager';
+import { Field, toPublicField } from '../models/Field';
 import { requireTelegramAuth, getAuthedTelegramId } from '../middleware/telegramAuth';
 import { User } from '../models/User';
 import { logger } from '../utils/logger';
@@ -90,6 +92,79 @@ router.post('/sit', async (req: Request, res: Response) => {
     res.status(status).json({
       error: error instanceof Error ? error.message : 'Error al sentarse',
     });
+  }
+});
+
+// ==========================================================================
+// Campos multi-mesa
+// ==========================================================================
+
+/**
+ * Inscripcion a un campo.
+ *
+ * A diferencia de `/sit`, aqui el buy-in se cobra UNA vez y las fichas quedan
+ * bloqueadas hasta que el jugador es eliminado o gana el campo. El jugador no
+ * entra en una mesa concreta: entra en una cola, y el field manager le asigna
+ * asiento segun donde haya hueco.
+ */
+router.post('/fields/:tierId/register', async (req: Request, res: Response) => {
+  try {
+    const telegramId = getAuthedTelegramId(req);
+    const user = await User.findOne({ telegramId });
+    const result = await fieldManager.register(
+      telegramId,
+      req.params.tierId as any,
+      user?.username,
+    );
+    res.json({ success: true, ...result });
+  } catch (error) {
+    const status = error instanceof FieldError ? 400 : 500;
+    res.status(status).json({
+      error: error instanceof Error ? error.message : 'Error al registrarse',
+    });
+  }
+});
+
+/** Salir del campo antes de que empiece, con devolucion del buy-in. */
+router.post('/fields/:fieldId/leave', async (req: Request, res: Response) => {
+  try {
+    const telegramId = getAuthedTelegramId(req);
+    const result = await fieldManager.unregister(telegramId, req.params.fieldId);
+    res.json({ success: true, ...result });
+  } catch (error) {
+    const status = error instanceof FieldError ? 400 : 500;
+    res.status(status).json({
+      error: error instanceof Error ? error.message : 'No se pudo salir',
+    });
+  }
+});
+
+/** Estado del campo: quien esta sentado, en que mesa, cuantas plazas quedan. */
+router.get('/fields/:fieldId', async (req: Request, res: Response) => {
+  try {
+    const status = await fieldManager.status(req.params.fieldId);
+    res.json({ success: true, ...status });
+  } catch (error) {
+    const status = error instanceof FieldError ? 404 : 500;
+    res.status(status).json({
+      error: error instanceof Error ? error.message : 'Error al leer el campo',
+    });
+  }
+});
+
+/** Campos abiertos ahora mismo. */
+router.get('/fields', async (_req: Request, res: Response) => {
+  try {
+    const fields = await Field.find({
+      status: { $in: ['filling', 'running', 'final'] },
+    })
+      .sort({ createdAt: -1 })
+      .limit(20);
+
+    res.json({ success: true, fields: fields.map(f => toPublicField(f)) });
+  } catch (error) {
+    logger.error('GET /game/fields:', error);
+    res.status(500).json({ error: 'Error obteniendo los campos' });
   }
 });
 
