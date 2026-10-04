@@ -49,6 +49,15 @@ export interface Session {
 
 // --- Mesas ---
 
+export interface PayoutEntry {
+  /** Posicion final en el campo, 1-based. 1 = ganador. */
+  position: number;
+  /** Importe estimado a campo lleno, en CUP. */
+  amount: number;
+  /** Porcentaje del bote que representa. */
+  percentage: number;
+}
+
 export interface CashTier {
   id: string;
   label: string;
@@ -58,11 +67,21 @@ export interface CashTier {
    * de 500 son ~72 mesas de 7. Ver `seatsPerTable`.
    */
   fieldSize: number;
-  guaranteedPrize: number;
   minBuyIn: number;
   defaultBuyIn: number;
-  /** Reparto del premio entre las primeras posiciones, en porcentajes. */
-  payout?: readonly number[];
+  /** Mesas de 7 que componen el campo. */
+  tables: number;
+  /**
+   * Bote neto estimado a campo lleno (el 95% de lo que pone todo el mundo).
+   * El bote real depende de cuantos jueguen, asi que la UI debe decir "desde".
+   */
+  estNetPot: number;
+  /** Premio estimado para el ganador, a campo lleno. */
+  estFirstPrize: number;
+  /** RTP del campo, ~0.95. */
+  rtp: number;
+  /** Reparto por posicion. */
+  payout: PayoutEntry[];
 }
 
 export interface TableSummary {

@@ -32,71 +32,84 @@ export type TableTierId = 't50' | 't100' | 't300' | 't500';
 export const SEATS_PER_TABLE = 7;
 
 /**
- * Reparto del premio de un field entre los primeros puestos, en porcentajes.
+ * Reparto del bote del campo entre los primeros puestos, en porcentajes.
  *
- * Suman exactamente 100, lo que significa que el rake NO sale de este premio:
- * el rake se descuenta de los botes de cada mano y el premio es una bolsa
- * aparte, la que financia el operador. Ver `ECONOMY` mas abajo.
+ * Suman 100, asi que el rake NO sale de aqui: se descuenta antes, de cada bote
+ * de mano. Lo que llega a este reparto es el 95 % del bote completo del campo.
  *
- * Payout de un field de 500 con premio 500 CUP, por ejemplo:
- *   1o 225 CUP · 2o 125 · 3o 75 · 4o 45 · 5o 30
+ * Payout de un campo de 500 con buy-in de 2000 CUP (bote 1 000 000):
+ *   1o 427 500 · 2o 237 500 · 3o 142 500 · 4o 85 500 · 5o 57 000
  * Los 495 restantes no cobran pero juegan hasta el final.
  */
 export const FIELD_PAYOUT = [45, 25, 15, 9, 6] as const;
 
 /**
- * COMO SE FINANCIA EL PREMIO (pendiente de decision de negocio)
+ * MODELO ECONOMICO: el premio sale del bote
  * ------------------------------------------------------------------
- * Los numeros de `TABLE_TIERS` tienen un problema aritmetico que el codigo no
- * puede arreglar. El premio es siempre `fieldSize x 1 CUP`, y el buy-in minimo
- * va de 200 a 2000:
+ * DECIDIDO. El premio se reparte del bote del campo: cada jugador mete su
+ * buy-in, el rake del 5 % se descuenta de los botes de cada mano, y el 95 %
+ * restante se reparte a las primeras posiciones segun `FIELD_PAYOUT`.
  *
- *   field   premio   buy-in   se recauda   RTP
- *   50      50       200      10 000      0,50 %
- *   100     100      500      50 000      0,20 %
- *   300     300      1000     300 000     0,10 %
- *   500     500      2000     1 000 000   0,05 %
+ * Esto es un Sit n Go clasico y da un RTP del 95 %, que es el estandar de poker.
+ * No hace falta bolsa promocional, ni contabilidad de pasivo, ni tope de gasto:
+ * el bote escala solo con cuantos jugadores jueguen de verdad.
  *
- * El rake del 5% si supera al premio (500 CUP de rake contra 50 de premio en el
- * campo de 50), asi que la cuenta del operador cierra. El problema es el
- * jugador: un RTP del 0,05% significa que pierde el 99,95% de lo que pone.
- * No es un juego, es una entrega de dinero, y ningun jugador lo repetiria dos
- * veces.
+ * CORRECCION IMPORTANTE (error propio, ya subsanado)
+ * ---------------------------------------------------
+ * En una iteracion anterior calcule el RTP como `premio / buy-in-recAUDados` y
+ * salia un 0,05 %, con lo que conclui que el producto era una entrega de dinero
+ * y arme tres alternativas. El calculo estaba mal: esa formula supone que el
+ * jugador recupera SOLO el premio, cuando en un campo recupera su buy-in en
+ * fichas menos el rake.
  *
- * Para que el RTP fuera de ~95% haria falta un buy-in de ~1 CUP en los cuatro
- * campos, lo que los hace economicamente identicos y deja el ladder sin
- * sentido (jugar en el campo de 500 duraria horas y daria lo mismo que el de 50).
+ *   RTP = 1 - rake% + premio / (field x buyIn)
  *
- * LAS TRES SALIDAS, y hay que elegir una antes de escribir el field manager:
+ * Con los numeros de `TABLE_TIERS`:
+ *   field   buy-in   rake    RTP
+ *   50      200      5%      95,50 %
+ *   100     500      5%      95,20 %
+ *   300     1000     5%      95,10 %
+ *   500     2000     5%      95,05 %
  *
- *   A) Bajar el buy-in a ~1 CUP. RTP sano, pero los 4 campos se vuelven
- *      indistinguibles y el stake es tan bajo que el rake de 5% da 0,05 CUP
- *      por mano: no cubre ni el gasto de infra.
+ * El ladder tiene sentido: el campo grande paga mucho mas porque el buy-in es
+ * mayor y el bote se multiplica, no porque se regale dinero.
  *
- *   B) Que el premio salga de un FONDO promocional y no del bote. Ahi el RTP al
- *      jugador es 100% (o mas) por el premio, y el ingreso del operador es el
- *      rake. Es lo que hacen CoinPoker y similares con los "guaranteed prize
- *      pools". El campo de 500 con premio 500 CUP seria entonces un gancho
- *      promocional de bajo valor, no un negocio. Y como el premio de los
- *      freerolls va a `balance.play` (no retirable), ese mismo fondo puede
- *      alimentar tambien los campos cash sin obligacion de pago.
- *
- *   C) Cambiar la escalera: que el premio crezca con el field en proportion al
- *      buy-in (por ejemplo premio = field x buy-in x 0,95). El campo de 500
- *      pagaria ~950 000 CUP, que ya no es un premio promocional sino un
- *      torneo serio, y exige una caja mucho mayor.
- *
- * Hasta que se elija, los tests de `test-business-rules.js` fallan a proposito
- * en el bloque 2 (economia del campo). No es un test roto: es el aviso de que
- * el producto no es jugable tal como esta.
+ * Lo que SI queda como requisito: el premio no es retirable. Va a
+ * `balance.play`, igual que el de los freerolls. Es una decision de negocio ya
+ * tomada, no una consecuencia de la aritmetica, y hay que comunicarla en la UI.
  */
 export const ECONOMY = {
-  /** Buy-in que haria falta para un RTP del 95% con los premios actuales. */
-  buyInForHealthyRtp: 1.05,
-  /** RTP minimo aceptable para que el campo tenga sentido. */
-  minAcceptableRtp: 0.5,
+  /** Fraccion del bote que se devuelve al campo. El resto es rake. */
+  netPotShare: 1 - 0.05,
+
+  /**
+   * El premio de un campo se abona a `balance.play` (no retirable).
+   * Razon: es premio de juego, no devolucion de deposito. Retirarlo convertiria
+   * un Sit n Go en un esquema de salida de dinero sin cobertura.
+   */
+  prizeToBalance: 'play' as const,
+
+  /** Frase que la UI debe mostrar junto al premio. */
+  disclosure:
+    'El premio sale del bote del campo: es el 95% de lo que puso todo el mundo ' +
+    'en juego, menos el 5% de rake. Se reparte entre los primeros lugares y se ' +
+    'abona como saldo de promocion, que sirve para jugar en cualquier campo y no ' +
+    'se puede retirar.',
 } as const;
 
+/**
+ * MODELO DE PREMIO: fondo promocional (opcion B)
+ * ------------------------------------------------------------------
+ * DECIDIDO. De las tres salidas analizadas en `scripts/economy-options.js`:
+ *
+ *   A) Buy-in ~1 CUP     -> inviable: con la aritmetica entera de hoy el
+ *                           jugador entra all-in en 1 mano y el rake es 0
+ *                           por debajo de botes de 20 CUP. Ademas el ingreso
+ *                           (26 CUP por campo de 500) no cubre la infra.
+ *   B) Fondo promocional -> ELEGIDA. Ver abajo.
+ *   C) Premio ~ field    -> otro producto: el campo de 500 pagaria 950 000 CUP
+ *                           y exige caja, KYC y otra figura legal.
+ *
 /** Numero de plazas premiadas. El resto no cobra, pero juega hasta el final. */
 export const PAID_POSITIONS = FIELD_PAYOUT.length;
 

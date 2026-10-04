@@ -1,13 +1,12 @@
 /**
- * Lanza las tres suites y reporta el resultado conjunto.
+ * Lanza todas las suites y reporta el resultado conjunto.
  *
  * Se ejecuta en un runner propio, y no con `a && b && c` en el script de npm,
  * por dos razones:
  *
- *  1. Con `&&` la primera suite que falla corta las siguientes. Hoy
- *     `test-business-rules` falla a proposito (la economia del campo no es
- *     viable todavia, ver ECONOMY en config/product.ts), y eso impidia ejecutar
- *     las pruebas del motor, que son las que detectan bugs reales.
+ *  1. Con `&&` la primera suite que falla corta las siguientes. Una prueba que
+ *     falla por un motivo concreto (una regla sin implementar, un dato que hay
+ *     que revisar) impedia ejecutar las del motor, que detectan bugs reales.
  *
  *  2. El codigo de salida debe reflejar si ALGUNA suite fallo, no solo la
  *     ultima.
@@ -18,6 +17,7 @@ const { spawnSync } = require('child_process');
 const SUITES = [
   { name: 'Cadenas y comisiones', file: 'test-chains.js' },
   { name: 'Reglas de negocio', file: 'test-business-rules.js' },
+  { name: 'Reparto y RTP', file: 'test-payout.js' },
   { name: 'Motor de poker', file: 'test-engine.js' },
 ];
 
@@ -45,9 +45,9 @@ for (const r of results) {
 if (failed > 0) {
   console.log(
     `\n${failed} suite(s) con fallos.\n` +
-      'Revisa si el fallo es un bug real o el aviso de economia del campo ' +
-      '(bloque 2 de reglas de negocio: los numeros de TABLE_TIERS no dan un ' +
-      'RTP viable y eso hay que decidirlo antes de escribir el field manager).',
+      'Revisa si el fallo es un bug real o una regla de negocio todavia sin ' +
+      'implementar, y si es lo segundo, se para el runner en vez de dejar que ' +
+      'las demas suites no se ejecuten.',
   );
 }
 

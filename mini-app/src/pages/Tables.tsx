@@ -14,6 +14,7 @@ export function Tables({ user, onBack, onBalanceChange, onPlay }: Props) {
   const [tables, setTables] = useState<TableSummary[]>([]);
   const [tiers, setTiers] = useState<CashTier[]>([]);
   const [seatsPerTable, setSeatsPerTable] = useState(7);
+  const [disclosure, setDisclosure] = useState('');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState('');
@@ -24,6 +25,7 @@ export function Tables({ user, onBack, onBalanceChange, onPlay }: Props) {
       setTables(listRes.tables || []);
       setTiers(cfgRes.cashTiers || []);
       if (cfgRes.seatsPerTable) setSeatsPerTable(cfgRes.seatsPerTable);
+      setDisclosure(cfgRes.prizeDisclosure || '');
     } catch {
       setTables([]);
     } finally {
@@ -109,16 +111,17 @@ export function Tables({ user, onBack, onBalanceChange, onPlay }: Props) {
                     <div>
                       <h3 className="font-bold text-white">{tier.label}</h3>
                       <p className="text-xs text-[#a0a0b0] mt-0.5">
-                        {seatsPerTable}-max · {Math.ceil(tier.fieldSize / seatsPerTable)} mesas
+                        {seatsPerTable}-max · {tier.tables} mesas
                       </p>
                     </div>
                     <div className="text-right">
                       <p className="text-[10px] text-[#a0a0b0] uppercase tracking-wide">
-                        Premio
+                        Desde
                       </p>
-                      <p className="text-lg font-bold text-[#ffd700]">
-                        {tier.guaranteedPrize} CUP
+                      <p className="text-lg font-bold text-[#ffd700] leading-none">
+                        {fmt(tier.estFirstPrize)}
                       </p>
+                      <p className="text-[9px] text-[#a0a0b0] mt-0.5">para el 1º</p>
                     </div>
                   </header>
 
@@ -137,26 +140,27 @@ export function Tables({ user, onBack, onBalanceChange, onPlay }: Props) {
                   </div>
 
                   <div className="grid grid-cols-3 gap-2 mb-3 text-center">
-                    <Metric label="Mesas" value={String(fieldTables.length)} />
-                    <Metric label="Botín" value={String(tier.defaultBuyIn)} unit="CUP" />
-                    <Metric label="Tu saldo" value={String(balance)} unit="CUP" gold />
+                    <Metric label="Botín" value={fmt(tier.defaultBuyIn)} unit="CUP" />
+                    <Metric label="Bote" value={fmt(tier.estNetPot)} unit="CUP" gold />
+                    <Metric label="RTP" value={`${Math.round(tier.rtp * 100)}%`} />
                   </div>
 
-                  {tier.payout && tier.payout.length > 0 && (
+                  {/* Reparto por posicion */}
+                  {tier.payout?.length > 0 && (
                     <div className="mb-3">
                       <p className="text-[10px] text-[#a0a0b0] uppercase tracking-wide mb-1.5">
-                        Reparto
+                        Reparto del bote · campo lleno
                       </p>
                       <div className="flex gap-1.5">
-                        {tier.payout.slice(0, 4).map((pctShare, idx) => (
+                        {tier.payout.map((e) => (
                           <div
-                            key={idx}
+                            key={e.position}
                             className="flex-1 text-center p-1.5 rounded-lg"
                             style={{ background: '#0f0f1a' }}
                           >
-                            <p className="text-[9px] text-[#a0a0b0]">{idx + 1}º</p>
+                            <p className="text-[9px] text-[#a0a0b0]">{e.position}º</p>
                             <p className="text-[11px] font-bold text-[#ffd700]">
-                              {Math.floor((tier.guaranteedPrize * pctShare) / 100)}
+                              {fmt(e.amount)}
                             </p>
                           </div>
                         ))}
@@ -184,13 +188,25 @@ export function Tables({ user, onBack, onBalanceChange, onPlay }: Props) {
 
       <div className="mt-5 card">
         <p className="text-xs text-[#a0a0b0] leading-relaxed">
-          <span className="text-white font-semibold">Cómo funciona:</span> un campo de{' '}
-          {tiers[0]?.fieldSize ?? 500} participantes son{' '}
-          {tiers[0] ? Math.ceil(tiers[0].fieldSize / seatsPerTable) : 72} mesas de{' '}
-          {seatsPerTable}. Las mesas se fusionan mano a mano hasta que queda una
-          mesa final, y el premio se reparte entre las primeras posiciones.
+          <span className="text-white font-semibold">Cómo funciona:</span> un campo de 500
+          participantes son 72 mesas de 7. Las mesas se fusionan mano a mano hasta que
+          queda una mesa final, y el bote se reparte entre los primeros lugares.
         </p>
       </div>
+
+      {/* Transparencia del premio. Sin esto, "premio garantizado" es publicidad
+          engañosa: el jugador asume que puede retirarlo y no puede. */}
+      {disclosure && (
+        <div
+          className="mt-3 rounded-2xl p-4"
+          style={{ background: 'rgba(255,215,0,0.07)', border: '1px solid rgba(255,215,0,0.25)' }}
+        >
+          <div className="flex items-start gap-2.5">
+            <span className="text-sm">💡</span>
+            <p className="text-[11px] text-[#a0a0b0] leading-relaxed">{disclosure}</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -206,3 +222,6 @@ function Metric({ label, value, unit, gold }: { label: string; value: string; un
     </div>
   );
 }
+
+/** Miles con punto: el campo de 500 llega a botes de seis cifras. */
+const fmt = (n: number) => Math.round(n).toLocaleString('es-CU');

@@ -8,10 +8,14 @@ import {
   TABLE_TIER_LIST,
   FREEROLL_PRIZES,
   SEATS_PER_TABLE,
-  FIELD_PAYOUT,
   FREEROLL_TARGET_FIELD,
   FREEROLL_MAX_FIELD,
 } from '../config/product';
+import {
+  fieldPayout,
+  tierRtp,
+  prizeDisclosure,
+} from '../services/payout.service';
 
 const router = Router();
 router.use(requireTelegramAuth);
@@ -23,17 +27,35 @@ router.get('/config', (_req: Request, res: Response) => {
     // Asientos por mesa fisica. La UI debe mostrar "7-max" como formato, no
     // "500 jugadores por mesa": el 500 es el field completo (multi-mesa).
     seatsPerTable: SEATS_PER_TABLE,
-    cashTiers: TABLE_TIER_LIST.map(t => ({
-      id: t.id,
-      label: t.label,
-      description: t.description,
-      fieldSize: t.fieldSize,
-      guaranteedPrize: t.guaranteedPrize,
-      minBuyIn: t.minBuyIn,
-      defaultBuyIn: t.defaultBuyIn,
-      // Reparto del premio entre las primeras posiciones.
-      payout: FIELD_PAYOUT,
-    })),
+
+    cashTiers: TABLE_TIER_LIST.map(t => {
+      // El premio real depende de cuantos jugadores jueguen: sale del bote.
+      // A campo lleno se muestra ese, que es el mejor caso. La UI debe decir
+      // "desde" para no prometer una cifra que dependa de la ocupacion.
+      const full = fieldPayout(t.defaultBuyIn, t.fieldSize);
+      const winner = full.entries.find(e => e.position === 1);
+
+      return {
+        id: t.id,
+        label: t.label,
+        description: t.description,
+        fieldSize: t.fieldSize,
+        minBuyIn: t.minBuyIn,
+        defaultBuyIn: t.defaultBuyIn,
+        tables: Math.ceil(t.fieldSize / SEATS_PER_TABLE),
+        // Estimacion a campo lleno. El bote real depende de la ocupacion.
+        estNetPot: full.netPot,
+        estFirstPrize: winner?.amount ?? 0,
+        rtp: tierRtp(t.minBuyIn, t.fieldSize),
+        payout: full.entries,
+      };
+    }),
+
+    // Texto de transparencia. La UI debe mostrarlo junto al premio: decir
+    // "premio garantizado" sin explicar que sale del bote y no es retirable es
+    // publicidad engañosa.
+    prizeDisclosure: prizeDisclosure(),
+
     freerollTiers: FREEROLL_PRIZES,
     freerollTargetField: FREEROLL_TARGET_FIELD,
     freerollMaxField: FREEROLL_MAX_FIELD,

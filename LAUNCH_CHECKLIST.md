@@ -5,54 +5,58 @@ Fecha: 4 de octubre de 2026.
 
 ---
 
-## 0. Lo primero: la economía del campo no cierra
+## 0. La economia del campo (resuelta)
 
-Esto va antes que todo lo demás porque condiciona el field manager. Si se
-escribe el gestor de campos con estos números, hay que reescribirlo.
+**El premio sale del bote.** Es un Sit'n'Go clasico: cada jugador mete su
+buy-in, el rake del 5 % se descuenta de los botes de cada mano, y el 95 %
+restante se reparte a las primeras posiciones (45/25/15/9/6 %). RTP del 95 %, el
+estandar de poker. Sin bolsa, sin pasivo, sin tope de gasto: el bote escala
+solo con cuantos jugadores jueguen.
 
-Los cuatro tiers tienen `premio = fieldSize × 1 CUP`, y el buy-in mínimo va de
-200 a 2000:
+| field | buy-in | bote bruto | rake | bote neto | 1º lugar |
+|---|---|---|---|---|---|
+| 50 | 200 | 10 000 | 500 | 9 500 | 4 275 |
+| 100 | 500 | 50 000 | 2 500 | 47 500 | 21 375 |
+| 300 | 1 000 | 300 000 | 15 000 | 285 000 | 128 250 |
+| 500 | 2 000 | 1 000 000 | 50 000 | 950 000 | 427 500 |
 
-| field | premio | buy-in mín. | se recauda | **RTP del jugador** |
-|---|---|---|---|---|
-| 50 | 50 | 200 | 10 000 | **0,50 %** |
-| 100 | 100 | 500 | 50 000 | **0,20 %** |
-| 300 | 300 | 1 000 | 300 000 | **0,10 %** |
-| 500 | 500 | 2 000 | 1 000 000 | **0,05 %** |
+(Estimaciones a campo lleno. El bote real depende de la ocupacion.)
 
-La cuenta del operador sí cierra: el rake del 5 % del campo de 500 son 50 000
-CUP contra un premio de 500, así que el operador gana. El problema es el
-jugador, que pierde el 99,95 % de lo que pone. No es un juego con margen fino,
-es una entrega de dinero, y nadie repite dos veces.
+### Correccion: un calculo de RTP que estaba mal
 
-Para un RTP sano de ~95 % el buy-in tendría que ser **1,05 CUP en los cuatro
-campos**. Con eso los cuatro campos son idénticos y el ladder se aplana: jugar
-en el de 500 tardaría horas y daría lo mismo que el de 50.
+En una iteracion anterior calcule el RTP como
 
-### Las tres salidas
+```
+premio / (fieldSize x buyIn)
+```
 
-**A) Bajar el buy-in a ~1 CUP.** RTP sano, pero el rake de 5 % da 0,05 CUP por
-mano: no cubre ni el gasto de infraestructura. Y el ladder pierde sentido.
+y salia un 0,05 %, con lo que conclui que el producto era "una entrega de dinero"
+y arme tres alternativas economicas con el codigo correspondiente. **El
+calculo era erroneo**: esa expresion supone que el jugador recupera solo el
+premio, cuando en un campo recupera su buy-in en fichas menos el rake.
 
-**B) Que el premio salga de un fondo promocional, no del bote.** El RTP del
-jugador pasa a ser 100 % por el premio, y el ingreso del operador es el rake.
-Es lo que hacen CoinPoker y similares con los *guaranteed prize pools*. Además,
-como el premio de los freerolls va a `balance.play` (no retirable), ese mismo
-fondo puede alimentar los campos cash sin generar obligación de pago. Con esto
-el campo de 500 con premio 500 CUP es un gancho promocional de bajo valor, que
-es coherente con el producto, pero hay que decirlo así en la interfaz.
+```
+RTP = 1 - rake% + premio / (field x buyIn)
+```
 
-**C) Hacer que el premio crezca con el field.** `premio = field × buy-in × 0,95`.
-El campo de 500 pagaría ~950 000 CUP: ya no es un premio promocional sino un
-torneo serio, y exige una caja mucho mayor.
+Con estos numeros da 95,50 / 95,20 / 95,10 / 95,05 %. El producto es viable
+tal como estaba. Las tres alternativas (buy-in de 1 CUP, bolsa promocional,
+premio proporcional) eran trabajo para un problema inexistente, y la bolsa
+promocional se ha eliminado.
 
-**Hay que elegir una antes de escribir el field manager.** El reparto por
-posición, la tabla deliquidación y la estructura de premios dependen de ello.
+Las pruebas de `test-payout.js` imprimen las dos formulas, la correcta y la
+erronea, para que el error no se repita al tocar los numeros.
 
-Mientras tanto, `test-business-rules.js` falla **a propósito** en el bloque 2.
-No es un test roto: es el aviso de que el producto no es jugable todavía.
+### Lo que queda dicho en la interfaz
 
----
+El premio va a `balance.play`, que no es retirable. Es una decision de negocio
+(ya tomada antes para los freerolls), no una consecuencia de la aritmetica, y
+la UI lo dice: "El premio sale del bote del campo... se abona como saldo de
+promocion, que sirve para jugar en cualquier campo y no se puede retirar."
+
+Sin ese texto, "premio garantizado" es publicidad engañosa. En Cuba, sin marco
+legal de juego online, un reclamo por publicidad falsa es el riesgo mas
+probable del proyecto.
 
 ## Resumen
 
@@ -63,7 +67,10 @@ No es un test roto: es el aviso de que el producto no es jugable todavía.
 | Multi-red USDT (5 cadenas) | Completo | No |
 | Motor de poker | Completo y probado | No |
 | Bots | Completo | No |
+| Economía del campo | Resuelta (premio del bote, RTP 95 %) | No |
+| Reparto del bote | Completo y probado | No |
 | Interfaz | Completo | No |
+| **Field manager multi-mesa** | **Pendiente** | **Sí** |
 | **Pasarelas reales** | **Pendiente** | **Sí** |
 | **Panel de operador** | **Pendiente** | **Sí** |
 | **Infraestructura 24/7** | **Pendiente** | **Sí** |
@@ -215,26 +222,51 @@ genérico "saldo insuficiente".
 Al sentarse en una mesa cash se consume `play` primero, preservando `real` para
 retiro.
 
-### 2.5 Verificación
+### 2.5 Reparto del bote sin descuadres
+
+`settleFreeroll` repartía con `Math.floor(pot * pct / 100)` por posición. Ese
+reparto tiene dos fallos:
+
+- **Se queda corto**: un bote de 5 CUP con 50/30/20 daba 2+1+1 = 4. Con botes de
+  miles, decenas de CUP sin dueño en cada liquidación.
+- **Se pasa**: "floor + resto repartido a partes iguales" daba 4 CUP de un bote
+  de 3, es decir crear dinero.
+
+`payout.service.ts` centraliza el reparto con `splitPrize()`, que recorre con
+un acumulador del resto y ajusta el último tramo para que la suma sea exacta por
+construcción. La prueba verifica los 2 000 botes de 1 a 2 000 CUP: cuadran
+todos, ninguno negativo, ninguno mayor que el bote.
+
+El reparto ingenuo queda medido en el test (falla en 1 500 de 2 000 botes) para
+que quede constancia de que el test prueba lo que dice probar.
+
+### 2.6 Verificación
 
 | Prueba | Resultado |
 |---|---|
 | Build backend | limpio |
 | Build frontend | 45 módulos, 203 kB |
 | Cadenas y comisiones | 33/33 |
-| Reglas de negocio | 47/48 — **el fallo es deliberado** (§0) |
+| Reglas de negocio | 54/54 |
+| Reparto y RTP | 49/49 |
 | Motor de poker | 84/84 |
 | Auth sin firma | 401 correcto |
 | Flujo de pago completo | **no ejecutado** (sin MongoDB local) |
 
-`npm test` compila y corre las tres suites mediante `scripts/run-tests.js`. Un
-runner propio en lugar de `a && b && c` porque el fallo deliberado de las reglas
-de negocio cortaría las pruebas del motor, que son las que cazan bugs reales.
+`npm test` compila y corre las cuatro suites mediante `scripts/run-tests.js`.
+Un runner propio en lugar de `a && b && c` porque si una suite falla por un
+motivo concreto, las demás no llegan a ejecutarse, y las del motor son las que
+cazan bugs reales.
 
 Las del motor cubren: 7-max completo (7 sentados, 2 cartas cada uno, sobra
 baraja), 2/3/6/7/9/23 jugadores llegando a `finished`, conservación de fichas
 (lo entregado coincide con lo aportado), sin cartas repetidas ni `undefined`,
 rotación de botón y ciegas, y que el motor se niegue a repartir 24.
+
+Las de reparto cubren: cuadre exacto de los 2 000 botes de 1 a 2 000 CUP, rake
+con tope por mano y su versión sin tope para campo, RTP del 95 % con la fórmula
+correcta y a la vista la errónea, campo a media ocupación, y que la
+transparencia de la UI mencione el bote y la no-retirabilidad.
 
 ---
 
@@ -308,10 +340,23 @@ Nada de esto está implementado. **No lanzar sin consultar a un abogado.**
 
 ### 3.5 Field manager multi-mesa — BLOQUEA el formato de campo
 
-`table.manager.ts` gestiona una sola mesa y aplica el premio al ganador de esa
-mesa. Con `fieldSize` de 50 a 500 eso no sirve. Falta el servicio de campo:
-inscripción, asignación de asientos, merge, mesa final y reparto por posición
-(ver §1). Depende de la decisión económica de §0.
+`table.manager.ts` gestiona una sola mesa. Con `fieldSize` de 50 a 500 eso no
+sirve: falta el servicio de campo con inscripción, asignación de asientos, merge,
+mesa final y reparto por posición (ver §1).
+
+Lo que **ya está hecho** y le sirve:
+
+- `Table.field` con `fieldId`, `tableNumber`, `targetField`, `registered`,
+  `seated`, `paidPositions`, `fieldStatus`.
+- `payout.service.ts`: `fieldPayout(buyIn, players)` devuelve bote bruto, rake,
+  bote neto y el reparto por posición ya redondeado y cuadrando. La liquidación
+  del campo es una llamada a esa función.
+- `Table.hand.dealerSeat` persistido y rotando, que es lo que hace que el merge
+  de mesas no claque el botón.
+
+Lo que **no** está: el servicio que reparte jugadores entre mesas, decide el
+merge cuando una mesa baja de 4 con cola de espera, y congela el campo cuando
+queda una sola mesa.
 
 ### 3.6 Integridad del juego — no bloquea pero conviene
 
@@ -337,21 +382,23 @@ no es siempre.
 ## 4. Orden de ejecución recomendado
 
 ```
-1. Economía del campo  ← §0: define el RTP y de dónde sale el premio
-2. Legal               ← bloquea todo lo demás
-3. Plan de pago Render ← sin esto las partidas se cortan
-4. Panel de operador   ← sin esto los retiros se atascan
-5. TRC20 real          ← la más simple, valida el circuito completo
-6. Field manager       ← sin esto el campo de 500 no existe
-7. Logros/rachas/VIP   ← honestidad con lo prometido
-8. EnZona + QvaPay     ← requiere cuenta de empresa
-9. Resto de cadenas
+1. Legal               ← bloquea todo lo demás
+2. Plan de pago Render ← sin esto las partidas se cortan
+3. Panel de operador   ← sin esto los retiros se atascan
+4. TRC20 real          ← la más simple, valida el circuito completo
+5. Field manager       ← sin esto el campo de 500 no existe
+6. Logros/rachas/VIP   ← honestidad con lo prometido
+7. EnZona + QvaPay     ← requiere cuenta de empresa
+8. Resto de cadenas
 ```
 
-Los puntos 1, 2, 3, 4 y 5 son los mínimos para abrir a un grupo pequeño de
-usuarios de prueba. El 6 es necesario para que el producto sea lo que promete;
-hasta entonces, la opción honesta es mostrar 7-max de mesa única y quitar el
-"campo de 500" de la interfaz.
+La economía del campo ya está resuelta (§0): el premio sale del bote y el RTP
+es del 95 %. No bloquea.
+
+Los puntos 1 a 4 son los mínimos para abrir a un grupo pequeño de usuarios de
+prueba. El 5 es necesario para que el producto sea lo que promete; hasta
+entonces, la opción honesta es mostrar 7-max de mesa única y quitar el "campo de
+500" de la interfaz.
 
 ---
 
@@ -367,6 +414,7 @@ npm test
 # Suites por separado
 npm run test:chains
 npm run test:rules
+npm run test:payout
 npm run test:engine
 
 # 3. Flujo completo (requiere MongoDB)

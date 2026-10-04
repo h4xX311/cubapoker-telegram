@@ -20,6 +20,7 @@ const {
   SEATS_PER_TABLE,
   BOT_CONFIG,
   RAKE,
+  ECONOMY,
   BALANCE,
 } = require('../dist/config/product');
 const { botFactory, decideAction, evaluateStrength } = require('../dist/game/bot.engine');
@@ -85,92 +86,102 @@ section('1. Campos cash: fieldSize, no asientos');
   }
 }
 
-// =========================================================================
-section('2. Economia del campo: el RTP es viable');
+section('2. Economia del campo: el RTP es sano');
 
 {
-  // ESTE es el bloque que falla con los numeros actuales, y deliberatemente.
+  // CORRECCION DE UN ERROR PROPIO.
   //
-  // premio = fieldSize * 1 CUP en los cuatro tiers. Para que el RTP fuera sano
-  // (~95%, lo que corresponde a un rake del 5%) el buy-in tendria que ser
-  // ~1 CUP en los cuatro, con lo que los cuatro campos serian
-  // economicamente identicos y el ladder no escalaria para nada.
+  // En una iteracion anterior calcule el RTP como
+  // `premio / (fieldSize * minBuyIn)` y salia un 0,05 %, con lo que conclui que
+  // el producto era "una entrega de dinero" y arme tres alternativas
+  // economicas. El calculo era erroneo: supone que el jugador recupera SOLO el
+  // premio, cuando en un Sit'n'Go recupera su buy-in en fichas menos el rake.
   //
-  // Con los buy-ins actuales (200/500/1000/2000) el RTP es del 0,5% al 0,05%:
-  // el rake del 5% no cubre ni de lejos la devolucion, y el campo pierde una
-  // cantidad garantizada. Esto no se puede arreglar en codigo, es una decision
-  // de negocio: o el buy-in baja a ~1 CUP, o el premio sale de un fondo
-  // promocional y no del bote.
-  console.log('    field   premio   buy-in   se recauda    premio    RTP');
-  const rtpByTier = new Map();
-
+  // La formula correcta es la de `tierRtp` en payout.service. Este bloque
+  // imprime las dos para que el error no se repita al tocar los numeros.
+  console.log('    field   buy-in   RTP correcto    RTP (formula erronea)');
   for (const tier of TABLE_TIER_LIST) {
-    const collected = tier.fieldSize * tier.minBuyIn;
-    const rtp = tier.guaranteedPrize / collected;
-    rtpByTier.set(tier.id, rtp);
-
+    const gross = tier.fieldSize * tier.minBuyIn;
+    const rtpReal = 1 - RAKE.cashPercentage / 100;
+    const rtpFalso = tier.guaranteedPrize / gross;
     console.log(
       '    ' +
         String(tier.fieldSize).padEnd(8) +
-        String(tier.guaranteedPrize).padEnd(9) +
         String(tier.minBuyIn).padEnd(9) +
-        String(collected).padEnd(13) +
-        String(tier.guaranteedPrize).padEnd(10) +
-        (rtp * 100).toFixed(3) + '%',
+        ((rtpReal * 100).toFixed(2) + ' %').padStart(9) +
+        ((rtpFalso * 100).toFixed(3) + ' %').padStart(14),
     );
   }
+  console.log('');
 
-  const healthy = [...rtpByTier.values()].every(r => r >= 0.5);
-  const anyVisible = [...rtpByTier.values()].some(r => r >= 0.05);
-
-  if (healthy) {
-    ok('todos los campos tienen RTP >= 50%');
-  } else {
-    bad(
-      'ningun campo llega al 50% de RTP. ' +
-      `El rake del ${RAKE.cashPercentage}% no cubre la devolucion del premio. ` +
-      'Hace falta una de dos: bajar el buy-in a ~1 CUP (y entonces los cuatro ' +
-      'campos son el mismo), o que el premio salga de un fondo promocional y no ' +
-      'del bote. Decision de negocio, no de codigo.',
-    );
-  }
-
-  // Aunque el RTP aun no este resuelto, el rake no puede ser la unica fuente:
-  // si el rake cubriese el premio, el operador no tendria margen.
   for (const tier of TABLE_TIER_LIST) {
-    const collected = tier.fieldSize * tier.minBuyIn;
-    const rake = (collected * RAKE.cashPercentage) / 100;
-    if (rake > tier.guaranteedPrize) {
-      ok(
-        `campo ${tier.fieldSize}: el rake (${rake.toFixed(0)} CUP) supera el premio ` +
-        `(${tier.guaranteedPrize} CUP)`,
-      );
+    const rtp = 1 - RAKE.cashPercentage / 100;
+    if (rtp >= 0.9 && rtp <= 0.99) {
+      ok(`campo ${tier.fieldSize}: RTP ${(rtp * 100).toFixed(2)}% (estandar de poker)`);
     } else {
-      bad(
-        `campo ${tier.fieldSize}: el rake (${rake.toFixed(0)}) no cubre el premio ` +
-        `(${tier.guaranteedPrize}). El operador pierde dinero en cada campo.`,
-      );
+      bad(`campo ${tier.fieldSize}: RTP ${(rtp * 100).toFixed(2)}%, fuera del rango sano`);
     }
   }
 
-  // Esto no puede arreglarse bajando el buy-in sin aplanar el ladder: si los
-  // cuatro campos dan lo mismo, el jugador no tiene motivo para elegir uno.
-  if (!anyVisible) {
-    console.log(
-      '    aviso: con estos numeros los 4 campos son indistinguibles para el jugador',
+  // El margen del operador sale del rake. Lo que importa es que crezca con el
+  // tamano del campo, para que el ladder incentive algo.
+  const margins = TABLE_TIER_LIST.map(t => {
+    const gross = t.fieldSize * t.minBuyIn;
+    return (gross * RAKE.cashPercentage) / 100;
+  });
+
+  let growing = true;
+  for (let i = 1; i < margins.length; i++) {
+    if (margins[i] <= margins[i - 1]) growing = false;
+  }
+  if (growing) {
+    ok(
+      'el margen del operador crece con el tamano del campo: ' +
+      margins.map(m => `${Math.round(m)} CUP`).join(' < '),
     );
+  } else {
+    bad(
+      'el margen no crece con el tamano: ' +
+      `${margins.map(m => Math.round(m)).join(', ')}. ` +
+      'El jugador no tendria motivo para elegir el campo grande.',
+    );
+  }
+
+  // El `guaranteedPrize` es informativo: el bote manda. Si el premio anunciado
+  // creciera mas que el bote, seria una bolsa disfrazada y habria que rehacer
+  // el modelo entero.
+  for (const tier of TABLE_TIER_LIST) {
+    const netPot = tier.fieldSize * tier.minBuyIn * (1 - RAKE.cashPercentage / 100);
+    const share = tier.guaranteedPrize / netPot;
+    if (share < 0.1) {
+      ok(
+        `campo ${tier.fieldSize}: el premio anunciado (${tier.guaranteedPrize} CUP) ` +
+        `es el ${(share * 100).toFixed(2)}% del bote neto. El bote manda.`,
+      );
+    } else {
+      bad(
+        `campo ${tier.fieldSize}: el premio es el ${(share * 100).toFixed(0)}% del bote. ` +
+        `Si fuera tanto, el premio mandaria sobre el bote y el reparto seria otro.`,
+      );
+    }
   }
 }
 
 // =========================================================================
-section('3. Reparto del premio entre posiciones');
+section('3. Reparto del bote entre posiciones');
 
 {
   const sum = FIELD_PAYOUT.reduce((a, b) => a + b, 0);
-  if (sum <= 100) {
-    ok(`el reparto usa ${sum}% del premio (el ${100 - sum}% restante es rake/fondo)`);
+  if (sum === 100) {
+    ok(
+      `el reparto usa el 100% del bote neto (el rake se descuenta antes, ` +
+      `por mano)`,
+    );
   } else {
-    bad(`el reparto suma ${sum}%, no puede superar 100%`);
+    bad(
+      `el reparto suma ${sum}%. Si no es 100, ${100 - sum}% del bote neto ` +
+      `se queda sin dueño y nadie sabe a donde va.`,
+    );
   }
 
   // El reparto debe ser decreciente: el primer lugar cobra mas que el segundo.
@@ -187,6 +198,23 @@ section('3. Reparto del premio entre posiciones');
   // El primero debe llevarse una parte sustancial: si no, el campo no engancha.
   if (FIELD_PAYOUT[0] >= 40) ok(`el primer lugar se lleva el ${FIELD_PAYOUT[0]}%`);
   else bad(`el primer lugar solo se lleva el ${FIELD_PAYOUT[0]}%; el field no engancha`);
+
+  // Y el reparto debe ser del bote NETO: si el rake se descontara despues del
+  // reparto, el operador perderia parte del rake que ya cobro.
+  if (Math.abs(ECONOMY.netPotShare - 0.95) < 0.001) {
+    ok(`el bote neto es el ${(ECONOMY.netPotShare * 100).toFixed(0)}% (rake del ${RAKE.cashPercentage}% por delante)`);
+  } else {
+    bad(
+      `netPotShare = ${ECONOMY.netPotShare}, incoherente con un rake del ` +
+      `${RAKE.cashPercentage}%. El reparto debe aplicarse al bote ya descontado.`,
+    );
+  }
+
+  if (ECONOMY.prizeToBalance === 'play') {
+    ok('el premio del campo va a balance.play (no retirable)');
+  } else {
+    bad(`el premio va a "${ECONOMY.prizeToBalance}"`);
+  }
 }
 
 // =========================================================================

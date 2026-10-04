@@ -13,6 +13,7 @@ import {
   type TableTierId,
 } from '../config/product';
 import { logger } from '../utils/logger';
+import { splitPrize, fieldPayout, prizeDisclosure } from '../services/payout.service';
 
 export class TableError extends Error {
   status: number;
@@ -440,6 +441,15 @@ export class SeatingService {
     const ranked = [...freeroll.seats].sort((a, b) => b.chips - a.chips);
     const pot = freeroll.hand.pot || freeroll.guaranteedPrize;
 
+    // El reparto lo calcula `splitPrize`, no `Math.floor` por porcentaje.
+    //
+    // El reparto ingenuo descuadra: con un bote de 5 CUP y tres posiciones al
+    // 50/30/20 daba 2 + 1 + 1 = 4, dejando 1 CUP sin dueño. Con botes grandes
+    // los descuadres son de decenas de CUP y al final hay alguien a quien no le
+    // cuadra la cuenta. Y en el extremo opuesto, repartir "floor mas resto a
+    // partes iguales" puede dar MAS de lo que hay: dinero creado.
+    const shares = splitPrize(pot, FREEROLL_PAYOUT);
+
     const results: any[] = [];
 
     for (let position = 1; position <= FREEROLL_PAYOUT.length; position++) {
@@ -447,10 +457,10 @@ export class SeatingService {
       if (!seat) break;
 
       const percentage = FREEROLL_PAYOUT[position - 1];
-      const prize = Math.floor((pot * percentage) / 100);
+      const prize = shares[position - 1] ?? 0;
 
       if (prize > 0 && seat.kind === 'human') {
-        // SALDO NO RETIRABLE
+        // SALDO NO RETIRABLE. Ver ECONOMY.prizeToBalance.
         await User.updateOne(
           { telegramId: Number(seat.playerId) },
           {
