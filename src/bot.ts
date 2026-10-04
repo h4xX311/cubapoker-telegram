@@ -5,7 +5,7 @@ import dotenv from 'dotenv';
 import cors from 'cors';
 import path from 'path';
 import healthRouter from './health';
-import { createGameRoutes } from './game/polling';
+import tableRoutes from './routes/table.routes';
 import monetizationRoutes from './routes/monetization.routes';
 import paymentRoutes from './routes/payment.routes';
 import { monetizationService } from './services/monetization.service';
@@ -15,6 +15,10 @@ import { Game } from './models/Game';
 import { Transaction } from './models/Transaction';
 import { VIP_CONFIG, VIPLevel } from './models/VIP';
 import { SIMULATION_ENABLED, pruneSimulatedOrders } from './services/payment/gateway';
+import { tableManager } from './game/table.manager';
+import { SUIT_SYMBOL } from './game/card.utils';
+import { seatingService } from './game/seating.service';
+import { logger } from './utils/logger';
 
 dotenv.config();
 
@@ -23,19 +27,122 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '../mini-app/dist')));
 
-// Health check
+// Health check unico (antes estaba definido dos veces, la segunda era muerta)
 app.use('/health', healthRouter);
 
-// MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/cubapoker-telegram')
-  .then(() => console.log('✅ MongoDB connected'))
-  .catch(err => console.error('❌ MongoDB error:', err));
+// ---------------------------------------------------------------------------
+// Telegram Bot: webhook en produccion, polling solo en local
+// ---------------------------------------------------------------------------
+// Por que webhook y no polling:
+//  - Render free suspende el servicio tras 15 min de inactividad. Con polling
+//    el bot se desconecta de Telegram y hay que reconectar.
+//  - Con webhook, Telegram es quien llama: no hay sondeos que mantener.
+//  - Es la unica opcion que sobrevive a multiples instancias.
+//
+// En desarrollo mantenemos polling porque no hay URL publica a la que
+// Telegram pueda llamar.
+const USE_WEBHOOK = process.env.NODE_ENV === 'production';
 
-// Telegram Bot
-const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN!, { polling: true });
+const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN!, {
+  polling: !USE_WEBHOOK,
+});
 
-// Game Routes
-app.use('/api/game', createGameRoutes(bot));
+/**
+ * Avisos de turno.
+ *
+ * El gestor de mesas no sabe nada de Telegram (ver `TurnNotifier`): aqui se
+ * traduce su aviso a un mensaje. Solo se manda lo justo para que el jugador
+ * sepa que le toca y abra la mesa. Antes se empujaba el estado completo en
+ * cada movimiento de la mesa, lo que generaba un volumen de mensajes
+ * insostenible y ademas filtraba las cartas del rival al cliente.
+ */
+tableManager.setNotifier(async (notice) => {
+  const user = await User.findOne({ telegramId: notice.telegramId });
+  if (!user) return;
+
+  const chatId = (user as any).chatId as number | undefined;
+  if (!chatId) return;
+
+  const phaseLabel =
+    { preflop: 'Preflop', flop: 'Flop', turn: 'Turn', river: 'River' }[
+      notice.phase
+    ] ?? notice.phase;
+
+  const cards = notice.cards
+    .map(c => `${c.rank}${SUIT_SYMBOL[c.suit] ?? ''}`)
+    .join('  ');
+
+  const instruction = notice.toCall === 0
+    ? 'Puedes pasar o subir.'
+    : `Debes poner *${notice.toCall} CUP* para continuar.`;
+
+  const body = [
+    `🎯 *Te toca* · ${phaseLabel}`,
+    '',
+    `🃏 ${cards}`,
+    `💰 Bote: ${notice.pot} CUP · tus fichas: ${notice.chips}`,
+    '',
+    instruction,
+    `⏱️ Tienes ${Math.round(notice.deadlineMs / 1000)} s. Si no respondes, el motor juega por ti.`,
+  ].join('\n');
+
+  await bot.sendMessage(chatId, body, {
+    parse_mode: 'Markdown',
+    reply_markup: {
+      inline_keyboard: [
+        [
+          {
+            text: '🃏 Jugar mi turno',
+            web_app: { url: `${process.env.MINI_APP_URL}/game` },
+          },
+        ],
+      ],
+    },
+  });
+});
+
+if (USE_WEBHOOK) {
+  // Verificacion de la firma del webhook. Sin esto, cualquiera podria enviar
+  // updates falsos y hacerse pasar por Telegram.
+  const secret = process.env.TELEGRAM_WEBHOOK_SECRET || '';
+
+  app.post('/telegram/webhook', (req, res) => {
+    if (secret) {
+      const provided = req.headers['x-telegram-bot-api-secret-token'];
+      if (provided !== secret) {
+        res.sendStatus(403);
+        return;
+      }
+    }
+    bot.processUpdate(req.body);
+    res.sendStatus(200);
+  });
+
+  // Registro del webhook. Render inyecta la URL publica en RENDER_EXTERNAL_URL.
+  app.get('/telegram/setup', async (_req, res) => {
+    const base =
+      process.env.MINI_APP_URL?.replace(/^https?:\/\//, '').split('/')[0] ||
+      process.env.RENDER_EXTERNAL_URL;
+
+    if (!base) {
+      res.status(400).json({ error: 'Falta MINI_APP_URL o RENDER_EXTERNAL_URL' });
+      return;
+    }
+
+    const url = `https://${base}/telegram/webhook`;
+    try {
+      await bot.setWebHook(url, {
+        secret_token: process.env.TELEGRAM_WEBHOOK_SECRET || undefined,
+      });
+      res.json({ success: true, webhook: url });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+}
+
+// Game Routes (mesas cash, freerolls, acciones)
+app.use('/api/game', tableRoutes);
 
 // Monetization Routes
 app.use('/api/monetization', monetizationRoutes);
@@ -61,12 +168,18 @@ bot.onText(/\/start/, async (msg) => {
   await User.findOneAndUpdate(
     { telegramId: user.id },
     {
-      telegramId: user.id,
-      username: user.username,
-      firstName: user.first_name,
-      lastName: user.last_name,
+      // Se guarda `chatId` para poder avisar de turnos. Solo se registra si el
+      // mensaje llega en un chat privado (tipo "private"): en un grupo el aviso
+      // "te toca" se leeria en voz alta y molestaria a los demas.
+      $set: {
+        telegramId: user.id,
+        username: user.username,
+        firstName: user.first_name,
+        lastName: user.last_name,
+        ...(msg.chat.type === 'private' ? { chatId: msg.chat.id } : {}),
+      },
     },
-    { upsert: true, new: true }
+    { upsert: true, new: true, setDefaultsOnInsert: true }
   );
 
   const welcomeMessage = `
@@ -130,21 +243,60 @@ bot.onText(/\/play/, async (msg) => {
     return;
   }
 
-  if (dbUser.balance.credits < 100) {
-    bot.sendMessage(chatId, '❌ Necesitas al menos 100 CUP para jugar. Usa /deposit para depositar.');
+  // Para jugar se usa el saldo total: el de promocion tambien sirve para
+  // sentarse en mesas cash (es su proposito).
+  const total = dbUser.balance.real + dbUser.balance.play;
+
+  if (total < 200) {
+    bot.sendMessage(
+      chatId,
+      '❌ Necesitas al menos 200 CUP para jugar.\n\n' +
+      'Tu saldo:\n' +
+      `• Real (retirable): ${dbUser.balance.real} CUP\n` +
+      `• Promoción: ${dbUser.balance.play} CUP\n\n` +
+      'Deposita con /deposit o entra a un freeroll gratis con /freeroll.',
+    );
     return;
   }
 
   const keyboard = {
     inline_keyboard: [
-      [{ text: '🎮 Entrar a la mesa', web_app: { url: `${process.env.MINI_APP_URL}/game` } }],
-    ]
+      [{ text: '🎮 Jugar', web_app: { url: `${process.env.MINI_APP_URL}/game` } }],
+      [{ text: '🎁 Freeroll gratis', web_app: { url: `${process.env.MINI_APP_URL}/freeroll` } }],
+    ],
   };
 
-  bot.sendMessage(chatId, '🎮 *Mesa de Poker*\n\nBalance: ' + dbUser.balance.credits + ' CUP', {
-    parse_mode: 'Markdown',
-    reply_markup: keyboard,
-  });
+  bot.sendMessage(
+    chatId,
+    `🎮 *Mesas de Poker*\n\n` +
+      `Saldo total: ${total} CUP\n` +
+      `• Real: ${dbUser.balance.real} CUP\n` +
+      `• Promoción: ${dbUser.balance.play} CUP\n\n` +
+      'Mesas de 50 a 500 jugadores con premio garantizado.',
+    {
+      parse_mode: 'Markdown',
+      reply_markup: keyboard,
+    },
+  );
+});
+
+bot.onText(/\/freeroll/, async (msg) => {
+  const chatId = msg.chat.id;
+
+  const keyboard = {
+    inline_keyboard: [
+      [{ text: '🎁 Entrar al freeroll', web_app: { url: `${process.env.MINI_APP_URL}/freeroll` } }],
+    ],
+  };
+
+  bot.sendMessage(
+    chatId,
+    '🎁 *Freerolls gratuit\cos*\n\n' +
+      'Premios de 5 a 50 CUP sin buy-in.\n\n' +
+      '⚠️ *Importante:* el saldo que ganas aqui es solo para jugar dentro de ' +
+      'CubaPoker en cualquier mesa cash. No se puede retirar.',
+    { parse_mode: 'Markdown', reply_markup: keyboard },
+  );
 });
 
 bot.onText(/\/tournaments/, async (msg) => {
@@ -326,11 +478,14 @@ bot.onText(/\/balance/, async (msg) => {
   const balanceMessage = `
 💰 *Tu Balance*
 
-• Créditos: ${dbUser.balance.credits} CUP
-• USDT: ${dbUser.balance.usdt.toFixed(2)}
+• *Real (retirable):* ${dbUser.balance.real} CUP
+• *Promoción (solo jugar):* ${dbUser.balance.play} CUP
+• *Total:* ${dbUser.balance.real + dbUser.balance.play} CUP
 
 👑 *VIP:* ${vipLevel ? VIP_CONFIG[vipLevel].name : 'No VIP'}
 🔥 *Racha:* ${streak.current} días
+
+El saldo de promoción sirve para jugar en cualquier mesa cash pero *no se puede retirar*.
 
 Para depositar: /deposit
 Para retirar: /withdraw
@@ -405,7 +560,16 @@ app.get('/api/me', requireTelegramAuth, async (req, res) => {
         username: user.username,
         firstName: user.firstName,
         lastName: user.lastName,
-        balance: user.balance,
+        // La UI muestra los dos saldos por separado: `real` es el unico
+        // retirable y `play` es saldo de promocion.
+        balance: {
+          real: user.balance.real,
+          play: user.balance.play,
+          total: user.balance.real + user.balance.play,
+          withdrawable: user.balance.real,
+        },
+        stats: user.stats,
+        activeTableId: user.activeTableId,
         vip: vipLevel,
       },
     });
@@ -440,19 +604,36 @@ app.get('*', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 CubaPoker Telegram Bot running on port ${PORT}`);
-  console.log(`📱 Mini App URL: ${process.env.MINI_APP_URL}`);
-  console.log(`🔒 Autenticación de Mini App: activa`);
-  console.log(
-    `💳 Modo de pago: ${SIMULATION_ENABLED ? 'SIMULACIÓN (sin dinero real)' : 'PRODUCCIÓN'}`,
-  );
-  console.log(`💰 Monetization system initialized`);
 
-  // Limpieza periodica de ordenes simuladas caducadas
-  const pruneTimer = setInterval(
-    () => pruneSimulatedOrders(),
-    5 * 60 * 1000,
-  );
+/**
+ * Arranque.
+ *
+ * El orden importa: primero MongoDB (todo depende de el), despues las mesas
+ * base (para que el lobby nunca este vacio) y por ultimo el gestor de mesas,
+ * que recupera las manos interrumpidas por un reinicio anterior.
+ */
+const start = async () => {
+  await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/cubapoker');
+  logger.info('MongoDB conectado');
+
+  await seatingService.seedTables();
+  await tableManager.start();
+
+  app.listen(PORT, () => {
+    logger.info(`CubaPoker escuchando en el puerto ${PORT}`);
+    logger.info(`Mini App: ${process.env.MINI_APP_URL || '(sin configurar)'}`);
+    logger.info(
+      `Pagos: ${SIMULATION_ENABLED ? 'SIMULACION (sin dinero real)' : 'PRODUCCION'}`,
+    );
+    logger.info(`Bot: ${USE_WEBHOOK ? 'webhook' : 'polling (local)'}`);
+  });
+
+  // Limpieza de ordenes simuladas caducadas
+  const pruneTimer = setInterval(() => pruneSimulatedOrders(), 5 * 60 * 1000);
   pruneTimer.unref();
+};
+
+start().catch((error) => {
+  logger.error('Fallo al arrancar:', error);
+  process.exit(1);
 });

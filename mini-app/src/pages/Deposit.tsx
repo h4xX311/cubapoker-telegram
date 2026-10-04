@@ -216,8 +216,11 @@ export function Deposit({ user, onBack, onCheckout }: Props) {
           saldo se acredita cuando el pago se confirme, no antes.
         </p>
         <p className="text-xs text-[#a0a0b0] leading-relaxed mt-2">
-          <span className="text-white font-semibold">Tu saldo:</span>{' '}
-          {user?.balance?.credits ?? 0} CUP
+          <span className="text-white font-semibold">Tu saldo retirable:</span>{' '}
+          {user?.balance?.real ?? 0} CUP
+          {(user?.balance?.play ?? 0) > 0 && (
+            <> · depósito de {user?.balance?.play ?? 0} CUP de promoción</>
+          )}
         </p>
       </div>
     </div>

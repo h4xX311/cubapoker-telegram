@@ -41,7 +41,8 @@ export function Withdraw({ user, onBack, onBalanceChange }: Props) {
     })();
   }, []);
 
-  const balance = user?.balance?.credits ?? 0;
+  const realBalance = user?.balance?.real ?? 0;
+  const playBalance = user?.balance?.play ?? 0;
   const numericAmount = Number(amount) || 0;
   const minimum = MINIMUMS[provider];
   const selectedChain = chains.find(c => c.id === chainId);
@@ -52,7 +53,11 @@ export function Withdraw({ user, onBack, onBalanceChange }: Props) {
   const validationError = (() => {
     if (!numericAmount) return '';
     if (numericAmount < minimum) return `El mínimo es ${minimum} CUP.`;
-    if (numericAmount > balance) return 'No tienes saldo suficiente.';
+    if (numericAmount > realBalance) {
+      return playBalance > 0
+        ? `Solo puedes retirar saldo real. Tienes ${realBalance} CUP retirables (tus ${playBalance} CUP de promoción no se retiran).`
+        : 'No tienes saldo suficiente.';
+    }
     if (provider === 'usdt' && !address) return 'Introduce tu dirección.';
     if (invalidAddress) return `Dirección inválida para ${selectedChain?.name}.`;
     return '';
@@ -112,8 +117,16 @@ export function Withdraw({ user, onBack, onBalanceChange }: Props) {
         className="rounded-2xl p-4 mb-5"
         style={{ background: '#16213e', border: '1px solid #2a2a4a' }}
       >
-        <p className="text-[#a0a0b0] text-xs uppercase tracking-wide mb-1">Disponible</p>
-        <p className="text-3xl font-bold text-[#00d26a]">{balance} CUP</p>
+        <p className="text-[#a0a0b0] text-xs uppercase tracking-wide mb-1">
+          Disponible para retirar
+        </p>
+        <p className="text-3xl font-bold text-[#00d26a]">{realBalance} CUP</p>
+        {playBalance > 0 && (
+          <p className="text-[11px] text-[#ffd700] mt-2 leading-relaxed">
+            + {playBalance} CUP de promoción que {playBalance === 1 ? 'no es' : 'no son'}{' '}
+            retirables. Sirven para jugar en las mesas cash.
+          </p>
+        )}
       </div>
 
       {/* Método */}
@@ -177,7 +190,7 @@ export function Withdraw({ user, onBack, onBalanceChange }: Props) {
           aria-label="Monto a retirar"
         />
         <button
-          onClick={() => setAmount(String(balance))}
+          onClick={() => setAmount(String(realBalance))}
           className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-semibold text-[#00d26a]"
         >
           MÁX

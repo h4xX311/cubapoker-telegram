@@ -29,12 +29,13 @@ export const shuffleDeck = (deck: Card[]): Card[] => {
   return shuffled;
 };
 
-export const cardToString = (card: Card): string => {
-  const suitSymbols: Record<Suit, string> = {
-    hearts: '♥',
-    diamonds: '♦',
-    clubs: '♣',
-    spades: '♠',
-  };
-  return `${card.rank}${suitSymbols[card.suit]}`;
+export const SUIT_SYMBOL: Record<Suit, string> = {
+  hearts: '♥',
+  diamonds: '♦',
+  clubs: '♣',
+  spades: '♠',
 };
+
+export const cardToString = (card: Card): string =>
+  `${card.rank}${SUIT_SYMBOL[card.suit]}`;
+

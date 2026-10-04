@@ -5,30 +5,20 @@ interface HomeProps {
   onNavigate: (page: Page) => void;
 }
 
-const NAV_ITEMS: {
-  page: Page;
-  emoji: string;
-  label: string;
-  sub: string;
-  accent: string;
-}[] = [
-  { page: 'game', emoji: '🎮', label: 'Jugar', sub: 'Cash game', accent: 'from-[#00d26a] to-[#00b894]' },
-  { page: 'tournaments', emoji: '🏆', label: 'Torneos', sub: 'Premios reales', accent: 'from-[#ffd700] to-[#ffb700]' },
-  { page: 'vip', emoji: '👑', label: 'VIP', sub: 'Menos rake', accent: 'from-[#e74c3c] to-[#c0392b]' },
-  { page: 'achievements', emoji: '🎖️', label: 'Logros', sub: 'Recompensas', accent: 'from-[#9b59b6] to-[#8e44ad]' },
-  { page: 'referrals', emoji: '👥', label: 'Referidos', sub: 'Gana 10%', accent: 'from-[#3498db] to-[#2980b9]' },
-  { page: 'deposit', emoji: '💰', label: 'Depositar', sub: 'EnZona · USDT', accent: 'from-[#00d26a] to-[#00b894]' },
-  { page: 'withdraw', emoji: '💸', label: 'Retirar', sub: '24-48 h', accent: 'from-[#ff4757] to-[#c0392b]' },
-];
-
-const PAYMENT_METHODS = [
-  { flag: '🇨🇺', name: 'EnZona', note: 'Pago móvil' },
-  { flag: '💳', name: 'QvaPay', note: 'Tarjeta' },
-  { flag: '₮', name: 'USDT', note: 'TRC20' },
+const NAV: { page: Page; emoji: string; label: string; sub: string; accent: string }[] = [
+  { page: 'tables', emoji: '🃏', label: 'Mesas cash', sub: '50 a 500 jugadores', accent: 'from-[#00d26a] to-[#00b894]' },
+  { page: 'freeroll', emoji: '🎁', label: 'Freeroll', sub: 'Gratis · 5-50 CUP', accent: 'from-[#ffd700] to-[#ffb700]' },
+  { page: 'tournaments', emoji: '🏆', label: 'Torneos', sub: 'Con premio', accent: 'from-[#e67e22] to-[#d35400]' },
+  { page: 'vip', emoji: '👑', label: 'VIP', sub: 'Menos rake', accent: 'from-[#9b59b6] to-[#8e44ad]' },
+  { page: 'achievements', emoji: '🎖️', label: 'Logros', sub: 'Recompensas', accent: 'from-[#3498db] to-[#2980b9]' },
+  { page: 'referrals', emoji: '👥', label: 'Referidos', sub: 'Gana 10%', accent: 'from-[#16a085] to-[#1abc9c]' },
 ];
 
 export function Home({ user, onNavigate }: HomeProps) {
-  const usdEstimate = ((user?.balance?.credits ?? 0) / 350).toFixed(2);
+  const real = user?.balance?.real ?? 0;
+  const play = user?.balance?.play ?? 0;
+  const total = user?.balance?.total ?? 0;
+  const stats = user?.stats;
 
   return (
     <div className="p-4 pb-10 animate-fadeIn">
@@ -40,27 +30,42 @@ export function Home({ user, onNavigate }: HomeProps) {
         </h1>
       </div>
 
-      {/* Tarjeta de saldo */}
+      {/* Saldo: se separan real y promocion porque solo uno es retirable */}
       <section
-        className="rounded-2xl p-5 mb-5 relative overflow-hidden"
+        className="rounded-2xl p-5 mb-2"
         style={{
           background: 'linear-gradient(135deg, #0d3b2e 0%, #0f3460 100%)',
           border: '1px solid rgba(0,210,106,0.25)',
         }}
         aria-label="Tu saldo"
       >
-        <div className="flex items-start justify-between mb-4">
+        <div className="flex items-start justify-between mb-3">
           <span className="text-[#a0a0b0] text-xs uppercase tracking-wide">
-            Saldo disponible
+            Saldo total
           </span>
-          <span className="badge badge-success text-[10px]">Activo</span>
+          {user?.vip && <span className="badge badge-warning text-[10px]">{user.vip}</span>}
         </div>
 
         <p className="text-4xl font-bold text-white leading-none">
-          {user?.balance?.credits ?? 0}
+          {total}
           <span className="text-lg text-[#a0a0b0] font-normal ml-2">CUP</span>
         </p>
-        <p className="text-sm text-[#a0a0b0] mt-2">≈ {usdEstimate} USDT</p>
+
+        {/* Desglose */}
+        <div className="grid grid-cols-2 gap-3 mt-4 pt-4 border-t border-white/10">
+          <div>
+            <p className="text-[10px] text-[#a0a0b0] uppercase tracking-wide">
+              Real · retirable
+            </p>
+            <p className="text-lg font-bold text-[#00d26a]">{real}</p>
+          </div>
+          <div>
+            <p className="text-[10px] text-[#a0a0b0] uppercase tracking-wide">
+              Promoción · solo jugar
+            </p>
+            <p className="text-lg font-bold text-[#ffd700]">{play}</p>
+          </div>
+        </div>
 
         <div className="flex gap-2 mt-4">
           <button
@@ -72,73 +77,58 @@ export function Home({ user, onNavigate }: HomeProps) {
           <button
             onClick={() => onNavigate('withdraw')}
             className="flex-1 btn btn-outline py-2.5 text-sm"
+            disabled={real < 1000}
+            title={real < 1000 ? 'Minimo 1000 CUP retirables' : undefined}
           >
             Retirar
           </button>
         </div>
       </section>
 
-      {/* Acciones */}
-      <h2 className="text-[#a0a0b0] text-xs uppercase tracking-wide mb-3">Jugar</h2>
-      <div className="grid grid-cols-2 gap-3 mb-6">
-        {NAV_ITEMS.filter(i => ['game', 'tournaments', 'vip', 'achievements'].includes(i.page)).map(
-          (item, i) => (
-            <button
-              key={item.page}
-              onClick={() => onNavigate(item.page)}
-              className="card flex flex-col items-start p-4 text-left hover:border-[#00d26a] transition-all animate-slideUp"
-              style={{ animationDelay: `${i * 40}ms` }}
-            >
-              <div
-                className={`w-11 h-11 rounded-xl bg-gradient-to-br ${item.accent} flex items-center justify-center mb-3 shadow-lg`}
-              >
-                <span className="text-xl">{item.emoji}</span>
-              </div>
-              <span className="font-semibold text-white text-sm">{item.label}</span>
-              <span className="text-xs text-[#a0a0b0]">{item.sub}</span>
-            </button>
-          ),
-        )}
-      </div>
-
-      {/* Dinero */}
-      <h2 className="text-[#a0a0b0] text-xs uppercase tracking-wide mb-3">Mi dinero</h2>
-      <div className="grid grid-cols-3 gap-3 mb-6">
-        {NAV_ITEMS.filter(i => ['referrals', 'deposit', 'withdraw'].includes(i.page)).map(
-          (item, i) => (
-            <button
-              key={item.page}
-              onClick={() => onNavigate(item.page)}
-              className="card flex flex-col items-center p-4 hover:border-[#00d26a] transition-all animate-slideUp"
-              style={{ animationDelay: `${i * 40}ms` }}
-            >
-              <div
-                className={`w-10 h-10 rounded-full bg-gradient-to-br ${item.accent} flex items-center justify-center mb-2`}
-              >
-                <span className="text-lg">{item.emoji}</span>
-              </div>
-              <span className="font-semibold text-white text-xs text-center leading-tight">
-                {item.label}
-              </span>
-            </button>
-          ),
-        )}
-      </div>
-
-      {/* Métodos de pago */}
-      <h2 className="text-[#a0a0b0] text-xs uppercase tracking-wide mb-3">
-        Métodos de pago
-      </h2>
-      <div className="card mb-6">
-        <div className="grid grid-cols-3 gap-3">
-          {PAYMENT_METHODS.map(m => (
-            <div key={m.name} className="flex flex-col items-center gap-1.5">
-              <span className="text-xl">{m.flag}</span>
-              <span className="text-xs font-semibold text-white">{m.name}</span>
-              <span className="text-[10px] text-[#a0a0b0]">{m.note}</span>
-            </div>
-          ))}
+      {/* Aviso de saldo promo si existe */}
+      {play > 0 && (
+        <div
+          className="rounded-xl p-3 mb-5 flex items-start gap-2.5"
+          style={{ background: 'rgba(255,215,0,0.08)', border: '1px solid rgba(255,215,0,0.25)' }}
+        >
+          <span className="text-sm">⚠️</span>
+          <p className="text-[11px] text-[#a0a0b0] leading-relaxed">
+            Tienes <strong className="text-[#ffd700]">{play} CUP</strong> de promoción
+            (freerolls y logros). Sirven para jugar en cualquier mesa cash pero{' '}
+            <strong className="text-white">no se pueden retirar</strong>. Tu saldo
+            retirable es {real} CUP.
+          </p>
         </div>
+      )}
+
+      {/* Navegacion principal */}
+      <div className="grid grid-cols-2 gap-3 mb-6">
+        {NAV.map((item, i) => (
+          <button
+            key={item.page}
+            onClick={() => onNavigate(item.page)}
+            className="card flex flex-col items-start p-4 text-left hover:border-[#00d26a] transition-all animate-slideUp"
+            style={{ animationDelay: `${i * 40}ms` }}
+          >
+            <div
+              className={`w-11 h-11 rounded-xl bg-gradient-to-br ${item.accent} flex items-center justify-center mb-3 shadow-lg`}
+            >
+              <span className="text-xl">{item.emoji}</span>
+            </div>
+            <span className="font-semibold text-white text-sm">{item.label}</span>
+            <span className="text-[11px] text-[#a0a0b0]">{item.sub}</span>
+          </button>
+        ))}
+      </div>
+
+      {/* Estadisticas */}
+      <h2 className="text-[#a0a0b0] text-xs uppercase tracking-wide mb-3">
+        Mi actividad
+      </h2>
+      <div className="grid grid-cols-3 gap-3 mb-6">
+        <Stat label="Manos" value={stats?.handsPlayed ?? 0} color="#00d26a" />
+        <Stat label="Ganadas" value={stats?.handsWon ?? 0} color="#ffd700" />
+        <Stat label="Freerolls" value={stats?.freerollsPlayed ?? 0} color="#3498db" />
       </div>
 
       {/* Confianza */}
@@ -152,6 +142,17 @@ export function Home({ user, onNavigate }: HomeProps) {
           </p>
         </div>
       </div>
+    </div>
+  );
+}
+
+function Stat({ label, value, color }: { label: string; value: number; color: string }) {
+  return (
+    <div className="card text-center p-4">
+      <p className="text-2xl font-bold" style={{ color }}>
+        {value}
+      </p>
+      <p className="text-[10px] text-[#a0a0b0]">{label}</p>
     </div>
   );
 }

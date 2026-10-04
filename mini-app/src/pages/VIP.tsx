@@ -55,7 +55,7 @@ export function VIP({ user, onBack, onBalanceChange }: Props) {
     }
   };
 
-  const balance = user?.balance?.credits ?? 0;
+  const realBalance = user?.balance?.real ?? 0;
 
   return (
     <div className="p-4 pb-10 animate-fadeIn">
@@ -95,7 +95,7 @@ export function VIP({ user, onBack, onBalanceChange }: Props) {
               const cfg = configs[level];
               const meta = LEVELS[level];
               const owned = currentLevel === level;
-              const canAfford = balance >= cfg.price;
+              const canAfford = realBalance >= cfg.price;
 
               return (
                 <article
@@ -146,7 +146,7 @@ export function VIP({ user, onBack, onBalanceChange }: Props) {
                       : busy === level
                       ? 'Procesando…'
                       : !canAfford
-                      ? `Te faltan ${cfg.price - balance} CUP`
+                      ? `Te faltan ${cfg.price - realBalance} CUP`
                       : 'Activar'}
                   </button>
                 </article>

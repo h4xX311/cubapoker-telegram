@@ -146,6 +146,37 @@
   .neon-gold {
     box-shadow: 0 0 0 1px #ffd700, 0 0 18px rgba(255, 215, 0, 0.18);
   }
+
+  /* Carta de poker */
+  .playing-card {
+    @apply bg-white rounded-lg flex flex-col items-center justify-center font-bold;
+    width: 44px;
+    height: 64px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  }
+
+  .playing-card.large {
+    width: 58px;
+    height: 82px;
+  }
+
+  .playing-card .rank {
+    font-size: 18px;
+    line-height: 1.1;
+  }
+
+  .playing-card.large .rank {
+    font-size: 24px;
+  }
+
+  .playing-card .suit {
+    font-size: 20px;
+    line-height: 1;
+  }
+
+  .playing-card.large .suit {
+    font-size: 26px;
+  }
 }
 
 @keyframes spin {

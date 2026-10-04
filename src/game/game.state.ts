@@ -41,10 +41,59 @@ export interface GameState {
   updatedAt: Date;
 }
 
+/**
+ * Tope por defecto de jugadores en el motor. El producto opera mesas de hasta
+ * 500, asi que el valor por defecto es generoso y cada mesa lo ajusta a su
+ * `maxSeats`.
+ */
+export const DEFAULT_MAX_PLAYERS = 500;
+
+/**
+ * Maximo de jugadores con los que se puede repartir una mano de poker real.
+ *
+ * Una baraja son 52 cartas. Cada jugador recibe 2 y la mesa necesita 5 cartas
+ * comunitarias, asi que el techo es `(52 - 5) / 2 = 23`.
+ *
+ * Ojo con el 26: parece que caben 26 (52 / 2) pero no, porque las 5 cartas de
+ * la mesa no son opcionales. Con 26 jugadores el reparto se come la baraja
+ * entera y el flop hace `deck.pop()` sobre un mazo vacio: se reparten cartas
+ * `undefined` y el evaluador revienta con
+ * `Cannot read properties of undefined (reading 'suit')`.
+ *
+ * El producto ofrece mesas de 50 a 500 participantes, lo cual es imposible como
+ * una sola mano: no existen "mesas cash de 500 jugadores" en el poker. Lo que si
+ * existe (y hacen CoinPoker y similares) es una sala donde todos permanecen
+ * sentados y se juega por tandas hasta que quedan pocos.
+ */
+export const MAX_DEALABLE_PLAYERS = Math.floor((52 - 5) / 2); // 23
+
 export class PokerGame {
   private state: GameState;
 
-  constructor(gameId: string, smallBlind: number = 1, bigBlind: number = 2) {
+  /**
+   * Reparte una carta comunitaria. Si el mazo se agotara, se registra y la
+   * mano vuelve a 'waiting' en vez de seguir repartiendo `undefined`: una carta
+   * `undefined` revienta el evaluador y tumba la mesa entera.
+   */
+  private dealCommunity(count: number): boolean {
+    for (let i = 0; i < count; i++) {
+      const card = this.state.deck.pop();
+      if (!card) {
+        this.state.phase = 'waiting';
+        return false;
+      }
+      this.state.communityCards.push(card);
+    }
+    return true;
+  }
+
+  constructor(
+    gameId: string,
+    smallBlind: number = 1,
+    bigBlind: number = 2,
+    maxPlayers: number = DEFAULT_MAX_PLAYERS,
+  ) {
+    this.maxPlayers = maxPlayers;
     this.state = {
       gameId,
       phase: 'waiting',
@@ -65,13 +114,26 @@ export class PokerGame {
     };
   }
 
+  /**
+   * Tope de jugadores sentados.
+   *
+   * El motor arranca con 6 porque es el maximo de una mesa 6-max. Pero CubaPoker
+   * opera mesas de 50 a 500 jugadores, asi que el tope se recibe al construir
+   * el motor. Antes estaba fijado en 6 y cualquier mesa grande no arranca:
+   * `addPlayer` devolvia false y `startGame` se quedaba con 2 jugadores.
+   */
+  private readonly maxPlayers: number;
+
   getState(): GameState {
     return { ...this.state };
   }
 
   addPlayer(id: string, username: string, chips: number): boolean {
-    if (this.state.players.length >= 6) return false;
+    if (this.state.players.length >= this.maxPlayers) return false;
     if (this.state.phase !== 'waiting') return false;
+    // Un asiento no puede ocupar dos veces al mismo jugador en la misma mano.
+    if (this.state.players.some(p => p.id === id)) return false;
+    if (chips <= 0) return false;
 
     this.state.players.push({
       id,
@@ -94,8 +156,22 @@ export class PokerGame {
     this.state.players = this.state.players.filter(p => p.id !== id);
   }
 
-  startGame(): boolean {
+  /**
+   * Arranca la mano.
+   *
+   * `startingDealerIndex` permite que el boton gire de mano a mano. Sin ese
+   * parametro el dealer se quedaba clavado en el asiento 0 para siempre, que
+   * en poker es directamente incorrecto (y da ventaja a quien ocupe ese
+   * asiento). El gestor de mesas lo mantiene persistido entre manos.
+   */
+  startGame(startingDealerIndex?: number): boolean {
     if (this.state.players.length < 2) return false;
+
+    // Comprobacion antes de tocar nada: una mano necesita dos cartas por
+    // jugador y la baraja tiene 52. Si no caben, no se arranca la mano. Antes
+    // se repartia lo que cupiera y se dejaba al resto sin cartas, con lo que
+    // la mesa jugaba una mano rota en la que casi nadie tenia cartas.
+    if (this.state.players.length > MAX_DEALABLE_PLAYERS) return false;
 
     this.state.phase = 'preflop';
     this.state.deck = shuffleDeck(createDeck());
@@ -113,9 +189,16 @@ export class PokerGame {
       p.hand = undefined;
     });
 
-    this.state.dealerIndex = 0;
-    this.state.smallBlindIndex = 1 % this.state.players.length;
-    this.state.bigBlindIndex = 2 % this.state.players.length;
+    // Dealer y ciegas. El orden es estandar: el boton esta a la izquierda del
+    // boton de la ciega grande, que es quien primero actua despues del reparto.
+    const n = this.state.players.length;
+
+    if (typeof startingDealerIndex === 'number' && startingDealerIndex >= 0) {
+      this.state.dealerIndex = Math.floor(startingDealerIndex) % n;
+    }
+
+    this.state.smallBlindIndex = (this.state.dealerIndex + 1) % n;
+    this.state.bigBlindIndex = (this.state.dealerIndex + 2) % n;
 
     this.state.players[this.state.dealerIndex].isDealer = true;
     this.state.players[this.state.smallBlindIndex].isSmallBlind = true;
@@ -146,13 +229,23 @@ export class PokerGame {
     }
   }
 
+  /**
+   * Reparte dos cartas a cada jugador.
+   *
+   * `startGame` ya ha comprobado que caben (MAX_DEALABLE_PLAYERS), asi que aqui
+   * siempre hay cartas suficientes. Si aun asi faltara alguna, se registra en
+   * vez de repartir un duplicado: dos cartas iguales en jugadores distintos
+   * hacen la mano imevaluable y el showdown daria un ganador arbitrario.
+   */
   private dealCards(): void {
     for (let i = 0; i < 2; i++) {
       for (const player of this.state.players) {
         const card = this.state.deck.pop();
-        if (card) {
-          player.cards.push(card);
+        if (!card) {
+          this.state.phase = 'waiting';
+          return;
         }
+        player.cards.push(card);
       }
     }
   }
@@ -267,33 +360,54 @@ export class PokerGame {
     this.state.currentBet = 0;
     this.state.minRaise = this.state.bigBlind;
 
-    switch (this.state.phase) {
-      case 'preflop':
-        this.state.phase = 'flop';
-        this.state.communityCards.push(this.state.deck.pop()!);
-        this.state.communityCards.push(this.state.deck.pop()!);
-        this.state.communityCards.push(this.state.deck.pop()!);
-        break;
-      case 'flop':
-        this.state.phase = 'turn';
-        this.state.communityCards.push(this.state.deck.pop()!);
-        break;
-      case 'turn':
-        this.state.phase = 'river';
-        this.state.communityCards.push(this.state.deck.pop()!);
-        break;
-      case 'river':
-        this.state.phase = 'showdown';
-        this.endGame();
-        return;
+    // 3 cartas en el flop, 1 en turn y 1 en river. En river ya no hay ronda de
+    // apuesta: se pasa a mostrar cartas.
+    const stages: Record<string, { to: GamePhase; cards: number } | null> = {
+      preflop: { to: 'flop', cards: 3 },
+      flop: { to: 'turn', cards: 1 },
+      turn: { to: 'river', cards: 1 },
+      river: null,
+    };
+
+    const stage: { to: GamePhase; cards: number } | null =
+      stages[this.state.phase];
+    if (!stage) {
+      this.state.phase = 'showdown';
+      this.endGame();
+      return;
     }
 
-    this.state.currentPlayerIndex = (this.state.dealerIndex + 1) % this.state.players.length;
+    // Si el mazo no da para la mesa, la mano se detiene en vez de seguir con
+    // cartas `undefined` (que revientan el evaluador y tumban la mesa).
+    if (!this.dealCommunity(stage.cards)) return;
+
+    this.state.phase = stage.to;
+
+    // Empieza el primero despues del boton (UTG). El bucle necesita un tope:
+    // si todos los demas estan all-in o folded no hay a quien dar la palabra, y
+    // antes esto entraba en bucle infinito colgando el proceso entero.
+    this.state.currentPlayerIndex =
+      (this.state.dealerIndex + 1) % this.state.players.length;
+    const start = this.state.currentPlayerIndex;
+    let hops = 0;
+
     while (
+      (this.state.players[this.state.currentPlayerIndex].folded ||
+        this.state.players[this.state.currentPlayerIndex].allIn) &&
+      hops < this.state.players.length
+    ) {
+      this.state.currentPlayerIndex =
+        (this.state.currentPlayerIndex + 1) % this.state.players.length;
+      hops++;
+    }
+
+    // Nadie puede actuar en esta calle: se muestra directamente.
+    if (
       this.state.players[this.state.currentPlayerIndex].folded ||
       this.state.players[this.state.currentPlayerIndex].allIn
     ) {
-      this.state.currentPlayerIndex = (this.state.currentPlayerIndex + 1) % this.state.players.length;
+      this.state.currentPlayerIndex = start;
+      this.endGame();
     }
   }
 
@@ -302,13 +416,60 @@ export class PokerGame {
 
     const activePlayers = this.state.players.filter(p => !p.folded);
 
+    // El bote se reparte SIEMPRE, y a los que no les toca devolverlo.
+    //
+    // Antes se repartia `floor(pot / winners)` a cada ganador y el resto se
+    // quedaba en el bote sin destino. Con dos ganadores impares eso perdia
+    // fichas reales del sistema: cada mano restaba 1-2 CUP de la circulacion
+    // sin que nadie los recibiera. Con el tiempo las fichas se evaporan y el
+    // boton de la mesa llega a 0 para todo el mundo.
+    const awardPot = (winnerIds: string[], amounts?: number[]): void => {
+      const pool = this.state.pot;
+      if (pool <= 0 || winnerIds.length === 0) {
+        this.state.pot = 0;
+        return;
+      }
+
+      const shares =
+        amounts ??
+        // Reparto con resto explicito: los primeros cobran una unidad extra
+        // para que la suma cuadre exactamente con el bote.
+        Array.from({ length: winnerIds.length }, (_, i) =>
+          Math.floor(pool / winnerIds.length) + (i < pool % winnerIds.length ? 1 : 0),
+        );
+
+      let paid = 0;
+      winnerIds.forEach((id, i) => {
+        const player = this.state.players.find(p => p.id === id);
+        if (!player) return;
+        const amount = shares[i];
+        player.chips += amount;
+        paid += amount;
+      });
+
+      // Cualquier resto que no se haya podido asignar (por ejemplo, si un
+      // ganador fue eliminado a mitad de reparto) vuelve al bote ganador para
+      // que el sistema no pierda fichas.
+      if (paid < pool && winnerIds.length > 0) {
+        const fallback = this.state.players.find(p => p.id === winnerIds[0]);
+        if (fallback) {
+          fallback.chips += pool - paid;
+          paid = pool;
+        }
+      }
+
+      this.state.pot = 0;
+    };
+
     if (activePlayers.length === 1) {
+      // Todos los demas se retiraron: el unico que sigue se lleva el bote sin
+      // mostrar cartas. No hay showdown que evaluar.
       this.state.winners = [{
         playerId: activePlayers[0].id,
         amount: this.state.pot,
-        hand: { rank: 'high_card', name: 'Último jugador', value: 0, bestCards: [] },
+        hand: { rank: 'high_card', name: 'Ultimo jugador en pie', value: 0, bestCards: [] },
       }];
-      activePlayers[0].chips += this.state.pot;
+      awardPot([activePlayers[0].id]);
     } else {
       for (const player of activePlayers) {
         const allCards = [...player.cards, ...this.state.communityCards];
@@ -323,19 +484,32 @@ export class PokerGame {
       const bestHand = sorted[0].hand!;
       const winners = sorted.filter(p => p.hand!.value === bestHand.value);
 
-      const winAmount = Math.floor(this.state.pot / winners.length);
+      // Los想到这里 van los datos que vera el cliente. `amount` se rellena
+      // despues de repartir, porque el reparto con resto depende del bote real.
+      const winnerIds = winners.map(w => w.id);
       this.state.winners = winners.map(w => ({
         playerId: w.id,
-        amount: winAmount,
+        amount: 0,
         hand: w.hand!,
       }));
 
-      for (const winner of winners) {
-        const player = this.state.players.find(p => p.id === winner.id);
-        if (player) {
-          player.chips += winAmount;
-        }
-      }
+      // Reparte entre todos los empatados. Un empate divide el bote: darlo
+      // entero a uno solo seria robarle a los demas, y en una mesa grande los
+      // empates son frequentes, no una excepcion.
+      const pot = this.state.pot;
+      const shares = Array.from(
+        { length: winnerIds.length },
+        (_, i) =>
+          Math.floor(pot / winnerIds.length) +
+          (i < pot % winnerIds.length ? 1 : 0),
+      );
+
+      awardPot(winnerIds, shares);
+
+      this.state.winners = this.state.winners.map(w => ({
+        ...w,
+        amount: shares[winnerIds.indexOf(w.playerId)] ?? 0,
+      }));
     }
 
     this.state.phase = 'finished';

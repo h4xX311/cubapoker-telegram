@@ -121,7 +121,7 @@ export class PaymentService {
 
     await User.findOneAndUpdate(
       { telegramId: order.telegramId },
-      { $inc: { 'balance.credits': credited } },
+      { $inc: { 'balance.real': credited } },
     );
 
     order.status = 'paid';
@@ -188,8 +188,14 @@ export class PaymentService {
       throw new MoneyError('El minimo de retiro por este metodo es 1000 CUP.');
     }
 
-    if (user.balance.credits < amount) {
-      throw new MoneyError('Saldo insuficiente.');
+    // REGLA CRITICA: el saldo de promocion (`play`) NO es retirable.
+    // Un retiro solo puede consumir `balance.real`. Si se permitiera usar `play`,
+    // el usuario vaciaria la plataforma sin haber depositado nunca.
+    if (user.balance.real < amount) {
+      throw new MoneyError(
+        `Solo puedes retirar saldo real. Tienes ${user.balance.real} CUP retirables ` +
+        `(tu saldo de promocion de ${user.balance.play} CUP no es retirable).`,
+      );
     }
 
     // Un usuario no debe tener retiros pendientes que superen su saldo.
@@ -205,7 +211,7 @@ export class PaymentService {
     ]);
     const pendingTotal = pending[0]?.total ?? 0;
 
-    if (user.balance.credits - pendingTotal < amount) {
+    if (user.balance.real - pendingTotal < amount) {
       throw new MoneyError(
         'Saldo insuficiente considerando retiros pendientes en proceso.',
       );
@@ -277,7 +283,7 @@ export class PaymentService {
     // El saldo se consume al aprobar el pago, no al solicitarlo
     await User.findOneAndUpdate(
       { telegramId: order.telegramId },
-      { $inc: { 'balance.credits': -order.amount } },
+      { $inc: { 'balance.real': -order.amount } },
     );
 
     order.status = 'paid';

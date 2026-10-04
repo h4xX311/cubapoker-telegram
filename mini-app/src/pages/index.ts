@@ -1,8 +1,11 @@
 export { Home } from './Home';
 export { Deposit } from './Deposit';
 export { Withdraw } from './Withdraw';
-export { Game } from './Game';
+export { Tables } from './Tables';
+export { Table } from './Table';
+export { Freeroll } from './Freeroll';
 export { Tournaments } from './Tournaments';
 export { VIP } from './VIP';
 export { Referrals } from './Referrals';
 export { Achievements } from './Achievements';
+export { SimulatePay } from './SimulatePay';

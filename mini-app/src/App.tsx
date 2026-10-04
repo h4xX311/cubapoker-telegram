@@ -2,11 +2,13 @@ import { useState, useEffect, useCallback } from 'react';
 import { Home } from './pages/Home';
 import { Deposit } from './pages/Deposit';
 import { Withdraw } from './pages/Withdraw';
-import { Game } from './pages/Game';
 import { Tournaments } from './pages/Tournaments';
 import { VIP } from './pages/VIP';
 import { Referrals } from './pages/Referrals';
 import { Achievements } from './pages/Achievements';
+import { Tables } from './pages/Tables';
+import { Table } from './pages/Table';
+import { Freeroll } from './pages/Freeroll';
 import { SimulatePay } from './pages/SimulatePay';
 import { api, ApiError, type DepositOrder } from './lib/api';
 import { pageFromPath as resolvePage, type Page, type Session } from './lib/types';
@@ -18,6 +20,7 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState('');
   const [errorCode, setErrorCode] = useState<string>('');
   const [checkout, setCheckout] = useState<DepositOrder | null>(null);
+  const [activeTable, setActiveTable] = useState<string | null>(null);
 
   /**
    * El saldo vive en un unico sitio y se refresca tras cada accion que lo
@@ -165,8 +168,40 @@ export default function App() {
         );
       case 'withdraw':
         return <Withdraw user={user} onBack={back} onBalanceChange={refreshUser} />;
+      case 'tables':
+        return (
+          <Tables
+            user={user}
+            onBack={back}
+            onBalanceChange={refreshUser}
+            onPlay={setActiveTable}
+          />
+        );
+      case 'freeroll':
+        return (
+          <Freeroll
+            user={user}
+            onBack={back}
+            onBalanceChange={refreshUser}
+            onPlay={setActiveTable}
+          />
+        );
       case 'game':
-        return <Game user={user} onBack={back} onBalanceChange={refreshUser} />;
+        return activeTable ? (
+          <Table
+            tableId={activeTable}
+            user={user}
+            onBack={() => setActiveTable(null)}
+            onBalanceChange={refreshUser}
+          />
+        ) : (
+          <Tables
+            user={user}
+            onBack={back}
+            onBalanceChange={refreshUser}
+            onPlay={setActiveTable}
+          />
+        );
       case 'tournaments':
         return <Tournaments user={user} onBack={back} onBalanceChange={refreshUser} />;
       case 'vip':
@@ -208,12 +243,18 @@ export default function App() {
             >
               +
             </button>
-            <div className="flex flex-col items-end leading-none">
+            {/* Saldo total: real (retirable) + promocion (solo jugar).
+                La distincion se explica en Home y en la pantalla de retiro. */}
+            <button
+              onClick={() => navigate('home')}
+              className="flex flex-col items-end leading-none"
+              title="Real + promoción"
+            >
               <span className="text-sm font-bold text-[#00d26a]">
-                {user?.balance.credits ?? 0}
+                {user?.balance.total ?? 0}
               </span>
               <span className="text-[10px] text-[#a0a0b0]">CUP</span>
-            </div>
+            </button>
           </div>
         </div>
       </header>

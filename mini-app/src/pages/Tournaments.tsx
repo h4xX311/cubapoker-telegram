@@ -90,7 +90,7 @@ export function Tournaments({ user, onBack, onBalanceChange }: Props) {
               const full = t.playerCount >= t.maxPlayers;
               const running = t.status === 'running';
               const isFree = t.buyIn === 0;
-              const canAfford = isFree || (user?.balance?.credits ?? 0) >= t.buyIn;
+              const canAfford = isFree || (user?.balance?.real ?? 0) >= t.buyIn;
               const progress = Math.min(100, (t.playerCount / t.maxPlayers) * 100);
 
               return (
@@ -135,10 +135,10 @@ export function Tournaments({ user, onBack, onBalanceChange }: Props) {
                       {busyId === t.id
                         ? 'Registrando…'
                         : !canAfford
-                        ? 'Saldo insuficiente'
+                        ? `Te faltan ${t.buyIn - (user?.balance?.real ?? 0)} CUP`
                         : isFree
-                        ? 'Participar gratis'
-                        : `Inscribirse · ${t.buyIn} CUP`}
+                          ? 'Participar gratis'
+                          : `Inscribirse · ${t.buyIn} CUP`}
                     </button>
                   )}
                 </article>

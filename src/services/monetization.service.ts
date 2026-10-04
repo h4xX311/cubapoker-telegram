@@ -52,7 +52,7 @@ export class MonetizationService {
     // Actualizar balance del usuario
     await User.findOneAndUpdate(
       { telegramId },
-      { $inc: { 'balance.credits': netAmount } }
+      { $inc: { 'balance.real': netAmount } }
     );
     
     // Registrar transacción
@@ -83,16 +83,16 @@ export class MonetizationService {
     const commission = calculateCommission(amount, 'withdrawal', method);
     const netAmount = amount - commission;
     
-    // Verificar balance
+    // Verificar balance. Solo `real` es retirable.
     const user = await User.findOne({ telegramId });
-    if (!user || user.balance.credits < amount) {
-      throw new Error('Balance insuficiente');
+    if (!user || user.balance.real < amount) {
+      throw new Error('Saldo insuficiente');
     }
     
     // Descontar del balance
     await User.findOneAndUpdate(
       { telegramId },
-      { $inc: { 'balance.credits': -amount } }
+      { $inc: { 'balance.real': -amount } }
     );
     
     // Registrar transacción
@@ -123,14 +123,14 @@ export class MonetizationService {
     const user = await User.findOne({ telegramId });
     if (!user) return false;
     
-    if (user.balance.credits < config.price) {
-      throw new Error('Balance insuficiente para comprar VIP');
+    if (user.balance.real < config.price) {
+      throw new Error('Saldo insuficiente para comprar VIP');
     }
     
     // Descontar del balance
     await User.findOneAndUpdate(
       { telegramId },
-      { $inc: { 'balance.credits': -config.price } }
+      { $inc: { 'balance.real': -config.price } }
     );
     
     // Crear o actualizar suscripción
@@ -200,11 +200,14 @@ export class MonetizationService {
       level,
     });
     
-    // Dar bonus al referidor
+    // Dar bonus al referidor.
+    // Es saldo promocional: va a `play` (NO retirable). Si fuera a `real`,
+    // un usuario podria invitar amigos, sacar el bonus y vaciar la plataforma
+    // sin depositar nunca.
     const bonus = monetizationConfig.referrals.bonus;
     await User.findOneAndUpdate(
       { telegramId: referrerId },
-      { $inc: { 'balance.credits': bonus } }
+      { $inc: { 'balance.play': bonus } }
     );
     
     return true;
@@ -237,10 +240,11 @@ export class MonetizationService {
       }
     );
     
-    // Dar comisión al referidor
+    // La comision de referido es ganancia por rake de jugadores reales, asi que
+    // es saldo real (retirable).
     await User.findOneAndUpdate(
       { telegramId: referral.referrerId },
-      { $inc: { 'balance.credits': commission } }
+      { $inc: { 'balance.real': commission } }
     );
     
     // Registrar transacción
@@ -296,10 +300,10 @@ export class MonetizationService {
       reward: achievement.reward,
     });
     
-    // Dar recompensa
+    // Dar recompensa. Logros son promocionales: saldo `play`, no retirable.
     await User.findOneAndUpdate(
       { telegramId },
-      { $inc: { 'balance.credits': achievement.reward } }
+      { $inc: { 'balance.play': achievement.reward } }
     );
     
     return true;
@@ -362,9 +366,10 @@ export class MonetizationService {
     const reward = STREAK_REWARDS[streak.currentStreak as keyof typeof STREAK_REWARDS] || 0;
     
     if (reward > 0) {
+      // Recompensa por racha: promocional, saldo `play` (no retirable).
       await User.findOneAndUpdate(
         { telegramId },
-        { $inc: { 'balance.credits': reward } }
+        { $inc: { 'balance.play': reward } }
       );
     }
     

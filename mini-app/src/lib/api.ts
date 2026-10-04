@@ -106,16 +106,24 @@ export const api = {
     request<any>(`/payment/simulate/${orderId}/confirm`, { method: 'POST', body: {} }),
 
   // Juego
-  createGame: (smallBlind = 1, bigBlind = 2) =>
-    request<any>('/game/create', { method: 'POST', body: { smallBlind, bigBlind } }),
-  joinGame: (gameId: string) =>
-    request<any>('/game/join', { method: 'POST', body: { gameId } }),
-  gameState: (gameId: string, telegramId: number) =>
-    request<any>(`/game/state/${gameId}/${telegramId}`),
-  gameAction: (gameId: string, action: string, amount?: number) =>
-    request<any>('/game/action', { method: 'POST', body: { gameId, action, amount } }),
-  leaveGame: (gameId: string) => request<any>('/game/leave', { method: 'POST', body: { gameId } }),
-  activeGames: () => request<any>('/game/active'),
+  gameConfig: () => request<any>('/game/config'),
+  listTables: () => request<{ tables: any[] }>('/game/list'),
+  sit: (params: { tableId?: string; tierId?: string; buyIn?: number }) =>
+    request<any>('/game/sit', { method: 'POST', body: params }),
+  tableView: (tableId: string) => request<any>(`/game/view/${tableId}`),
+  gameAction: (tableId: string, action: string, amount?: number) =>
+    request<any>('/game/action', { method: 'POST', body: { tableId, action, amount } }),
+  stand: (tableId: string) =>
+    request<any>('/game/stand', { method: 'POST', body: { tableId } }),
+  myTable: () => request<{ tableId: string | null }>('/game/my-table'),
+
+  // Freerolls
+  freerolls: () => request<{ freerolls: any[] }>('/game/freerolls'),
+  joinFreeroll: (prizeTier: number, freerollId?: string) =>
+    request<any>('/game/freerolls/join', {
+      method: 'POST',
+      body: { prizeTier, freerollId },
+    }),
 
   // Torneos
   tournaments: () => request<any>('/game/tournaments'),

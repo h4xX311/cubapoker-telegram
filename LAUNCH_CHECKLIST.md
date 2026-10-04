@@ -1,7 +1,7 @@
 # CubaPoker · Estado de preparación para lanzamiento
 
 Análisis del estado real del proyecto y qué falta para operar en público.
-Fecha: 3 de octubre de 2026.
+Fecha: 4 de octubre de 2026.
 
 ---
 
@@ -12,76 +12,165 @@ Fecha: 3 de octubre de 2026.
 | Autenticación y seguridad | Completo | No |
 | Flujo de pagos (simulado) | Completo | No |
 | Multi-red USDT (5 cadenas) | Completo | No |
-| Juego de poker | Completo | No |
-| Monetización | Completo | No |
+| Motor de poker | Completo y probado | No |
+| Bots | Completo | No |
 | Interfaz | Completo | No |
 | **Pasarelas reales** | **Pendiente** | **Sí** |
 | **Panel de operador** | **Pendiente** | **Sí** |
 | **Infraestructura 24/7** | **Pendiente** | **Sí** |
 | **Cumplimiento legal** | **Pendiente** | **Sí** |
+| Modelo económico doble saldo | Completo | No |
 
 ---
 
-## 1. Lo que quedó resuelto en esta iteración
+## 1. Límite físico de una mesa: 23 por mano
 
-### Pagos simulados de punta a punta
+Esto condiciona todo el diseño de mesas y conviene tenerlo claro antes de
+tocar nada más.
 
-El flujo ya no acredita saldo al instante. Antes, un POST a `/api/deposit`.sumaba
-créditos sin comprobar nada. Ahora es un recorrido verificable:
+Una baraja son 52 cartas. Cada jugador recibe 2 y la mesa necesita 5 comunitarias:
 
 ```
-crear orden  ->  el usuario "paga"  ->  confirmar  ->  acreditar saldo
-   (pending)                          (paid)         (una sola vez)
+(52 - 5) / 2 = 23
 ```
 
-Cada paso persiste una orden en MongoDB (`PaymentOrder`), así que todo crédito
-es trazable a una orden concreta. La acreditación es **idempotente**: confirmar
-dos veces no duplica saldo (verificado).
+**23 es el máximo absoluto de jugadores en una mano simultánea.** Con 24 el flop
+haría `pop()` sobre un mazo ya vacío.
 
-Los retiros cambiaron de语义: antes se descontaba el saldo al solicitarlos
-(pérdida de dinero si el operador nunca respondía). Ahora se descuentan al
-**liquidarse**, tras la verificación del pago, y se puede cancelar devolviendo
-el saldo.
+El producto ofrece mesas de 50, 100, 300 y 500 participantes. Eso **no puede ser
+una sola mano**. No existe "una mesa cash de 500 jugadores" en el poker: una mano
+es una cosa que hacen 2 a 9 jugadores normalmente.
 
-### Cinco redes USDT
+Lo que sí hacen CoinPoker y plataformas similares es una **sala** donde todos
+permanecen sentados y se juega **por tandas** de hasta 23, rotando hasta que
+quedan pocos. Es exactamente lo que hace `TableManager.selectHandSeats()`: cada
+mano juega el grupo que toca según `hand.handNumber`, de modo que los grupos se
+turnan y nadie se queda fuera indefinidamente.
 
-| Red | Comisión | Confirmación | Formato de dirección |
-|---|---|---|---|
-| TRC20 (Tron) | ~0.50 USD | 1 min | `T` + 33 chars |
-| SOL (Solana) | ~0.001 USD | 1 min | Base58 32-44 |
-| POL (Polygon) | ~0.01 USD | 2 min | `0x` + 40 hex |
-| BEP20 (BSC) | ~0.05 USD | 3 min | `0x` + 40 hex |
-| ERC20 (Ethereum) | ~4.50 USD | 12 min | `0x` + 40 hex |
+```
+Mesa de 500
+  ┌─ tanda 1: jugadores 1-23    ┐
+  │  ronda de texas hasta el     │
+  │  showdown, bote y rake       │
+  ├─ tanda 2: jugadores 24-46   │  una mano cada vez
+  ├─ tanda 3: jugadores 47-69   │
+  └─ ...                         ┘
+```
 
-Cada cadena declara su token, exploradora, decimales y patrón de validación.
-BEP20 usa 18 decimales y el resto 6 — confundirlo es una pérdida de fondos
-silenciosa, por eso está aislado y probado.
+Consecuencias asumidas:
 
-**Bug encontrado y corregido durante las pruebas:** una dirección de Tron
-(`T` + 33 caracteres) es Base58 válida, así que pasaba el filtro de Solana. Un
-usuario podía enviar USDT por TRC20 creyendo que iba a Solana y perderlo. Ahora
-el patrón de Solana rechaza explícitamente ese formato.
+- El rake se cobra **por mano**, no por mesa. En una mesa de 500 el rake total
+  se repite por cada tanda, así que el rake efectivo por jugador es mayor que en
+  una mesa de 9.
+- El "premio garantizado" de 500 CUP significa **5 manos completas** de 23
+  jugadores, no una.
+- Los tiempos de espera de un turno pueden ser largos: hay hasta 23 actuantes
+  entre una decisión suya y la siguiente.
 
-### Interfaz
-
-- Barra superior fija con saldo sincronizado
-- Jerarquía tipográfica y espaciado consistentes
-- Estados vacíos con contexto en lugar de pantallas en blanco
-- Validación en línea con mensajes accionables
-- Respeto a `prefers-reduced-motion` y safe-area de iOS
+**Si no es aceptable, la alternativa es cambiar el producto**: mesas de 9
+jugadores (mesa final) o formato de torneo. Eso es una decisión de negocio, no
+técnica, y por eso queda planteada en lugar de resuelta por mi cuenta.
 
 ---
 
-## 2. Lo que falta para lanzar
+## 2. Lo que quedó resuelto en esta iteración
 
-### 2.1 Pasarelas de pago reales — BLOQUEA
+### 2.1 Cuatro bugs que rompían el juego
+
+**El motor limitaba a 6 jugadores.** `addPlayer` tenía `if (players.length >= 6)
+return false`, un tope heredado de un 6-max. Con el producto anunciando 500
+participantes, ninguna mesa grande arrancaba: `startGame` se quedaba con 2
+jugadores y devolvía `false`. El tope ahora es `maxSeats` de cada mesa.
+
+**El botón nunca rotaba.** `startGame` fijaba `dealerIndex = 0`,
+`smallBlindIndex = 1`, `bigBlindIndex = 2` en cada mano, para siempre. Quien
+occupara el asiento 0 tenía ventaja permanente y las ciegas eran siempre las
+mismas. Ahora `startGame(startingDealerIndex)` recibe dónde empezar, y
+`TableManager` lo mantiene en `table.hand.dealerSeat` (que ya existía en el
+modelo y nunca se usaba) avanzando al siguiente asiento ocupado.
+
+**El bote perdía fichas en cada mano.** El reparto era
+`Math.floor(pot / winners.length)` a cada ganador, y el resto se quedaba en el
+bote sin destino. Con 2-3 ganadores impares eso evaporaba 1-2 CUP del sistema
+por mano. Con el tiempo las fichas de la mesa llegan a 0 para todo el mundo.
+Ahora el reparto asigna el resto explícitamente a los primeros ganadores y hay
+una prueba de conservación: lo entregado debe coincidir exactamente con lo
+aportado.
+
+**El flop repartía cartas `undefined`.** `advancePhase` hacía
+`communityCards.push(deck.pop()!)` con el `!` de TypeScript silenciando que
+`pop()` devuelve `Card | undefined`. Con mazo agotado, el evaluador reventaba
+con `Cannot read properties of undefined (reading 'suit')` y **tumbaba la mesa
+entera**. Ahora `dealCommunity()` verifica y detiene la mano, y `MAX_DEALABLE_PLAYERS`
+impide llegar a esa situación.
+
+### 2.2 Avisos de turno en lugar de spam
+
+Antes el bot mandaba el estado completo de la mesa (bote, comunitarias, lista de
+rivales) en **cada** acción de **cada** mesa. Con varios jugadores eso es un
+volumen de mensajes insostenible y además filtraba las cartas del rival al
+cliente.
+
+Ahora el gestor de mesas expone `setNotifier()` y solo emite un aviso cuando le
+toca a un humano: sus dos cartas, el bote, cuánto tiene que poner y el plazo.
+Deduplicado por turno, así que el mismo asiento en la misma calle recibe un solo
+mensaje.
+
+`chatId` se guardó en el modelo `User` (el bot ahora lo persiste en `/start`,
+solo en chat privado: en un grupo el aviso "te toca" se leería en voz alta).
+
+### 2.3 Saldo doble: `real` vs `play`
+
+Decisión ya implementada y ahora respetada en **todas** las rutas de dinero:
+
+| Origen | Destino | ¿Retirable? |
+|---|---|---|
+| Depósito | `balance.real` | Sí |
+| Retiro | consume solo `real` | — |
+| Premio de freeroll | `balance.play` | **No** |
+| Logro / racha | `balance.play` | **No** |
+| Bonus de referido | `balance.play` | **No** |
+| Comisión de referido (rake) | `balance.real` | Sí |
+| Compra de VIP | consume `real` | — |
+
+El punto crítico: **un retiro solo puede consumir `balance.real`**. Si se dejara
+usar `play`, un usuario podría ganar 5-50 CUP en freerolls repetidamente y
+drenar la plataforma sin depositar nunca. La comprobación está en
+`payment.service.ts` con un mensaje que explica la diferencia en lugar de un
+genérico "saldo insuficiente".
+
+Al sentarse en una mesa cash se consume `play` primero, preservando `real` para
+retiro.
+
+### 2.4 Verificación
+
+| Prueba | Resultado |
+|---|---|
+| Build backend | limpio |
+| Build frontend | 45 módulos, 201 kB |
+| Cadenas y comisiones | 33/33 |
+| Reglas de negocio | 36/36 |
+| Motor de poker | 72/72 |
+| Auth sin firma | 401 correcto |
+| Flujo de pago completo | **no ejecutado** (sin MongoDB local) |
+
+`npm test` compila y corre las tres suites. Las del motor cubren lo que
+importa: que la mano llegue a `finished` con 2, 3, 6, 9 y 23 jugadores; que el
+bote cuadre con lo aportado; que no haya cartas repetidas ni `undefined`; que el
+botón y las ciegas roten; y que el motor se niegue a repartir 24 jugadores.
+
+---
+
+## 3. Lo que falta para lanzar
+
+### 3.1 Pasarelas de pago reales — BLOQUEA
 
 Hoy `SIMULATE_PAYMENTS=true` (por defecto). Ninguna pasarela mueve dinero real.
 
 Para pasar a producción hay que implementar contra la interfaz `PaymentGateway`
 (`src/services/payment/gateway.ts`), una clase por proveedor:
 
-| work needed | Esfuerzo |
+| Trabajo | Esfuerzo |
 |---|---|
 | `EnZonaGateway` — crear orden, webhook de confirmación | ~4 h |
 | `QvaPayGateway` — ídem | ~3 h |
@@ -95,7 +184,7 @@ de monitorear.
 Al conectar las reales, se cambia `SIMULATE_PAYMENTS=false` y desaparece la
 pantalla de prueba.
 
-### 2.2 Panel de operador — BLOQUEA
+### 3.2 Panel de operador — BLOQUEA
 
 Ahora no hay forma de aprobar un retiro porque no existe interfaz de gestión.
 Sin ella, si alguien pide un retiro, el dinero queda retenido sin salida.
@@ -109,22 +198,23 @@ Necesario:
 Existe la lógica de servidor (`settleWithdrawal`, `cancelWithdrawal`); falta la
 interfaz y exponer las rutas con `ADMIN_API_KEY`.
 
-### 2.3 Infraestructura 24/7 — BLOQUEA
+### 3.3 Infraestructura 24/7 — BLOQUEA
 
-Dos problemas de Render en plan gratuito:
+El plan gratuito de Render **suspende el servicio a los 15 minutos de inactividad**.
+Los webhooks ya están implementados (`NODE_ENV=production` los usa), pero eso no
+evita la suspensión: sin tráfico entrante constante, el proceso se congela y las
+manos en curso se pierden.
 
-1. **El servicio se suspende a los 15 min de inactividad.** Con `polling: true`
-   el bot pierde la conexión con Telegram y el juego en curso se cae.
-2. **El plan gratuito no es un servicio de producción.** Sin garantía de uptime.
+Además, el estado de una mano vive **en memoria** (`table.manager.ts` mantiene el
+motor en un `Map`). Al suspender y reanudar el proceso, las manos en vuelo se
+devuelven a los jugadores, pero el juego queda cortado.
 
 Opciones:
-- Plan de pago (~$7/mes) y migrar de `polling` a **webhooks**, que es la
-  solución correcta: HTTP entrante en vez de sondeos.
-- Alternativa: VPS propio (DigitalOcean, Hetzner) con `pm2`.
+- Plan de pago (~$7/mes). Es lo mínimo para no perder partidas.
+- VPS propio (DigitalOcean, Hetzner) con `pm2`. Más control, algo más de
+  trabajo inicial.
 
-Migrar a webhooks es recomendable de cualquier forma: reduce consumo y latencia.
-
-### 2.4 Cumplimiento legal — BLOQUEA
+### 3.4 Cumplimiento legal — BLOQUEA
 
 Poker con dinero real está regulado en la mayoría de jurisdicciones, y Cuba no
 es la excepción en cuanto a pagos. Antes de operar:
@@ -133,79 +223,65 @@ es la excepción en cuanto a pagos. Antes de operar:
 - Verificación de edad (el bot da acceso a menores sin comprobación)
 - Términos y condiciones visibles y aceptados
 - Política de juego responsable
-- Imposibilidad de autobloqueo
+- Autobloqueo
 - Reporte de operaciones sospechosas (KYC/AML)
 - Política de privacidad
 
 Nada de esto está implementado. **No lanzar sin consultar a un abogado.**
 
-### 2.5 Integridad del juego — NO BLOQUEA pero conviene
+### 3.5 Integridad del juego — no bloquea pero conviene
 
 - **Rake VIP no se aplica.** La página VIP promete 3%/2%/0%, el código cobra 5%
   fijo. Un usuario VIP que lo compruebe pierde la confianza.
 - **Logros y rachas no se disparan.** No hay hook que los active al ganar.
-- **Torneos no se ejecutan.** El gestor existe pero no hay asignación de mesas
-  ni reparto de premios.
+- **Torneos no se ejecutan.** La lógica base existe; falta asignación de mesas ni
+  reparto de premios.
 - **Colusión.** Nada impide que dos cuentas coordinen. En poker de dinero real
   eso vacía la plataforma.
 
-### 2.6 Confianza y operación
+### 3.6 Rake en mesas grandes
 
-- Email transaccional (confirmaciones de depósito/retiro)
-- Historial de transacciones visible en la app (las órdenes ya se guardan; falta
-  la pantalla)
-- Sentry o equivalente para errores
-- Slasks de CA con alertas (retiros sin procesar, errores de webhook)
-- Límite de intentos de login
+Con el modelo de tandas (§1), el rake se cobra 5% **por mano**. Una mesa de 500
+cobra 5% unas 22 veces sobre los mismos fichas. Conviene decidir si el rake debe
+aplicarse solo a las últimas tandas, para que el coste efectivo por jugador no
+crezca con el tamaño anunciado de la mesa.
 
 ---
 
-## 3. Orden de ejecución recomendado
+## 4. Orden de ejecución recomendado
 
 ```
-1. Legal              ← bloquea todo lo demás
-2. Panel de operador  ← sin esto los retiros se atascan
-3. TRC20 real         ← la más simple, valida el circuito completo
-4. Webhooks + plan pago ← el polling no aguanta producción
-5. Logros/rachas/VIP  ←REQUIRED honestidad con lo prometido
-6. EnZona + QvaPay    ← requiere cuenta de empresa
+1. Legal               ← bloquea todo lo demás
+2. Plan de pago Render ← sin esto las partidas se cortan
+3. Panel de operador   ← sin esto los retiros se atascan
+4. TRC20 real          ← la más simple, valida el circuito completo
+5. Logros/rachas/VIP   ← honestidad con lo prometido
+6. EnZona + QvaPay     ← requiere cuenta de empresa
 7. Resto de cadenas
+8. Torneos             ← solo si se mantiene el formato de sala grande
 ```
 
-Los puntos 1, 2, 3 y 4 son los mínimos para abrir a un grupo pequeño de
-usuarios de prueba. El 6 puede esperar si EnZona exige tramitacion.
+Los puntos 1, 2, 3 y 4 son los mínimos para abrir a un grupo pequeño de usuarios
+de prueba.
 
 ---
 
-## 4. Cómo probar el flujo de pagos ahora
+## 5. Cómo probar el flujo ahora
 
 ```bash
 # 1. Levantar con simulación
 SIMULATE_PAYMENTS=true DEV_AUTH_BYPASS=true npm run dev
 
-# 2. En otro terminal, lógica pura (sin base de datos)
-node scripts/test-chains.js
+# 2. Suites sin base de datos
+npm test
 
 # 3. Flujo completo (requiere MongoDB)
 node scripts/test-payment-flow.js
 ```
 
-Dentro de Telegram, el flujo es: Depositar → elegir método y monto →
-continuar → "Simular pago" → saldo acreditado.
+Dentro de Telegram: Depositar → método y monto → continuar → "Simular pago" →
+saldo acreditado en `real`.
 
----
-
-## 5. Verificación realizada
-
-| Prueba | Resultado |
-|---|---|
-| Build backend | limpio |
-| Build frontend | 43 módulos, 193 kB |
-| Cadenas y comisiones | 33/33 |
-| Auth sin firma | 401 correcto |
-| Flujo de pago completo | **no ejecutado** (sin MongoDB local) |
-| Multi-red en navegador real | **no ejecutado** |
-
-El flujo completo de pagos está escrito (`test-payment-flow.js`) pero no se ha
-ejecutado: no hay MongoDB ni Docker en esta máquina. Debe correr en un entorno
+El flujo completo de pagos está escrito (`test-payment-flow.js`) pero **no se ha
+ejecutado**: no hay MongoDB ni Docker en esta máquina. Debe correr en un entorno
 con base de datos antes de confiar en él.
