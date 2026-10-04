@@ -5,6 +5,55 @@ Fecha: 4 de octubre de 2026.
 
 ---
 
+## 0. Lo primero: la economía del campo no cierra
+
+Esto va antes que todo lo demás porque condiciona el field manager. Si se
+escribe el gestor de campos con estos números, hay que reescribirlo.
+
+Los cuatro tiers tienen `premio = fieldSize × 1 CUP`, y el buy-in mínimo va de
+200 a 2000:
+
+| field | premio | buy-in mín. | se recauda | **RTP del jugador** |
+|---|---|---|---|---|
+| 50 | 50 | 200 | 10 000 | **0,50 %** |
+| 100 | 100 | 500 | 50 000 | **0,20 %** |
+| 300 | 300 | 1 000 | 300 000 | **0,10 %** |
+| 500 | 500 | 2 000 | 1 000 000 | **0,05 %** |
+
+La cuenta del operador sí cierra: el rake del 5 % del campo de 500 son 50 000
+CUP contra un premio de 500, así que el operador gana. El problema es el
+jugador, que pierde el 99,95 % de lo que pone. No es un juego con margen fino,
+es una entrega de dinero, y nadie repite dos veces.
+
+Para un RTP sano de ~95 % el buy-in tendría que ser **1,05 CUP en los cuatro
+campos**. Con eso los cuatro campos son idénticos y el ladder se aplana: jugar
+en el de 500 tardaría horas y daría lo mismo que el de 50.
+
+### Las tres salidas
+
+**A) Bajar el buy-in a ~1 CUP.** RTP sano, pero el rake de 5 % da 0,05 CUP por
+mano: no cubre ni el gasto de infraestructura. Y el ladder pierde sentido.
+
+**B) Que el premio salga de un fondo promocional, no del bote.** El RTP del
+jugador pasa a ser 100 % por el premio, y el ingreso del operador es el rake.
+Es lo que hacen CoinPoker y similares con los *guaranteed prize pools*. Además,
+como el premio de los freerolls va a `balance.play` (no retirable), ese mismo
+fondo puede alimentar los campos cash sin generar obligación de pago. Con esto
+el campo de 500 con premio 500 CUP es un gancho promocional de bajo valor, que
+es coherente con el producto, pero hay que decirlo así en la interfaz.
+
+**C) Hacer que el premio crezca con el field.** `premio = field × buy-in × 0,95`.
+El campo de 500 pagaría ~950 000 CUP: ya no es un premio promocional sino un
+torneo serio, y exige una caja mucho mayor.
+
+**Hay que elegir una antes de escribir el field manager.** El reparto por
+posición, la tabla deliquidación y la estructura de premios dependen de ello.
+
+Mientras tanto, `test-business-rules.js` falla **a propósito** en el bloque 2.
+No es un test roto: es el aviso de que el producto no es jugable todavía.
+
+---
+
 ## Resumen
 
 | Área | Estado | Bloquea lanzamiento |
@@ -23,53 +72,62 @@ Fecha: 4 de octubre de 2026.
 
 ---
 
-## 1. Límite físico de una mesa: 23 por mano
+## 1. Mesa física 7-max, field multi-mesa
 
-Esto condiciona todo el diseño de mesas y conviene tenerlo claro antes de
-tocar nada más.
+Dos números que se confundían y que hay que mantener separados:
 
-Una baraja son 52 cartas. Cada jugador recibe 2 y la mesa necesita 5 comunitarias:
+| Concepto | Valor | Qué es |
+|---|---|---|
+| `SEATS_PER_TABLE` | **7** | Personas sentadas en una mesa. Una mesa de poker real. |
+| `fieldSize` | 50 / 100 / 300 / 500 | Participantes del **campo** completo (multi-mesa). |
 
-```
-(52 - 5) / 2 = 23
-```
-
-**23 es el máximo absoluto de jugadores en una mano simultánea.** Con 24 el flop
-haría `pop()` sobre un mazo ya vacío.
-
-El producto ofrece mesas de 50, 100, 300 y 500 participantes. Eso **no puede ser
-una sola mano**. No existe "una mesa cash de 500 jugadores" en el poker: una mano
-es una cosa que hacen 2 a 9 jugadores normalmente.
-
-Lo que sí hacen CoinPoker y plataformas similares es una **sala** donde todos
-permanecen sentados y se juega **por tandas** de hasta 23, rotando hasta que
-quedan pocos. Es exactamente lo que hace `TableManager.selectHandSeats()`: cada
-mano juega el grupo que toca según `hand.handNumber`, de modo que los grupos se
-turnan y nadie se queda fuera indefinidamente.
+Un campo de 500 no es una mesa de 500: son `ceil(500 / 7) = 72` mesas de 7 que
+se van fusionando mano a mano hasta que queda una mesa final de 7. Es un
+Sit'n'Go multi-mesa, como el que hacen CoinPoker y similares.
 
 ```
-Mesa de 500
-  ┌─ tanda 1: jugadores 1-23    ┐
-  │  ronda de texas hasta el     │
-  │  showdown, bote y rake       │
-  ├─ tanda 2: jugadores 24-46   │  una mano cada vez
-  ├─ tanda 3: jugadores 47-69   │
-  └─ ...                         ┘
+Campo de 500
+  ┌─ mesa 1: 7 jugadores ─┐
+  ├─ mesa 2: 7 jugadores ─┤  72 mesas al inicio
+  ├─ ...                 ─┤
+  └─ mesa 72: 7 jugadores┘
+
+  al bajar de 4 jugadores, la mesa se fusiona con la siguiente
+  cuando solo queda 1 mesa -> mesa final -> reparto del premio por posición
 ```
 
-Consecuencias asumidas:
+El error de la iteración anterior fue anunciar "mesa de 500 jugadores" y
+obligar al motor a repartir 23 por tanda para disimularlo. `table.manager.ts`
+ya no hace tandas: con 7-max entran todos los activos en cada mano.
 
-- El rake se cobra **por mano**, no por mesa. En una mesa de 500 el rake total
-  se repite por cada tanda, así que el rake efectivo por jugador es mayor que en
-  una mesa de 9.
-- El "premio garantizado" de 500 CUP significa **5 manos completas** de 23
-  jugadores, no una.
-- Los tiempos de espera de un turno pueden ser largos: hay hasta 23 actuantes
-  entre una decisión suya y la siguiente.
+**Techo matemático de seguridad:** `(52 - 5 comunitarias) / 2 = 23`. Con 7-max
+nunca se acerca, pero la guarda se mantiene para que una configuración rara no
+reparta cartas `undefined` y tumbe la mesa.
 
-**Si no es aceptable, la alternativa es cambiar el producto**: mesas de 9
-jugadores (mesa final) o formato de torneo. Eso es una decisión de negocio, no
-técnica, y por eso queda planteada en lugar de resuelta por mi cuenta.
+### Lo que falta: el field manager
+
+`table.manager.ts` gestiona **una** mesa. Aplicaba el premio al ganador de esa
+mesa, lo cual es incompatible con un field de 500: el premio es del campo
+completo y se reparte por posición final. Falta el gestor de campo:
+
+1. Campo con `registeredCount / fieldSize`, repartido en mesas de 7.
+2. Asignación de asiento → mesa; al caer fichas, el hueco pasa al siguiente de
+   la cola de espera.
+3. **Merge**: cuando una mesa baja de 4 jugadores y hay espera, se fusiona con
+   la siguiente.
+4. **Mesa final**: cuando queda 1 mesa, se congela el campo y se reparte el
+   premio por posición (`FIELD_PAYOUT` = 45/25/15/9/6 %).
+5. Tope práctico del freeroll: `FREEROLL_TARGET_FIELD = 300` para arrancar,
+   `FREEROLL_MAX_FIELD = 900` como techo duro. "Ilimitado" no puede ser
+   ilimitado de verdad.
+
+El modelo `Table.field` ya tiene los campos necesarios (`fieldId`, `tableNumber`,
+`targetField`, `registered`, `seated`, `paidPositions`, `fieldStatus`); falta el
+servicio que los lea y escriba.
+
+**El reparto de un field NO sale del bote de la última mesa**: con 7 jugadores en
+la mesa final, el bote nunca llega a 500 CUP. El premio es una bolsa aparte del
+operador (ver §0).
 
 ---
 
@@ -104,7 +162,22 @@ con `Cannot read properties of undefined (reading 'suit')` y **tumbaba la mesa
 entera**. Ahora `dealCommunity()` verifica y detiene la mano, y `MAX_DEALABLE_PLAYERS`
 impide llegar a esa situación.
 
-### 2.2 Avisos de turno en lugar de spam
+### 2.2 7-max: `fieldSize` en vez de `maxPlayers`
+
+`TableTier.maxPlayers` pasó a llamarse `fieldSize` para que el nombre no
+siguiera sugiriendo "500 personas en una mesa". Los sitios que importaban:
+
+- `SEATS_PER_TABLE = 7` como constante única; `maxSeats` de cada mesa sale de ahí.
+- `BOT_CONFIG.maxBotsPerTable` pasó de 60 a `SEATS_PER_TABLE - 1`. El 60 era
+  imposible en una mesa de 7 y además habría convertido cualquier campo pequeño
+  en una mesa de solo bots.
+- `DEFAULT_MAX_PLAYERS` del motor: de 500 a 7.
+- `FIELD_PAYOUT = [45, 25, 15, 9, 6]` para el reparto por posición del campo.
+- La UI muestra "Campo 500 · 72 mesas · 7-max" en vez de "Mesa de 500".
+- Los tests de business rules se reescribieron contra `fieldSize`, y el motor se
+  prueba con 2/3/6/7/9/23 jugadores.
+
+### 2.3 Avisos de turno en lugar de spam
 
 Antes el bot mandaba el estado completo de la mesa (bote, comunitarias, lista de
 rivales) en **cada** acción de **cada** mesa. Con varios jugadores eso es un
@@ -119,7 +192,7 @@ mensaje.
 `chatId` se guardó en el modelo `User` (el bot ahora lo persiste en `/start`,
 solo en chat privado: en un grupo el aviso "te toca" se leería en voz alta).
 
-### 2.3 Saldo doble: `real` vs `play`
+### 2.4 Saldo doble: `real` vs `play`
 
 Decisión ya implementada y ahora respetada en **todas** las rutas de dinero:
 
@@ -142,22 +215,26 @@ genérico "saldo insuficiente".
 Al sentarse en una mesa cash se consume `play` primero, preservando `real` para
 retiro.
 
-### 2.4 Verificación
+### 2.5 Verificación
 
 | Prueba | Resultado |
 |---|---|
 | Build backend | limpio |
-| Build frontend | 45 módulos, 201 kB |
+| Build frontend | 45 módulos, 203 kB |
 | Cadenas y comisiones | 33/33 |
-| Reglas de negocio | 36/36 |
-| Motor de poker | 72/72 |
+| Reglas de negocio | 47/48 — **el fallo es deliberado** (§0) |
+| Motor de poker | 84/84 |
 | Auth sin firma | 401 correcto |
 | Flujo de pago completo | **no ejecutado** (sin MongoDB local) |
 
-`npm test` compila y corre las tres suites. Las del motor cubren lo que
-importa: que la mano llegue a `finished` con 2, 3, 6, 9 y 23 jugadores; que el
-bote cuadre con lo aportado; que no haya cartas repetidas ni `undefined`; que el
-botón y las ciegas roten; y que el motor se niegue a repartir 24 jugadores.
+`npm test` compila y corre las tres suites mediante `scripts/run-tests.js`. Un
+runner propio en lugar de `a && b && c` porque el fallo deliberado de las reglas
+de negocio cortaría las pruebas del motor, que son las que cazan bugs reales.
+
+Las del motor cubren: 7-max completo (7 sentados, 2 cartas cada uno, sobra
+baraja), 2/3/6/7/9/23 jugadores llegando a `finished`, conservación de fichas
+(lo entregado coincide con lo aportado), sin cartas repetidas ni `undefined`,
+rotación de botón y ciegas, y que el motor se niegue a repartir 24.
 
 ---
 
@@ -229,40 +306,52 @@ es la excepción en cuanto a pagos. Antes de operar:
 
 Nada de esto está implementado. **No lanzar sin consultar a un abogado.**
 
-### 3.5 Integridad del juego — no bloquea pero conviene
+### 3.5 Field manager multi-mesa — BLOQUEA el formato de campo
+
+`table.manager.ts` gestiona una sola mesa y aplica el premio al ganador de esa
+mesa. Con `fieldSize` de 50 a 500 eso no sirve. Falta el servicio de campo:
+inscripción, asignación de asientos, merge, mesa final y reparto por posición
+(ver §1). Depende de la decisión económica de §0.
+
+### 3.6 Integridad del juego — no bloquea pero conviene
 
 - **Rake VIP no se aplica.** La página VIP promete 3%/2%/0%, el código cobra 5%
   fijo. Un usuario VIP que lo compruebe pierde la confianza.
 - **Logros y rachas no se disparan.** No hay hook que los active al ganar.
-- **Torneos no se ejecutan.** La lógica base existe; falta asignación de mesas ni
-  reparto de premios.
 - **Colusión.** Nada impide que dos cuentas coordinen. En poker de dinero real
-  eso vacía la plataforma.
+  eso vacía la plataforma. En un campo de 500 el problema es peor: hacen falta
+  varios complicados, no dos.
 
-### 3.6 Rake en mesas grandes
+### 3.7 Bots en un campo de 500
 
-Con el modelo de tandas (§1), el rake se cobra 5% **por mano**. Una mesa de 500
-cobra 5% unas 22 veces sobre los mismos fichas. Conviene decidir si el rake debe
-aplicarse solo a las últimas tandas, para que el coste efectivo por jugador no
-crezca con el tamaño anunciado de la mesa.
+`BOT_CONFIG.botRatio` es 0,6 y el tope son 6 bots por mesa de 7. En un campo de
+500 son 72 mesas, así que podrían llegar a actuar ~430 bots a la vez. Con
+`winRate` entre 0,42 y 0,48 no vacían la plataforma, pero **en un campo los bots
+se eliminan entre ellos**: sobreviven más los humanos, así que la mesa final
+tiende a ser humana. Eso es lo correcto, pero conviene medirlo, porque el
+jugador ve "derrotado por un bot" en la primera partida y vuelve si comprueba que
+no es siempre.
 
 ---
 
 ## 4. Orden de ejecución recomendado
 
 ```
-1. Legal               ← bloquea todo lo demás
-2. Plan de pago Render ← sin esto las partidas se cortan
-3. Panel de operador   ← sin esto los retiros se atascan
-4. TRC20 real          ← la más simple, valida el circuito completo
-5. Logros/rachas/VIP   ← honestidad con lo prometido
-6. EnZona + QvaPay     ← requiere cuenta de empresa
-7. Resto de cadenas
-8. Torneos             ← solo si se mantiene el formato de sala grande
+1. Economía del campo  ← §0: define el RTP y de dónde sale el premio
+2. Legal               ← bloquea todo lo demás
+3. Plan de pago Render ← sin esto las partidas se cortan
+4. Panel de operador   ← sin esto los retiros se atascan
+5. TRC20 real          ← la más simple, valida el circuito completo
+6. Field manager       ← sin esto el campo de 500 no existe
+7. Logros/rachas/VIP   ← honestidad con lo prometido
+8. EnZona + QvaPay     ← requiere cuenta de empresa
+9. Resto de cadenas
 ```
 
-Los puntos 1, 2, 3 y 4 son los mínimos para abrir a un grupo pequeño de usuarios
-de prueba.
+Los puntos 1, 2, 3, 4 y 5 son los mínimos para abrir a un grupo pequeño de
+usuarios de prueba. El 6 es necesario para que el producto sea lo que promete;
+hasta entonces, la opción honesta es mostrar 7-max de mesa única y quitar el
+"campo de 500" de la interfaz.
 
 ---
 
@@ -274,6 +363,11 @@ SIMULATE_PAYMENTS=true DEV_AUTH_BYPASS=true npm run dev
 
 # 2. Suites sin base de datos
 npm test
+
+# Suites por separado
+npm run test:chains
+npm run test:rules
+npm run test:engine
 
 # 3. Flujo completo (requiere MongoDB)
 node scripts/test-payment-flow.js

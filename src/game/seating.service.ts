@@ -6,7 +6,9 @@ import {
   TABLE_TIER_LIST,
   FREEROLL_PRIZES,
   FREEROLL_PAYOUT,
+  FREEROLL_TARGET_FIELD,
   BOT_CONFIG,
+  SEATS_PER_TABLE,
   getTier,
   type TableTierId,
 } from '../config/product';
@@ -169,7 +171,9 @@ export class SeatingService {
       bigBlind: Math.max(2, Math.round(tier.defaultBuyIn / 100)),
       minBuyIn: tier.minBuyIn,
       guaranteedPrize: tier.guaranteedPrize,
-      maxSeats: tier.maxPlayers,
+      // 7 asientos. `tier.fieldSize` es el numero de participantes del campo
+      // completo (multi-mesa), no lo que cabe en una mesa.
+      maxSeats: SEATS_PER_TABLE,
       seats: [],
       hand: {
         handNumber: 0,
@@ -182,7 +186,10 @@ export class SeatingService {
       },
     });
 
-    logger.info(`Mesa cash creada: ${tableId} (${tier.maxPlayers} asientos)`);
+    logger.info(
+      `Mesa cash creada: ${tableId} ` +
+      `(7-max, campo de ${tier.fieldSize} participantes, premio ${tier.guaranteedPrize} CUP)`,
+    );
     return table;
   }
 
@@ -365,8 +372,16 @@ export class SeatingService {
     };
   }
 
-  /** Crea un freeroll para el escalon de premio dado. */
-  async createFreeroll(prizeTier: number, maxPlayers = 100): Promise<ITable> {
+  /**
+   * Crea un freeroll para el escalon de premio dado.
+   *
+   * `targetField` es el numero de participantes que deben inscribirse para que
+   * el campo arranque. En la practica no es ilimitado: un freeroll de 20 000
+   * personas tardaria horas en llegar a mesa final y, sin tope, el mismo jugador
+   * podria abrir campos en bucle. El tope protege al operador, no al jugador,
+   * asi que hay que anunciarlo en la UI.
+   */
+  async createFreeroll(prizeTier: number, targetField = FREEROLL_TARGET_FIELD): Promise<ITable> {
     const tier = FREEROLL_PRIZES.includes(prizeTier as any) ? prizeTier : FREEROLL_PRIZES[0];
 
     const tableId = `freeroll-${tier}-${Date.now().toString(36)}`;
@@ -381,7 +396,10 @@ export class SeatingService {
       minBuyIn: 0,
       // El bote del freeroll es el premio del escalon
       guaranteedPrize: tier,
-      maxSeats: maxPlayers,
+      // 7-max tambien en freeroll: una mesa de poker es una mesa de poker.
+      maxSeats: SEATS_PER_TABLE,
+      // Objetivo de inscripcion del campo multi-mesa
+      targetField,
       seats: [],
       hand: {
         handNumber: 0,
@@ -403,6 +421,12 @@ export class SeatingService {
    *
    * El premio va a `balance.play` (NO retirable). El reparto es
    * 50/30/20 sobre el bote segun la posicion final.
+   *
+   * NOTA (pendiente): esto liquida UN freeroll de una mesa, no un campo. Cuando
+   * exista el field manager, el freeroll de 7-max con 300 participantes seran
+   * 43 mesas: el premio se reparte cuando quede UNA mesa, y el reparto por
+   * posicion es sobre el field entero, no sobre los 7 de esa mesa. Este metodo
+   * pasara a ser el caso base (mesa unica) y el field manager hara el resto.
    */
   async settleFreeroll(freerollId: string): Promise<{ results: any[] }> {
     const freeroll = await Table.findOne({ tableId: freerollId });
@@ -475,11 +499,14 @@ export class SeatingService {
         byTier.set(tier, {
           prizeTier: tier,
           players,
-          maxPlayers: t.maxSeats,
+          maxSeats: t.maxSeats,
           phase: t.hand.phase,
           pot: t.hand.pot || t.guaranteedPrize,
           tableId: t.tableId,
           status: t.status,
+          // Inscritos de todas las mesas de este escalon, no solo de esta.
+          fieldRegistered: t.field?.registered ?? players,
+          fieldTarget: t.field?.targetField ?? FREEROLL_TARGET_FIELD,
         });
       }
     }
@@ -488,12 +515,16 @@ export class SeatingService {
       const found = byTier.get(prize);
       return {
         prizeTier: prize,
-        players: found?.players ?? 0,
-        maxPlayers: found?.maxPlayers ?? 100,
+        // Asientos de esta mesa fisica (7).
+        maxPlayers: found?.maxSeats ?? SEATS_PER_TABLE,
+        // Participantes del campo: es lo que la UI debe mostrar como "jugadores".
+        players: found?.fieldRegistered ?? 0,
+        fieldTarget: found?.fieldTarget ?? FREEROLL_TARGET_FIELD,
         phase: found?.phase ?? 'waiting',
         pot: found?.pot ?? prize,
         tableId: found?.tableId,
         payout: FREEROLL_PAYOUT,
+        // El premio del freeroll va a `balance.play`, que no es retirable.
         withdrawable: false,
       };
     });

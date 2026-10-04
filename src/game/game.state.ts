@@ -42,28 +42,28 @@ export interface GameState {
 }
 
 /**
- * Tope por defecto de jugadores en el motor. El producto opera mesas de hasta
- * 500, asi que el valor por defecto es generoso y cada mesa lo ajusta a su
- * `maxSeats`.
+ * Asientos por mesa fisica: 7-max.
+ *
+ * El producto anuncia campos de 50 a 500 participantes, pero eso es el numero de
+ * inscritos en total (multi-mesa), no personas sentadas a la vez. Una mesa de
+ * poker real son 6-9 jugadores; aqui son 7.
  */
-export const DEFAULT_MAX_PLAYERS = 500;
+export const DEFAULT_MAX_PLAYERS = 7;
 
 /**
- * Maximo de jugadores con los que se puede repartir una mano de poker real.
+ * Techo MATEMATICO de jugadores en una mano.
  *
- * Una baraja son 52 cartas. Cada jugador recibe 2 y la mesa necesita 5 cartas
- * comunitarias, asi que el techo es `(52 - 5) / 2 = 23`.
+ * Una baraja son 52 cartas. Cada jugador recibe 2 y la mesa necesita 5
+ * comunitarias, asi que el maximo absoluto es `(52 - 5) / 2 = 23`.
  *
- * Ojo con el 26: parece que caben 26 (52 / 2) pero no, porque las 5 cartas de
- * la mesa no son opcionales. Con 26 jugadores el reparto se come la baraja
- * entera y el flop hace `deck.pop()` sobre un mazo vacio: se reparten cartas
- * `undefined` y el evaluador revienta con
- * `Cannot read properties of undefined (reading 'suit')`.
+ * Este numero NO es el tope del producto: es una red de seguridad que impide
+ * que una configuracion equivocada reparta cartas `undefined`. Ojo con el 26,
+ * que parece caber (52 / 2) pero no: las 5 cartas de la mesa no son
+ * opcionales, y con 26 el flop hace `pop()` sobre un mazo vacio y el evaluador
+ * revienta con `Cannot read properties of undefined (reading 'suit')`.
  *
- * El producto ofrece mesas de 50 a 500 participantes, lo cual es imposible como
- * una sola mano: no existen "mesas cash de 500 jugadores" en el poker. Lo que si
- * existe (y hacen CoinPoker y similares) es una sala donde todos permanecen
- * sentados y se juega por tandas hasta que quedan pocos.
+ * Con 7-max nunca se acerca a este techo, pero conviene mantener la guarda por
+ * si alguien configura una mesa rara.
  */
 export const MAX_DEALABLE_PLAYERS = Math.floor((52 - 5) / 2); // 23
 

@@ -85,7 +85,10 @@ export function Freeroll({ onBack, onBalanceChange, onPlay }: Props) {
         <div className="space-y-3">
           {freerolls.map((f, i) => {
             const payout = f.payout ?? [50, 30, 20];
-            const isFull = f.players >= f.maxPlayers;
+            // El campo arranca al llegar al objetivo de inscripcion, no al
+            // llenarse una mesa. Con 7-max, un freeroll son ~43 mesas.
+            const target = f.fieldTarget || f.maxPlayers;
+            const isFull = f.players >= target;
 
             return (
               <article
@@ -104,15 +107,41 @@ export function Freeroll({ onBack, onBalanceChange, onPlay }: Props) {
                       <span>🎁</span> Freeroll {f.prizeTier} CUP
                     </h3>
                     <p className="text-xs text-[#a0a0b0] mt-1">
-                      Sin buy-in · {f.players}/{f.maxPlayers} jugadores
+                      Sin buy-in · {f.players}/{target} inscritos
                     </p>
                   </div>
                   <span className="badge badge-warning text-[10px]">
-                    {isFull ? 'Completo' : f.phase === 'running' ? 'En curso' : 'Abierto'}
+                    {isFull ? 'Lleno' : f.phase === 'running' ? 'En curso' : 'Abierto'}
                   </span>
                 </header>
 
-                {/* Reparto */}
+                {/* Progreso de inscripcion del campo */}
+                {(() => {
+                  const pct = Math.min(100, Math.round((f.players / target) * 100));
+                  return (
+                    <div className="mb-3 relative">
+                      <div className="flex justify-between text-[10px] mb-1">
+                        <span className="text-[#a0a0b0]">
+                          Campo: <strong className="text-white">{f.players}</strong> de {target}
+                        </span>
+                        <span className="text-[#a0a0b0]">{pct}%</span>
+                      </div>
+                      <div className="progress-bar">
+                        <div
+                          className="progress-bar-fill"
+                          style={{ width: `${pct}%`, background: '#ffd700' }}
+                        />
+                      </div>
+                      <p className="text-[10px] text-[#6c6c80] mt-1">
+                        {f.players} de {target} plazas ocupadas. Arranca al completarse; las
+                        mesas de 7 se fusionan hasta la mesa final.
+                      </p>
+                    </div>
+                  );
+                })()}
+
+                {/* Reparto por posicion. Ojo: es sobre el campo entero, no sobre
+                    los 7 jugadores de una mesa. */}
                 <div className="flex gap-2 mb-3">
                   {payout.map((pct, idx) => (
                     <div

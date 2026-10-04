@@ -1,6 +1,6 @@
 import { Table, ITable, ISeat, toPublicTable } from '../models/Table';
 import { User } from '../models/User';
-import { PokerGame, MAX_DEALABLE_PLAYERS } from './game.state';
+import { PokerGame } from './game.state';
 import { botFactory, BotProfile, decideAction, mulberry32 } from './bot.engine';
 import { TABLE_TIERS, TABLE_TIER_LIST, BOT_CONFIG, RAKE, TURN_TIMER, getTier } from '../config/product';
 import { logger } from '../utils/logger';
@@ -310,12 +310,11 @@ export class TableManager {
       table.maxSeats,
     );
 
-    // Una mano de poker reparte dos cartas por jugador y la baraja tiene 52, asi
-    // que caben 26 (MAX_DEALABLE_PLAYERS). Las mesas del producto anuncian hasta
-    // 500 participantes, y eso no es una mano: es una sala donde todos Permanecen
-    // sentados y se juega por tandas hasta que quedan pocos. Los que no entran
-    // en esta tanda conservan sus fichas y su asiento, y entran en la siguiente.
-    const inHand = this.selectHandSeats(table, activeSeats);
+    // 7-max: entran todos los activos, sin tandas ni rotaciones. La confusion
+    // anterior venia de tratar "campo de 500 participantes" como "500 personas
+    // en una mesa"; los campos se coordinan en el field manager (multi-mesa),
+    // no aqui.
+    const inHand = activeSeats;
 
     for (const seat of inHand) {
       engine.addPlayer(seat.index.toString(), seat.displayName, seat.chips);
@@ -376,30 +375,6 @@ export class TableManager {
 
     await table.save();
     this.scheduleTurn(table);
-  }
-
-  /**
-   * Elige que jugadores entran en la mano actual.
-   *
-   * Con 26 o menos activos entran todos. Por encima, solo caben 26 por la
-   * baraja, asi que se rota: entra el grupo mas cercano al boton y el resto
-   * espera. La rotacion se deriva del numero de mano, de modo que los grupos
-   * se turnan y ningun jugador se queda fuera indefinidamente.
-   */
-  private selectHandSeats(table: ITable, activeSeats: ISeat[]): ISeat[] {
-    if (activeSeats.length <= MAX_DEALABLE_PLAYERS) return activeSeats;
-
-    // Orden estable por numero de asiento
-    const ordered = [...activeSeats].sort((a, b) => a.index - b.index);
-    const groups = Math.ceil(ordered.length / MAX_DEALABLE_PLAYERS);
-
-    // La primera mano juega el grupo 0, la siguiente el 1, y al volver al
-    // final se rebaraja el grupo para que no siempre jueguen los de abajo.
-    const group = table.hand.handNumber % groups;
-
-    return ordered
-      .filter((_, i) => Math.floor(i / MAX_DEALABLE_PLAYERS) === group)
-      .slice(0, MAX_DEALABLE_PLAYERS);
   }
 
   /**

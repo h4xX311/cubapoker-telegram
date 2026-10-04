@@ -7,7 +7,8 @@
     "dev": "ts-node src/bot.ts",
     "build": "tsc --skipLibCheck",
     "start": "node dist/bot.js",
-    "test": "npm run build && node scripts/test-chains.js && node scripts/test-business-rules.js && node scripts/test-engine.js",
+    "test": "npm run build && node scripts/run-tests.js",
+    "test:all": "node scripts/run-tests.js",
     "test:chains": "node scripts/test-chains.js",
     "test:rules": "node scripts/test-business-rules.js",
     "test:engine": "node scripts/test-engine.js"

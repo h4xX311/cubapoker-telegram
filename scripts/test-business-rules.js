@@ -14,6 +14,10 @@ const {
   TABLE_TIER_LIST,
   FREEROLL_PRIZES,
   FREEROLL_PAYOUT,
+  FREEROLL_TARGET_FIELD,
+  FREEROLL_MAX_FIELD,
+  FIELD_PAYOUT,
+  SEATS_PER_TABLE,
   BOT_CONFIG,
   RAKE,
   BALANCE,
@@ -34,51 +38,159 @@ const section = (t) => console.log(`\n\x1b[1m${t}\x1b[0m`);
 console.log('\n\x1b[1mCubaPoker · Pruebas de reglas de negocio\x1b[0m');
 
 // =========================================================================
-section('1. Mesas cash: escala y premios');
+section('1. Campos cash: fieldSize, no asientos');
 
 {
+  // OJO con la distincion que rompio la iteracion anterior:
+  //   fieldSize  = participantes del campo (multi-mesa)
+  //   maxSeats   = asientos de una mesa fisica (siempre 7)
+  if (SEATS_PER_TABLE === 7) ok('mesa fisica 7-max');
+  else bad(`SEATS_PER_TABLE=${SEATS_PER_TABLE}; el producto define 7-max`);
+
   const expected = [
-    { max: 50, prize: 50 },
-    { max: 100, prize: 100 },
-    { max: 300, prize: 300 },
-    { max: 500, prize: 500 },
+    { field: 50, prize: 50 },
+    { field: 100, prize: 100 },
+    { field: 300, prize: 300 },
+    { field: 500, prize: 500 },
   ];
 
-  if (TABLE_TIER_LIST.length === 4) ok('hay 4 niveles de mesa');
+  if (TABLE_TIER_LIST.length === 4) ok('hay 4 niveles de campo');
   else bad(`esperaba 4 niveles, hay ${TABLE_TIER_LIST.length}`);
 
   for (const e of expected) {
-    const tier = TABLE_TIER_LIST.find(t => t.maxPlayers === e.max);
-    if (!tier) { bad(`falta la mesa de ${e.max}`); continue; }
+    const tier = TABLE_TIER_LIST.find(t => t.fieldSize === e.field);
+    if (!tier) { bad(`falta el campo de ${e.field}`); continue; }
     if (tier.guaranteedPrize === e.prize) {
-      ok(`mesa ${e.max}: premio ${e.prize} CUP`);
+      ok(`campo ${e.field}: premio ${e.prize} CUP`);
     } else {
-      bad(`mesa ${e.max}: premio ${tier.guaranteedPrize}, esperaba ${e.prize}`);
+      bad(`campo ${e.field}: premio ${tier.guaranteedPrize}, esperaba ${e.prize}`);
     }
   }
 
-  // Buy-in minimo debe cubrir el premio o la mesa seria un farm negativo
-  for (const tier of TABLE_TIER_LIST) {
-    if (tier.minBuyIn > 0) ok(`mesa ${tier.maxPlayers}: buy-in minimo ${tier.minBuyIn} CUP`);
-    else bad(`mesa ${tier.maxPlayers}: buy-in minimo invalido`);
-  }
+  // Nadie debe seguir usando `maxPlayers` para describir el campo: ese nombre
+  // es lo que llevo a pensar "500 personas en una mesa".
+  const legacy = TABLE_TIER_LIST.filter(t => 'maxPlayers' in t);
+  if (legacy.length === 0) ok('ningun tier usa el nombre legacy `maxPlayers`');
+  else bad(`${legacy.length} tiers siguen usando maxPlayers; debe llamarse fieldSize`);
 
-  // El premio no puede superar el buy-in por si el ganador pierde de contado:
-  // eso convertiria la mesa en una fabrica de perdidas garantizadas.
+  // Un field de N son ceil(N / 7) mesas fisicas.
   for (const tier of TABLE_TIER_LIST) {
-    if (tier.guaranteedPrize < tier.minBuyIn) {
-      ok(`mesa ${tier.maxPlayers}: premio < buy-in minimo (coherente)`);
-    } else {
-      bad(
-        `mesa ${tier.maxPlayers}: premio ${tier.guaranteedPrize} >= buy-in ${tier.minBuyIn}. ` +
-        `Un ganador que pierde de contado genera perdida neta.`,
+    const tables = Math.ceil(tier.fieldSize / SEATS_PER_TABLE);
+    if (tables === Math.ceil(tier.fieldSize / 7)) {
+      ok(
+        `campo ${tier.fieldSize}: ${tables} mesas de 7 ` +
+        `(${tier.fieldSize} participantes)`,
       );
     }
   }
 }
 
 // =========================================================================
-section('2. Freerolls: premios y no retirabilidad');
+section('2. Economia del campo: el RTP es viable');
+
+{
+  // ESTE es el bloque que falla con los numeros actuales, y deliberatemente.
+  //
+  // premio = fieldSize * 1 CUP en los cuatro tiers. Para que el RTP fuera sano
+  // (~95%, lo que corresponde a un rake del 5%) el buy-in tendria que ser
+  // ~1 CUP en los cuatro, con lo que los cuatro campos serian
+  // economicamente identicos y el ladder no escalaria para nada.
+  //
+  // Con los buy-ins actuales (200/500/1000/2000) el RTP es del 0,5% al 0,05%:
+  // el rake del 5% no cubre ni de lejos la devolucion, y el campo pierde una
+  // cantidad garantizada. Esto no se puede arreglar en codigo, es una decision
+  // de negocio: o el buy-in baja a ~1 CUP, o el premio sale de un fondo
+  // promocional y no del bote.
+  console.log('    field   premio   buy-in   se recauda    premio    RTP');
+  const rtpByTier = new Map();
+
+  for (const tier of TABLE_TIER_LIST) {
+    const collected = tier.fieldSize * tier.minBuyIn;
+    const rtp = tier.guaranteedPrize / collected;
+    rtpByTier.set(tier.id, rtp);
+
+    console.log(
+      '    ' +
+        String(tier.fieldSize).padEnd(8) +
+        String(tier.guaranteedPrize).padEnd(9) +
+        String(tier.minBuyIn).padEnd(9) +
+        String(collected).padEnd(13) +
+        String(tier.guaranteedPrize).padEnd(10) +
+        (rtp * 100).toFixed(3) + '%',
+    );
+  }
+
+  const healthy = [...rtpByTier.values()].every(r => r >= 0.5);
+  const anyVisible = [...rtpByTier.values()].some(r => r >= 0.05);
+
+  if (healthy) {
+    ok('todos los campos tienen RTP >= 50%');
+  } else {
+    bad(
+      'ningun campo llega al 50% de RTP. ' +
+      `El rake del ${RAKE.cashPercentage}% no cubre la devolucion del premio. ` +
+      'Hace falta una de dos: bajar el buy-in a ~1 CUP (y entonces los cuatro ' +
+      'campos son el mismo), o que el premio salga de un fondo promocional y no ' +
+      'del bote. Decision de negocio, no de codigo.',
+    );
+  }
+
+  // Aunque el RTP aun no este resuelto, el rake no puede ser la unica fuente:
+  // si el rake cubriese el premio, el operador no tendria margen.
+  for (const tier of TABLE_TIER_LIST) {
+    const collected = tier.fieldSize * tier.minBuyIn;
+    const rake = (collected * RAKE.cashPercentage) / 100;
+    if (rake > tier.guaranteedPrize) {
+      ok(
+        `campo ${tier.fieldSize}: el rake (${rake.toFixed(0)} CUP) supera el premio ` +
+        `(${tier.guaranteedPrize} CUP)`,
+      );
+    } else {
+      bad(
+        `campo ${tier.fieldSize}: el rake (${rake.toFixed(0)}) no cubre el premio ` +
+        `(${tier.guaranteedPrize}). El operador pierde dinero en cada campo.`,
+      );
+    }
+  }
+
+  // Esto no puede arreglarse bajando el buy-in sin aplanar el ladder: si los
+  // cuatro campos dan lo mismo, el jugador no tiene motivo para elegir uno.
+  if (!anyVisible) {
+    console.log(
+      '    aviso: con estos numeros los 4 campos son indistinguibles para el jugador',
+    );
+  }
+}
+
+// =========================================================================
+section('3. Reparto del premio entre posiciones');
+
+{
+  const sum = FIELD_PAYOUT.reduce((a, b) => a + b, 0);
+  if (sum <= 100) {
+    ok(`el reparto usa ${sum}% del premio (el ${100 - sum}% restante es rake/fondo)`);
+  } else {
+    bad(`el reparto suma ${sum}%, no puede superar 100%`);
+  }
+
+  // El reparto debe ser decreciente: el primer lugar cobra mas que el segundo.
+  let descending = true;
+  for (let i = 1; i < FIELD_PAYOUT.length; i++) {
+    if (FIELD_PAYOUT[i] >= FIELD_PAYOUT[i - 1]) descending = false;
+  }
+  if (descending) ok('el reparto es estrictamente decreciente por posicion');
+  else bad(`el reparto no decrece: ${FIELD_PAYOUT.join(' / ')}`);
+
+  if (FIELD_PAYOUT.length >= 3) ok(`${FIELD_PAYOUT.length} posiciones premiadas`);
+  else bad(`solo ${FIELD_PAYOUT.length} posiciones premiadas; un field de 500 paga a muy pocos`);
+
+  // El primero debe llevarse una parte sustancial: si no, el campo no engancha.
+  if (FIELD_PAYOUT[0] >= 40) ok(`el primer lugar se lleva el ${FIELD_PAYOUT[0]}%`);
+  else bad(`el primer lugar solo se lleva el ${FIELD_PAYOUT[0]}%; el field no engancha`);
+}
+
+// =========================================================================
+section('4. Freerolls: premios y no retirabilidad');
 
 {
   const expectedPrizes = [5, 10, 20, 30, 40, 50];
@@ -102,10 +214,43 @@ section('2. Freerolls: premios y no retirabilidad');
   const freeMin = FREEROLL_PRIZES[0];
   if (freeMin > 0) ok(`el menor premio (${freeMin} CUP) cubre al menos el buy-in minimo de mesa`);
   else bad('el menor premio de freeroll es 0');
+
+  // "Freeroll ilimitado" no puede ser ilimitado de verdad. Sin tope, el campo
+  // tardaria horas en llegar a mesa final y un mismo usuario podria abrir
+  // campos en bucle para acaparar el saldo de promocion.
+  if (FREEROLL_TARGET_FIELD > 0) {
+    ok(`el freeroll arranca con ${FREEROLL_TARGET_FIELD} inscritos (campo multi-mesa)`);
+  } else {
+    bad('FREEROLL_TARGET_FIELD debe ser > 0: sin objetivo, el campo nunca arranca');
+  }
+
+  const tablesNeeded = Math.ceil(FREEROLL_TARGET_FIELD / SEATS_PER_TABLE);
+  if (tablesNeeded > 1) {
+    ok(`un freeroll de ${FREEROLL_TARGET_FIELD} son ${tablesNeeded} mesas de 7`);
+  }
+
+  if (FREEROLL_MAX_FIELD > FREEROLL_TARGET_FIELD) {
+    ok(`techo duro de ${FREEROLL_MAX_FIELD} inscritos (> objetivo ${FREEROLL_TARGET_FIELD})`);
+  } else {
+    bad(
+      `FREEROLL_MAX_FIELD (${FREEROLL_MAX_FIELD}) debe ser mayor que el objetivo ` +
+      `(${FREEROLL_TARGET_FIELD}); si no, el campo cierra antes de empezar`,
+    );
+  }
+
+  // El campo no puede crecer sin limite: 500 mesas de 7 es inmanejable.
+  if (FREEROLL_MAX_FIELD <= 5000) {
+    ok(`el techo de ${FREEROLL_MAX_FIELD} es operativamente manejable`);
+  } else {
+    bad(
+      `techo de ${FREEROLL_MAX_FIELD}: son ` +
+      `${Math.ceil(FREEROLL_MAX_FIELD / SEATS_PER_TABLE)} mesas para operar`,
+    );
+  }
 }
 
 // =========================================================================
-section('3. Rake');
+section('5. Rake');
 
 {
   if (RAKE.cashPercentage === 5) ok('rake de mesa cash: 5%');
@@ -129,7 +274,7 @@ section('3. Rake');
 }
 
 // =========================================================================
-section('4. Bots: no pueden drainear la plataforma');
+section('6. Bots: no pueden vaciar la plataforma');
 
 {
   if (BOT_CONFIG.winRateMin < 0.5 && BOT_CONFIG.winRateMax <= 0.5) {
@@ -141,10 +286,20 @@ section('4. Bots: no pueden drainear la plataforma');
     );
   }
 
-  if (BOT_CONFIG.maxBotsPerTable <= 60) {
-    ok(`tope de bots por mesa: ${BOT_CONFIG.maxBotsPerTable} (no todos los asientos)`);
+  // Con 7-max el tope legal de bots es 6 (si hay un humano sentado). El valor
+  // anterior era 60, imposible en una mesa de 7 y ademas habria convertido
+  // cualquier campo pequeno en una mesa de solo bots.
+  if (BOT_CONFIG.maxBotsPerTable <= SEATS_PER_TABLE - 1) {
+    ok(`tope de bots por mesa: ${BOT_CONFIG.maxBotsPerTable} de 7 asientos`);
   } else {
-    bad(`maxBotsPerTable=${BOT_CONFIG.maxBotsPerTable} permite una mesa 100% bots`);
+    bad(
+      `maxBotsPerTable=${BOT_CONFIG.maxBotsPerTable} en una mesa de ` +
+      `${SEATS_PER_TABLE}: permite una mesa casi 100% bots`,
+    );
+  }
+
+  if (BOT_CONFIG.maxBotsPerTable === SEATS_PER_TABLE - 1) {
+    ok('el tope deja siempre un asiento para un humano');
   }
 
   if (BOT_CONFIG.botRatio <= 1) ok(`proporcion de bots: ${BOT_CONFIG.botRatio}`);

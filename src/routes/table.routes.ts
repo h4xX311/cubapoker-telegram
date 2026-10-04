@@ -4,7 +4,14 @@ import { seatingService, TableError } from '../game/seating.service';
 import { requireTelegramAuth, getAuthedTelegramId } from '../middleware/telegramAuth';
 import { User } from '../models/User';
 import { logger } from '../utils/logger';
-import { TABLE_TIER_LIST, FREEROLL_PRIZES } from '../config/product';
+import {
+  TABLE_TIER_LIST,
+  FREEROLL_PRIZES,
+  SEATS_PER_TABLE,
+  FIELD_PAYOUT,
+  FREEROLL_TARGET_FIELD,
+  FREEROLL_MAX_FIELD,
+} from '../config/product';
 
 const router = Router();
 router.use(requireTelegramAuth);
@@ -13,16 +20,23 @@ router.use(requireTelegramAuth);
 router.get('/config', (_req: Request, res: Response) => {
   res.json({
     success: true,
+    // Asientos por mesa fisica. La UI debe mostrar "7-max" como formato, no
+    // "500 jugadores por mesa": el 500 es el field completo (multi-mesa).
+    seatsPerTable: SEATS_PER_TABLE,
     cashTiers: TABLE_TIER_LIST.map(t => ({
       id: t.id,
       label: t.label,
       description: t.description,
-      maxPlayers: t.maxPlayers,
+      fieldSize: t.fieldSize,
       guaranteedPrize: t.guaranteedPrize,
       minBuyIn: t.minBuyIn,
       defaultBuyIn: t.defaultBuyIn,
+      // Reparto del premio entre las primeras posiciones.
+      payout: FIELD_PAYOUT,
     })),
     freerollTiers: FREEROLL_PRIZES,
+    freerollTargetField: FREEROLL_TARGET_FIELD,
+    freerollMaxField: FREEROLL_MAX_FIELD,
   });
 });
 

@@ -6,7 +6,7 @@ interface HomeProps {
 }
 
 const NAV: { page: Page; emoji: string; label: string; sub: string; accent: string }[] = [
-  { page: 'tables', emoji: '🃏', label: 'Mesas cash', sub: '50 a 500 jugadores', accent: 'from-[#00d26a] to-[#00b894]' },
+  { page: 'tables', emoji: '🃏', label: 'Campos cash', sub: '7-max · 50 a 500', accent: 'from-[#00d26a] to-[#00b894]' },
   { page: 'freeroll', emoji: '🎁', label: 'Freeroll', sub: 'Gratis · 5-50 CUP', accent: 'from-[#ffd700] to-[#ffb700]' },
   { page: 'tournaments', emoji: '🏆', label: 'Torneos', sub: 'Con premio', accent: 'from-[#e67e22] to-[#d35400]' },
   { page: 'vip', emoji: '👑', label: 'VIP', sub: 'Menos rake', accent: 'from-[#9b59b6] to-[#8e44ad]' },

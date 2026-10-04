@@ -53,10 +53,16 @@ export interface CashTier {
   id: string;
   label: string;
   description: string;
-  maxPlayers: number;
+  /**
+   * Participantes del campo completo (multi-mesa). NO son asientos: un campo
+   * de 500 son ~72 mesas de 7. Ver `seatsPerTable`.
+   */
+  fieldSize: number;
   guaranteedPrize: number;
   minBuyIn: number;
   defaultBuyIn: number;
+  /** Reparto del premio entre las primeras posiciones, en porcentajes. */
+  payout?: readonly number[];
 }
 
 export interface TableSummary {
@@ -68,7 +74,17 @@ export interface TableSummary {
   bigBlind: number;
   minBuyIn: number;
   guaranteedPrize: number;
+  /** Asientos de esta mesa fisica (7). */
   maxSeats: number;
+  /** Datos del campo multi-mesa al que pertenece. */
+  field?: {
+    fieldId: string;
+    tableNumber: number;
+    targetField: number;
+    registered: number;
+    seated: number;
+    fieldStatus: 'filling' | 'running' | 'final' | 'finished';
+  };
   occupied: number;
   humans: number;
   bots: number;
@@ -81,7 +97,11 @@ export interface TableSummary {
 
 export interface FreerollSummary {
   prizeTier: number;
+  /** Participantes inscritos en el campo (todas las mesas). */
   players: number;
+  /** Objetivo de inscripcion para que arranque el campo. */
+  fieldTarget: number;
+  /** Asientos de una mesa fisica (siempre 7). */
   maxPlayers: number;
   phase: string;
   pot: number;

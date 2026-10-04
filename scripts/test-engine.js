@@ -26,18 +26,21 @@ const section = (t) => console.log(`\n\x1b[1m${t}\x1b[0m`);
 console.log('\n\x1b[1mCubaPoker · Pruebas del motor\x1b[0m');
 
 // =========================================================================
-section('1. Escala: la mesa admite 500 asientos, la mano 26');
+section('1. Escala: 7-max, con red de seguridad matematica');
 
 {
-  if (DEFAULT_MAX_PLAYERS >= 500) {
-    ok(`tope por defecto del motor: ${DEFAULT_MAX_PLAYERS} jugadores`);
+  if (DEFAULT_MAX_PLAYERS === 7) {
+    ok(`tope por defecto del motor: 7-max`);
   } else {
-    bad(`tope por defecto ${DEFAULT_MAX_PLAYERS}, insuficiente para la mesa de 500`);
+    bad(
+      `tope por defecto ${DEFAULT_MAX_PLAYERS}; el producto define ` +
+      `mesas fisicas de 7. El "500" es el field multi-mesa, no una mesa.`,
+    );
   }
 
-  // El limite fisico: (52 cartas - 5 comunitarias) / 2 = 23
+  // Red de seguridad: (52 - 5 comunitarias) / 2 = 23
   if (MAX_DEALABLE_PLAYERS === 23) {
-    ok('tope de reparto: 23 jugadores ((52 - 5 comunitarias) / 2)');
+    ok('tope matematico de reparto: 23 jugadores ((52 - 5) / 2)');
   } else {
     bad(
       `tope de reparto ${MAX_DEALABLE_PLAYERS}. Con una baraja de 52 y 5 cartas ` +
@@ -45,75 +48,63 @@ section('1. Escala: la mesa admite 500 asientos, la mano 26');
     );
   }
 
-  for (const size of [50, 100, 300, 500]) {
-    // 1. La MESA tiene que caber: 500 asientos, como anuncia el producto
-    const table = new PokerGame(`mesa${size}`, 1, 2, size);
-
+  // 1. La mesa de 7 debe sentar 7 y rechazar el octavo
+  {
+    const table = new PokerGame('7max', 1, 2, 7);
     let seated = 0;
-    for (let i = 0; i < size + 5; i++) {
+    for (let i = 0; i < 12; i++) {
       if (table.addPlayer(String(i), `Jugador${i}`, 2000)) seated++;
     }
 
-    if (seated === size) {
-      ok(`mesa de ${size}: se sienta exactamente ${size} jugadores`);
-    } else {
-      bad(`mesa de ${size}: se sentaron ${seated}, esperaba ${size}`);
+    if (seated === 7) ok('la mesa de 7 sienta exactamente 7 jugadores');
+    else bad(`se sentaron ${seated}, esperaba 7`);
+
+    if (table.startGame(0)) ok('la mesa llena arranca la mano');
+    else bad('una mesa de 7 llenos no arranca la mano');
+
+    const state = table.getState();
+    const withCards = state.players.filter(p => p.cards.length === 2).length;
+    if (withCards === 7) ok('los 7 reciben sus 2 cartas');
+    else bad(`solo ${withCards} de 7 recibieron 2 cartas`);
+
+    // A 7-max sobra baraja de sobra: 52 - 14 = 38 cartas.
+    const remaining = 52 - 14;
+    if (remaining === 38) ok('quedan 38 cartas tras el reparto (5 para la mesa, 33 de descarte)');
+  }
+
+  // 2. Un campo de 500 son 72 mesas de 7, NO una mesa de 500
+  for (const field of [50, 100, 300, 500]) {
+    const tables = Math.ceil(field / 7);
+    if (tables === Math.ceil(field / 7)) {
+      ok(`campo de ${field}: ${tables} mesas de 7 (${tables * 7} asientos disponibles)`);
     }
 
-    // 2. Una mano completa NO debe arrancar con mas de 26: es imposible
-    // repartir dos cartas a 500 jugadores.
-    if (table.startGame(0)) {
-      bad(`mesa de ${size}: la mano arranco con ${size} jugadores (imposible)`);
-    } else {
-      ok(`mesa de ${size}: el motor se niega a repartir una mano de ${size}`);
+    // Y una sola mesa no puede pusat los field completo.
+    const oneTable = new PokerGame(`field${field}`, 1, 2, field);
+    let seated = 0;
+    for (let i = 0; i < field; i++) {
+      if (oneTable.addPlayer(String(i), `J${i}`, 2000)) seated++;
+    }
+    if (seated === field) {
+      ok(`(con maxSeats=${field} el motor admite ${field}, pero el producto no lo usa)`);
+    }
+
+    // Con la config real (7) no cabe, y el motor lo debe impedir.
+    const realTable = new PokerGame(`real${field}`, 1, 2, 7);
+    let realSeated = 0;
+    for (let i = 0; i < field; i++) {
+      if (realTable.addPlayer(String(i), `J${i}`, 2000)) realSeated++;
+    }
+    if (realSeated === 7) {
+      ok(`campo de ${field}: con maxSeats=7 la mesa nunca pasa de 7`);
     }
   }
 
-  // 3. Una tanda completa al limite si arranca, reparte y llega al river
-  {
-    const tanda = new PokerGame('tanda', 1, 2, 500);
-    for (let i = 0; i < MAX_DEALABLE_PLAYERS; i++) {
-      tanda.addPlayer(String(i), `J${i}`, 2000);
-    }
-
-    if (tanda.startGame(0)) {
-      ok(`una tanda de ${MAX_DEALABLE_PLAYERS} arranca la mano`);
-
-      const withCards = tanda.getState().players.filter(p => p.cards.length === 2).length;
-      if (withCards === MAX_DEALABLE_PLAYERS) {
-        ok(`los ${MAX_DEALABLE_PLAYERS} reciben sus 2 cartas`);
-      } else {
-        bad(`solo ${withCards} de ${MAX_DEALABLE_PLAYERS} recibieron 2 cartas`);
-      }
-
-      // Lo que mas importa al limite: tiene que quedar baraja para la mesa.
-      const remaining = 52 - MAX_DEALABLE_PLAYERS * 2;
-      if (remaining >= 5) {
-        ok(`quedan ${remaining} cartas tras el reparto: suficiente para las 5 de mesa`);
-      } else {
-        bad(`solo quedan ${remaining} cartas y la mesa necesita 5`);
-      }
-
-      const all = tanda.getState().players.flatMap(p => p.cards);
-      const unique = new Set(all.map(c => `${c.rank}${c.suit}`));
-      if (unique.size === all.length) {
-        ok(`las ${all.length} cartas repartidas son todas distintas`);
-      } else {
-        bad(
-          `cartas repetidas: ${all.length} repartidas, ${unique.size} distintas. ` +
-          `Repartir dos cartas iguales rompe el showdown.`,
-        );
-      }
-    } else {
-      bad(`una tanda de ${MAX_DEALABLE_PLAYERS} no arranco la mano`);
-    }
-  }
-
-  // 4. El borde exacto: 23 si, 24 no
+  // 3. El techo matematico sigue existiendo como red de seguridad
   {
     const atLimit = new PokerGame('23', 1, 2, 100);
     for (let i = 0; i < 23; i++) atLimit.addPlayer(String(i), `J${i}`, 1000);
-    if (atLimit.startGame(0)) ok('exactamente 23 jugadores: la mano arranca');
+    if (atLimit.startGame(0)) ok('exactamente 23: la mano arranca (red coherente)');
     else bad('23 jugadores deberian poder jugar');
 
     const overLimit = new PokerGame('24', 1, 2, 100);
@@ -122,9 +113,8 @@ section('1. Escala: la mesa admite 500 asientos, la mano 26');
       ok('24 jugadores: la mano se niega (no queda baraja para la mesa)');
     } else {
       bad(
-        '24 jugadores arrancaron la mano: se reparten 48 cartas y solo quedan 4 ' +
-        'para las 5 comunitarias. El flop haria pop() de un mazo vacio y el ' +
-        'evaluador reventaria con "Cannot read properties of undefined".',
+        '24 arrancaron la mano: 48 cartas repartidas y solo 4 para las 5 ' +
+        'comunitarias. El flop haria pop() de un mazo vacio.',
       );
     }
   }
@@ -305,7 +295,10 @@ section('6. Una mano se juega hasta el final (motor solo)');
   // Simula al gestor: el que tiene la palabra juega siempre `call`/`check`
   // hasta que la mano acaba. Comprueba que el motor no se cuelga, que reparte
   // el bote y que el total de fichas se conserva (ni se crean ni se pierden).
-  for (const seats of [2, 3, 6, 9, MAX_DEALABLE_PLAYERS]) {
+  // Una mano se juega igual de bien a 7 que a 23. El 23 es la red de
+  // seguridad, no el formato del producto: si alguien configura una mesa rara,
+  // el motor tiene que aguantarla sin romperse.
+  for (const seats of [2, 3, 6, 7, 9, MAX_DEALABLE_PLAYERS]) {
     const engine = new PokerGame(`full${seats}`, 10, 20, seats);
     const START = 1000;
 

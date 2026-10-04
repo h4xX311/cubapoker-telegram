@@ -67,7 +67,33 @@ export interface ITable extends Document {
   guaranteedPrize: number;
 
   seats: ISeat[];
+  /** Asientos de esta mesa fisica. Siempre SEATS_PER_TABLE (7). */
   maxSeats: number;
+
+  /**
+   * Pertenencia al campo multi-mesa.
+   *
+   * Un "campo de 500" no es una mesa de 500: son ~72 mesas de 7 que se fusionan
+   * mano a mano hasta que queda una mesa final. Estas dos fases las usa el
+   * field manager (aun por construir) para saber cuantas mesas quedan vivas y
+   * quien se lleva el premio.
+   */
+  field?: {
+    /** Identificador del campo al que pertenece esta mesa */
+    fieldId: string;
+    /** Posicion de esta mesa dentro del campo (1 = mesa final cuando queda 1) */
+    tableNumber: number;
+    /** Participantes objetivo para que arranque el campo */
+    targetField: number;
+    /** Inscritos hasta ahora en todo el campo */
+    registered: number;
+    /**Inscritos que ya no pueden volver a entrar (entraron a una mesa) */
+    seated: number;
+    /** Posiciones ya premiadas (1-based). El field manager lo rellena. */
+    paidPositions?: number;
+    /** Estado del campo. Una mesafinished tiene el campo 'finished'. */
+    fieldStatus?: 'filling' | 'running' | 'final' | 'finished';
+  };
 
   /** Estado volatil de la mano en curso */
   hand: {
@@ -149,6 +175,22 @@ const tableSchema = new Schema<ITable>({
   seats: { type: [seatSchema], default: [] },
   maxSeats: { type: Number, required: true },
 
+  // Multi-mesa: una mesa pertenece a un campo. El field manager (aun por
+  // construir) es quien lee y escribe estos contadores.
+  field: {
+    fieldId: { type: String, index: true },
+    tableNumber: { type: Number, default: 1 },
+    targetField: { type: Number, default: 0 },
+    registered: { type: Number, default: 0 },
+    seated: { type: Number, default: 0 },
+    paidPositions: { type: Number, default: 0 },
+    fieldStatus: {
+      type: String,
+      enum: ['filling', 'running', 'final', 'finished'],
+      default: 'filling',
+    },
+  },
+
   hand: {
     handNumber: { type: Number, default: 0 },
     phase: { type: String, default: 'idle' },
@@ -194,6 +236,19 @@ export const toPublicTable = (table: ITable, viewerSeat?: number) => {
     occupied: table.seats.length,
     humans: table.seats.filter(s => s.kind === 'human').length,
     bots: table.seats.filter(s => s.kind === 'bot').length,
+
+    // Datos del campo multi-mesa para que la UI pueda mostrar
+    // "mesa 23 de 72" y el progreso de inscripcion.
+    field: table.field
+      ? {
+          fieldId: table.field.fieldId,
+          tableNumber: table.field.tableNumber,
+          targetField: table.field.targetField,
+          registered: table.field.registered,
+          seated: table.field.seated,
+          fieldStatus: table.field.fieldStatus,
+        }
+      : undefined,
 
     hand: {
       handNumber: table.hand.handNumber,
