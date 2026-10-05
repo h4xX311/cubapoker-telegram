@@ -7,6 +7,8 @@ import {
   fakeTxHash,
   type PaymentProvider,
 } from './gateway';
+import { formatUnits } from '../../config/units';
+import { checkWithdrawal } from './withdrawal.rules';
 import { calculateCommission } from '../../config/monetization';
 import { validateAddress, CHAINS, isValidChain, type ChainId } from '../../config/chains';
 
@@ -199,22 +201,62 @@ export class PaymentService {
     }
 
     // Un usuario no debe tener retiros pendientes que superen su saldo.
-    const pending = await PaymentOrder.aggregate([
-      {
-        $match: {
-          telegramId,
-          type: 'withdrawal',
-          status: 'pending',
-        },
-      },
-      { $group: { _id: null, total: { $sum: '$amount' } } },
-    ]);
-    const pendingTotal = pending[0]?.total ?? 0;
+    //
+    // Y lo ya retirado este mes, para el tope mensual de ganancias. Se cuenta
+    // desde el dia 1 en hora local del servidor; con un mes de 30 dias y el tope
+    // en 25 000 USDT, el error de un dia es irrelevante.
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
 
-    if (user.balance.real - pendingTotal < amount) {
-      throw new MoneyError(
-        'Saldo insuficiente considerando retiros pendientes en proceso.',
-      );
+    const [pending, paidThisMonthAgg] = await Promise.all([
+      PaymentOrder.aggregate([
+        {
+          $match: {
+            telegramId,
+            type: 'withdrawal',
+            status: 'pending',
+          },
+        },
+        { $group: { _id: null, total: { $sum: '$amount' } } },
+      ]),
+      PaymentOrder.aggregate([
+        {
+          $match: {
+            telegramId,
+            type: 'withdrawal',
+            status: 'paid',
+            createdAt: { $gte: monthStart },
+          },
+        },
+        { $group: { _id: null, total: { $sum: '$amount' } } },
+      ]),
+    ]);
+
+    const pendingTotal = pending[0]?.total ?? 0;
+    const paidThisMonth = paidThisMonthAgg[0]?.total ?? 0;
+
+    // Las reglas (minimos, topes, saldo libre, saldo no retirable) viven en
+    // `withdrawal.rules.ts`, sin base de datos y con tests propios. Aqui solo se
+    // le pasa lo que hay leido de Mongo.
+    //
+    // El saldo de lo ya retirado este mes se calcula con el aggregate de abajo:
+    // es lo que hace que el tope mensual no sea solo decorativo.
+    //
+    // Los limites por via (minimo USDT vs minimo CUP) ya se comprueban arriba con
+    // mensajes propios, asi que se llama con `skipMinimum: true` para no
+    // duplicar esa comprobacion.
+    const check = checkWithdrawal(
+      amount,
+      user.balance,
+      pendingTotal,
+      provider === 'usdt' ? 'usdt' : 'cup',
+      paidThisMonth,
+      { skipMinimum: true },
+    );
+
+    if (!check.ok) {
+      throw new MoneyError(check.message!, 400);
     }
 
     const commission = calculateCommission(amount, 'withdrawal', provider);
@@ -270,6 +312,38 @@ export class PaymentService {
   /**
    * Aprueba un retiro ya pagado fuera de la plataforma.
    * Consume el saldo y marca la orden como pagada.
+   *
+   * ------------------------------------------------------------------
+   * EL SALDO SE CONSUME AQUI, NO AL SOLICITAR
+   *
+   * Eso hace que cancelar un retiro no tenga que devolver nada: el dinero nunca
+   * salio de la cuenta. Y hace que este sea el punto critico de todo el flujo de
+   * retiros, porque es aqui donde se pierde el dinero.
+   *
+   * ------------------------------------------------------------------
+   * EL BUG QUE IMPIDE UN `$INC` A SECO
+   *
+   * Al solicitar se comprueba que `real - pendientes >= importe`. Pero entre la
+   * solicitud y la aprobacion el usuario puede jugar, y `splitBuyIn` consume
+   * `play` primero y luego `real`. Asi que puede vaciar su saldo retirable
+   * mientras el retiro sigue pendiente.
+   *
+   * Con un `$inc` sin filtro, la secuencia seria:
+   *
+   *   1. Usuario deposita 100 USDT, solicita retirarlos. real = 100, pendiente 100.
+   *   2. Se sienta a una mesa de 100 USDT. splitBuyIn le vacia `real`. real = 0.
+   *   3. El operador paga los 100 USDT a la wallet y aprueba.
+   *   4. `$inc: -100` deja real = -100.
+   *
+   * El usuario tiene 100 USDT en fichas Y 100 USDT cobrados. Un ciclo de eso por
+   * retiro es un dreno ilimitado, y el saldo negativo tampoco lo frena: `min: 0`
+   * del esquema no se comprueba en un `findOneAndUpdate` salvo que se pida
+   * `runValidators`, y aqui no se pide.
+   *
+   * La comprobacion va EN EL FILTRO, no antes. Si va antes, dos aprobaciones
+   * simultaneas pueden pasar ambas el `if` y las dos restar: el saldo vuelve a
+   * quedar mal. En el filtro, Mongo lo evalua y lo aplica sobre el documento en
+   * una sola operacion, asi que solo una de las dos resta.
    */
   async settleWithdrawal(orderId: string, txHash?: string): Promise<void> {
     const order = await PaymentOrder.findOne({ orderId });
@@ -279,12 +353,38 @@ export class PaymentService {
     if (order.status === 'paid') {
       throw new MoneyError('El retiro ya fue liquidado.');
     }
+    if (order.status !== 'pending') {
+      throw new MoneyError(
+        `Solo se pueden liquidar retiros pendientes (este está en "${order.status}").`,
+      );
+    }
 
-    // El saldo se consume al aprobar el pago, no al solicitarlo
-    await User.findOneAndUpdate(
-      { telegramId: order.telegramId },
+    // El filtro es la proteccion: `balance.real >= importe`. Ademas evita el
+    // doble cobro, porque el estado de la orden tambien se exige `pending` y solo
+    // una de las dos aprobaciones concurrentes lo cumple.
+    const debited = await User.findOneAndUpdate(
+      {
+        telegramId: order.telegramId,
+        'balance.real': { $gte: order.amount },
+      },
       { $inc: { 'balance.real': -order.amount } },
+      { new: false },
     );
+
+    if (!debited) {
+      const user = await User.findOne({ telegramId: order.telegramId });
+      const available = user?.balance.real ?? 0;
+
+      throw new MoneyError(
+        'El retiro no se puede liquidar: el usuario ya no tiene saldo retirable ' +
+        `suficiente (necesita ${formatUnits(order.amount)} USDT, ` +
+        `tiene ${formatUnits(available)}). ` +
+        'Si el pago ya salio de la plataforma, esto es un incidente: anotalo y ' +
+        'liquida el saldo a mano. Si no se ha pagado todavia, cancela el retiro, ' +
+        'que devuelve el dinero al usuario.',
+        409,
+      );
+    }
 
     order.status = 'paid';
     order.txHash = txHash ?? fakeTxHash(order.chain || 'TRC20');

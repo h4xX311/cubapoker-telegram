@@ -8,6 +8,7 @@ import healthRouter from './health';
 import tableRoutes from './routes/table.routes';
 import monetizationRoutes from './routes/monetization.routes';
 import paymentRoutes from './routes/payment.routes';
+import adminRoutes from './routes/admin.routes';
 import { monetizationService } from './services/monetization.service';
 import { requireTelegramAuth, getAuthedTelegramId } from './middleware/telegramAuth';
 import { User } from './models/User';
@@ -150,6 +151,11 @@ app.use('/api/monetization', monetizationRoutes);
 
 // Payment Orders (deposit in two steps, withdrawals, simulation)
 app.use('/api/payment', paymentRoutes);
+
+// Panel de operador: aprobar/cancelar retiros, ver depositos, campos y finanzas.
+// Se monta DESPUES de las rutas publicas y lleva su propia clave, para que un
+// fallo de autenticacion aqui no exponga nada del resto.
+app.use('/api/admin', adminRoutes);
 
 // Liveness / readiness para el orquestador
 app.get('/health', (_req, res) => {

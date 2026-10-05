@@ -20,6 +20,7 @@ const SUITES = [
   { name: 'Reparto y RTP', file: 'test-payout.js' },
   { name: 'Reglas del campo', file: 'test-field.js' },
   { name: 'Atomicidad de posiciones', file: 'test-field-atomic.js' },
+  { name: 'Reglas de retiro', file: 'test-withdrawal.js' },
   { name: 'Motor de poker', file: 'test-engine.js' },
 ];
 

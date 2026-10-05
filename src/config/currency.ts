@@ -82,6 +82,23 @@ export const WITHDRAWALS = {
   maxPerTransaction: 25_000,
 
   /**
+   * Minimo por transaccion en los metodos CUP, en CUP.
+   *
+   * Es mas alto que el minimo en USDT a proposito: la comision de estas pasarelas
+   * es un porcentaje con un minimo fijo, y sobre 1 000 CUP se come una parte
+   * grande del importe. 1 000 CUP son 8,33 USDT, por debajo del minimo de 10 USDT
+   * de las vias crypto, y el operador pierde mas en la comision de lo que
+   * devuelve.
+   *
+   * OJO CON LAS UNIDADES: los limites de este objeto estan en USDT y en CUP, pero
+   * `payment.service` y `withdrawal.rules.ts` trabajan en unidades internas
+   * (1 USDT = 1 000). La conversion la hace `withdrawal.rules.ts`, al_importar.
+   * Si estos numeros se usaran sin convertir, un minimo de 10 USDT se
+   * interpretaria como 10 unidades = 0,01 USDT y nadie podria retirar nunca.
+   */
+  minCup: 1000,
+
+  /**
    * Tope mensual de ganancias retirables, en USDT.
    *
    * En CoinPoker este tope (500 000) aplica solo a ganancias de casino y NO a

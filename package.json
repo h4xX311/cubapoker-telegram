@@ -14,6 +14,7 @@
     "test:payout": "node scripts/test-payout.js",
     "test:field": "node scripts/test-field.js",
     "test:field:atomic": "node scripts/test-field-atomic.js",
+    "test:withdrawal": "node scripts/test-withdrawal.js",
     "test:engine": "node scripts/test-engine.js"
   },
   "dependencies": {
