@@ -1,9 +1,32 @@
 # Render Blueprint - CubaPoker Telegram Bot
+#
+# ------------------------------------------------------------------
+# POR QUE `plan: starter` Y NO `free`
+#
+# El plan gratuito de Render suspende el servicio a los 15 minutos de inactividad.
+# Para un bot de poker eso no es un inconveniente menor, es el producto roto:
+#
+#  - Un campo de 300 jugadores tarda horas en terminar. Si el proceso se suspende a
+#    mitad, las mesas quedan con fichas de jugadores bloqueadas y el campo no se
+#    puede ni continuar ni cerrar. El reinicio las deja en `paused` y el operador
+#    tiene que decidir que hacer con el dinero de cada uno.
+#  - El webhook de pagos deja de responder. Un deposito que el usuario ya hizo se
+#    queda sin confirmar, y el operador no sabe si acreditarlo.
+#  - Los bots que no hacen llamadas HTTP (un timer de reparto, un campo esperando
+#    jugadores) son justo el caso que Render suspende. El juego es precisamente
+#    ese caso.
+#
+# El plan `starter` cuesta 7 USDT/mes y no suspende. Es el minimo para que el
+# producto funcione, y es mas barato que el primer servicio mal atendido.
+#
+# ALTERNATIVA BARATA: si 7 USDT/mes es un problema al principio, la opcion es no
+# desplegar hasta que haya usuarios. Un CubaPoker suspendido no pierde clientes
+# con abogado; uno que se cae a mitad de un campo si.
 services:
   - type: web
     name: cubapoker-telegram-bot
     runtime: node
-    plan: free
+    plan: starter
     buildCommand: npm install && npm run build && cd mini-app && npm install && npm run build
     startCommand: node dist/bot.js
     healthCheckPath: /health

@@ -80,6 +80,56 @@ export class FieldError extends Error {
 /** Cola de espera en memoria de un campo. */
 const queues = new Map<string, QueuedPlayer[]>();
 
+/**
+ * Marca de apagado. La pone `tableManager.shutdownEngine()`.
+ *
+ * Es una variable de modulo y no un metodo porque el gestor de campos es un objeto
+ * literal, no una clase: anadirle un metodo obliga a tocar el tipo. Ademas la
+ * necesita `table.manager`, que ya importa el campo.
+ *
+ * Que sea una variable compartida es correcto aqui: solo la escribe el apagado, que
+ * ocurre una vez en la vida del proceso, y la leen los ticks. No hay condicion de
+ * carrera que importe: si un tick se salta, el siguiente lo cogera tras el
+ * reinicio.
+ */
+let isShuttingDown = false;
+
+/** Lo pone el apagado ordenado. A partir de aqui los ticks no hacen nada. */
+export const markShuttingDown = (): void => {
+  isShuttingDown = true;
+};
+
+/**
+ * Apagado del gestor de campos.
+ *
+ * No liquida ni pausa nada, y esa es la decision importante. Un campo a medias se
+ * deja como esta: las mesas de campo ya estan en `paused` (ver
+ * `TableManager.refundTable`) y `/api/admin/paused-tables` las lista para que el
+ * operador decida.
+ *
+ * La razon para no automatizarlo es que una liquidacion a medias es peor que no
+ * liquidar. Un campo que se cierra con las escrituras cortadas deja jugadores sin
+ * posicion adjudicada y un bote sin pagar, y eso no lo arregla un reinicio: exige
+ * intervencion manual con los numeros delante. Pausar y que una persona mire es
+ * mas lento pero reversible.
+ */
+export const shutdownFieldManager = async (): Promise<void> => {
+  markShuttingDown();
+
+  const active = await Field.countDocuments({
+    status: { $in: ['filling', 'running', 'final'] },
+  });
+  const paused = await Field.countDocuments({ status: 'paused' });
+
+  if (active > 0 || paused > 0) {
+    logger.warn(
+      `Apagando con ${active} campo(s) sin terminar. Sus mesas quedan pausadas ` +
+      'y el dinero sigue bloqueado: hay que decidir si se continua o se cancela ' +
+      'con devolucion (ver /api/admin/paused-tables).',
+    );
+  }
+};
+
 export const fieldManager = {
   // ======================================================================
   // Apertura e inscripcion
@@ -486,6 +536,14 @@ export const fieldManager = {
    * declararia la mesa final antes de tiempo.
    */
   async tick(): Promise<void> {
+    // Durante el apagado ordenado no se hace nada. Sin esta comprobacion, un
+    // tick que arrancara mientras `shutdownEngine` esta esperando escribiria
+    // adjudicaciones de posicion a medias, que es justo lo que el apagado evita.
+    if (isShuttingDown) {
+      logger.debug('tick del campo omitido: el motor esta apagandose.');
+      return;
+    }
+
     const fields = await Field.find({
       status: { $in: ['filling', 'running', 'final'] },
     });

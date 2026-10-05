@@ -5,6 +5,7 @@ import { User } from '../models/User';
 import { PokerGame } from './game.state';
 import { botFactory, BotProfile, decideAction, mulberry32 } from './bot.engine';
 import { TABLE_TIERS, TABLE_TIER_LIST, BOT_CONFIG, RAKE, TURN_TIMER, getTier } from '../config/product';
+import { markShuttingDown, shutdownFieldManager } from './field.manager';
 import { logger } from '../utils/logger';
 
 /**
@@ -63,6 +64,23 @@ export class TableManager {
   private starting = false;
 
   /**
+   * Se pone durante el apagado ordenado. Un `tick()` que compruebe esta marca no
+   * empieza a trabajar, asi que el motor se queda quieto en lugar de competir con
+   * el apagado por las escrituras.
+   */
+  private stopping = false;
+
+  /**
+   * Cuantos `tick()` estan corriendo ahora mismo.
+   *
+   * El contador lo incrementa el propio tick al entrar y lo decrementa en un
+   * `finally`, con lo que un tick que lance excepcion tambien cuenta como
+   * terminado. Sin el `finally`, un error dejaria el contador alto para siempre y
+   * el apagado esperaria al tope de tiempo en cada despliegue.
+   */
+  private activeTicks = 0;
+
+  /**
    * Avisos de turno ya enviados, para no repetir la misma notificacion.
    * La clave identifica un turno concreto: mano + asiento + calle + la marca
    * de tiempo de la ultima accion. Sin esto, el jugador recibiria el mismo
@@ -94,6 +112,10 @@ export class TableManager {
   async start(): Promise<void> {
     if (this.starting) return;
     this.starting = true;
+    // Por si el proceso se reinicia dentro del mismo contenedor (Render lo hace
+    // en algunos despliegues): sin esto, arrancaria con el motor marcado como
+    // parado y cada tick se saldria sin hacer nada.
+    this.stopping = false;
 
     try {
       const recovered = await this.recoverInterruptedHands();
@@ -108,13 +130,24 @@ export class TableManager {
     if (this.tickHandle) return;
 
     this.tickHandle = setInterval(() => {
-      this.tick().catch((err) => logger.error('Error en tick:', err));
+      // No solapar ticks. Si el anterior sigue corriendo (una mesa lenta, una
+      // operacion de Mongo), este se salta en vez de arrancar en paralelo.
+      // Dos ticks a la vez sobre la misma mesa reparten el pot dos veces.
+      if (this.activeTicks > 0 || this.stopping) return;
+
+      this.activeTicks++;
+      this.tick()
+        .catch((err) => logger.error('Error en tick:', err))
+        .finally(() => {
+          this.activeTicks--;
+        });
     }, BOT_CONFIG.tickMs);
 
     // No bloquea la salida del proceso
     this.tickHandle.unref?.();
   }
 
+/** Detiene los timers. Sincrono: se llama en varios sitios, incluidos tests. */
   stop(): void {
     if (this.tickHandle) {
       clearInterval(this.tickHandle);
@@ -122,6 +155,67 @@ export class TableManager {
     }
     for (const timer of this.turnTimers.values()) clearTimeout(timer);
     this.turnTimers.clear();
+  }
+
+  /**
+   * Detiene el motor y espera a que termine lo que ya estaba en vuelo.
+   *
+   * ------------------------------------------------------------------
+   * POR QUE NO BASTA CON `stop()`
+   *
+   * `stop()` limpia los timers, pero un `tick()` que ya estaba corriendo sigue
+   * escribiendo en Mongo. Si el proceso muere en ese instante, la escritura
+   * queda a medias: una mesa con las fichas de los jugadores sin el pot, o un
+   * campo al que se le ha descontado un contador sin adjudicar la posicion.
+   *
+   * Eso es exactamente el estado que `recoverInterruptedHands()` existe para
+   * limpiar, pero limpiarlo cuesta un reinicio y una revision manual. Es mejor no
+   * dejarlo.
+   *
+   * Por eso `stop()` sigue siendo sincrono (se llama en varios sitios, incluidos
+   * tests) y este metodo es el que se usa al apagar el proceso: marca
+   * `stopping` para que ningun tick nuevo empiece, espera a los que estan en
+   * curso, y despues limpia.
+   *
+   * @param timeoutMs  techo de espera. Pasado el plazo se sale igual: es mejor un
+   *                   reinicio con estado a medias que no terminar nunca.
+   */
+  async shutdown(timeoutMs = 6000): Promise<void> {
+    // Marca de parada: `tick()` lo comprueba y no hace nada si esta puesto. Sin
+    // esto, un tick que terminase ahora mismo volveria a programar el siguiente.
+    this.stopping = true;
+
+    const deadline = Date.now() + timeoutMs;
+
+    // Espera a los ticks en vuelo. Se sondea en vez de usar un contador porque un
+     // tick puede anadir otros (un merge de campo llama a otro), y un contador
+    // se quedaria en cero antes de que terminen.
+    while (this.activeTicks > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    if (this.activeTicks > 0) {
+      logger.warn(
+        `Apagado: ${this.activeTicks} tick(s) sin terminar tras ${timeoutMs}ms. ` +
+        'Se para igualmente. Puede haber escrituras a medias.',
+      );
+    }
+
+    this.stop();
+
+    const paused = await Table.countDocuments({ status: 'paused' });
+    const running = await Table.countDocuments({
+      status: { $in: ['waiting', 'running'] },
+    });
+
+    if (running > 0) {
+      logger.info(
+        `Apagado ordenado: ${running} mesa(s) sin liquidar. ` +
+        (paused > 0
+          ? `${paused} de campo ya pausadas: requieren decision del operador.`
+          : 'Se reintentara al arrancar de nuevo.'),
+      );
+    }
   }
 
   /**
@@ -311,7 +405,7 @@ export class TableManager {
     }
   }
 
-  /** Añade un asiento de bot con buy-in coherente con la mesa. */
+  /** Anade un asiento de bot con buy-in coherente con la mesa. */
   private addBotSeat(table: ITable, buyIn: number): ISeat {
     const profile: BotProfile = botFactory.create();
     const seat: ISeat = {
@@ -813,7 +907,7 @@ export class TableManager {
         seat.chips = 0;
       }
 
-      // ¿Sigue pudiendo comprar entrada para la siguiente mano? El umbral es el
+      //Sigue pudiendo comprar entrada para la siguiente mano? El umbral es el
       // buy-in de la mesa. Si no alcanza, se retira y se le queda lo que tenia.
       //
       // Esto es de MESA CASH suelta. En un campo (rama de arriba) el jugador no
@@ -1028,3 +1122,35 @@ export class TableManager {
 }
 
 export const tableManager = new TableManager();
+
+/**
+ * Para TODO el motor de forma ordenada: campos y mesas.
+ *
+ * ------------------------------------------------------------------
+ * POR QUE ESTA FUERA DE LA CLASE
+ *
+ * `bot.ts` no debe conocer `TableManager` ni `FieldManager` para apagar el
+ * servicio. Si el apagado viviera dentro de la clase, habria que importar el
+ * gestor aqui y el del campo, y entre los dos imports se forma un ciclo: el
+ * gestor de mesas llama al campo (para las merges) y el campo llama al gestor de
+ * mesas (para leer las mesas). Un ciclo en estos ficheros se traduce en
+ * `undefined` en tiempo de ejecucion, que es la peor clase de bug.
+ *
+ * Aqui, en cambio, se importan los dos objetos ya construidos. Es el mismo patron
+ * que usan `bot.ts` y las rutas, y no crea ciclo ninguno.
+ *
+ * EL ORDEN IMPORTA: primero el campo, despues las mesas. Al reves, un tick de mesa
+ * podria pedir una merge a un campo que ya esta parado, y esa merge se quedaria a
+ * medias: unos jugadores eliminados sin posicion adjudicada.
+ */
+export const shutdownEngine = async (timeoutMs = 6000): Promise<void> => {
+  // Primero se marca la parada. A partir de este momento ningun tick de campo
+  // empieza, ni siquiera los que ya estaban esperando en la cola del temporizador.
+  markShuttingDown();
+
+  // Primero el campo, despues las mesas. Al reves, un tick de mesa podria pedir
+  // una merge a un campo que ya esta parado, y esa merge se quedaria a medias:
+  // unos jugadores eliminados sin posicion adjudicada.
+  await shutdownFieldManager();
+  await tableManager.shutdown(timeoutMs);
+};

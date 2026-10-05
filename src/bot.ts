@@ -16,7 +16,7 @@ import { Game } from './models/Game';
 import { Transaction } from './models/Transaction';
 import { VIP_CONFIG, VIPLevel } from './models/VIP';
 import { SIMULATION_ENABLED, pruneSimulatedOrders } from './services/payment/gateway';
-import { tableManager } from './game/table.manager';
+import { tableManager, shutdownEngine } from './game/table.manager';
 import { fieldManager } from './game/field.manager';
 import { SUIT_SYMBOL } from './game/card.utils';
 import { seatingService } from './game/seating.service';
@@ -645,6 +645,76 @@ const start = async () => {
   // Limpieza de ordenes simuladas caducadas
   const pruneTimer = setInterval(() => pruneSimulatedOrders(), 5 * 60 * 1000);
   pruneTimer.unref();
+
+  // ------------------------------------------------------------------
+  // APAGADO LIMPIO
+  //
+  // Render manda SIGTERM antes de cada despliegue y cuando apaga el servicio. Sin
+  // este manejador el proceso muere en el acto: el motor de poker esta a mitad de
+  // una mano y las fichas de los jugadores no coinciden con el pot de la mesa.
+  // Al arrancar otra vez, `refundTable` reembolsa las mesas cash, pero un campo a
+  // medias queda pausado y sin nadie mirando (ver `/api/admin/paused-tables`).
+  //
+  // Lo que hace esto es PARAR el motor antes de morir, para que ningun tick
+  // escriba a medias y los cambios lleguen enteros a Mongo.
+  installShutdownHandlers();
+};
+
+/**
+ * Cierre ordenado.
+ *
+ * No se intenta liquidar nada aqui. Es tentador, y estaria mal: liquidar un
+ * campo a mitad de despliegue exige que todas las escrituras terminen, y si alguna
+ * falla a medias el resultado es peor que pausar y que un humano decida.
+ *
+ * El presupuesto son 8 segundos. Si no se cierra a tiempo, Render mata el proceso
+ * igual, asi que el plazo es para poder escribir el log, no para esperar. Y se
+ * elige 8 y no 30 porque Render da 30 segundos antes del SIGKILL, pero un
+ * despliegue que tarda 30 en caer se nota como caida.
+ */
+const installShutdownHandlers = (): void => {
+  let shuttingDown = false;
+
+  const shutdown = (signal: string) => {
+    if (shuttingDown) {
+      // Segundo SIGTERM: se esta insistiendo. Salir de inmediato.
+      logger.warn(`${signal} repetido durante el apagado. Saliendo ya.`);
+      process.exit(1);
+    }
+    shuttingDown = true;
+
+    logger.info(`${signal} recibido. Deteniendo el motor (max 8s)...`);
+
+    const forceExit = setTimeout(() => {
+      logger.error('El apagado no termino a tiempo. Saliendo a la fuerza.');
+      process.exit(1);
+    }, 8000);
+    forceExit.unref();
+
+    // El motor para los timers y resuelve lo que ya esta en vuelo. `stop()` es
+    // asincrono, y por eso el `forceExit` de arriba: si se queda colgado, no
+    // esperamos indefinidamente.
+    void shutdownEngine()
+      .then(() => {
+        clearTimeout(forceExit);
+        logger.info('Motor detenido. Cerrando.');
+        process.exit(0);
+      })
+      .catch((error) => {
+        logger.error('Error en el apagado ordenado:', error);
+        process.exit(1);
+      });
+  };
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+
+  // Si el proceso lanza sin que se pueda capturar, se sale con codigo 1 para que
+  // Render reinicie el servicio en vez de dejarlo en un estado raro.
+  process.on('unhandledRejection', (reason) => {
+    logger.error('Promesa rechazada sin capturar:', reason);
+    shutdown('unhandledRejection');
+  });
 };
 
 start().catch((error) => {
