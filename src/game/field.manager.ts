@@ -1,7 +1,7 @@
 import { Field, IField, FieldTable } from '../models/Field';
 import { Table, ITable, ISeat } from '../models/Table';
 import { User } from '../models/User';
-import { fieldPayout, rakeOfField } from '../services/payout.service';
+import { splitPrize, rakeOfField } from '../services/payout.service';
 import {
   TABLE_TIERS,
   TABLE_TIER_LIST,
@@ -275,13 +275,13 @@ export const fieldManager = {
     queues.set(fieldId, queue);
 
     // Lo que no llego a sentarse esta integro: se devuelve entero.
-    await this.refund(telegramId, field.buyIn);
+    await this.refund(telegramId, field.buyInUnits);
     await Field.updateOne(
       { _id: field._id },
-      { $inc: { waiting: -1, buyInsCollected: -field.buyIn } },
+      { $inc: { waiting: -1, buyInsCollected: -field.buyInUnits } },
     );
 
-    return { refunded: field.buyIn };
+    return { refunded: field.buyInUnits };
   },
 
   // ======================================================================
@@ -304,8 +304,23 @@ export const fieldManager = {
     const queue = queues.get(field.fieldId) ?? [];
     let seatedAny = false;
 
-    // --- Asegurar mesas suficientes ---
-    const wantedTables = tablesForField(Math.max(queue.length, 2));
+    // ------------------------------------------------------------------
+    // CUANTAS MESAS HACEN FALTA
+    //
+    // NO se puede calcular con `queue.length`. La cola se vacia a medida que se
+    // sienta a la gente, asi que despues del primer registro `queue.length` es 0,
+    // el segundo es 1, el tercero 2... Con 7 por mesa, `tablesForField` nunca pasa
+    // de 1 y TODO el campo se amontona en una sola mesa con 300 asientos.
+    //
+    // Eso es exactamente lo que hacia este codigo: `openField` era correcto, el
+    // cobro del buy-in era exacto, y aun asi los 300 jugadores acababan jugando
+    // juntos en una mesa "de 7". No se puede ver leyendo; lo Teach el test
+    // end-to-end (ver `scripts/test-e2e-field.js`).
+    //
+    // Lo que hace falta son mesas para TODOS los inscritos, no solo para los que
+    // esperan: los sentados ya ocupan las suyas.
+    const registered = field.seated + field.waiting;
+    const wantedTables = tablesForField(Math.max(registered, queue.length, 2));
     const liveTables = field.tables.filter(t => !t.mergedInto);
 
     if (liveTables.length < wantedTables) {
@@ -323,48 +338,75 @@ export const fieldManager = {
     });
 
     for (const table of tables) {
-      const queueIdx = nextSeatable(
-        queue,
-        field.buyIn,
-        table.buyInUnits,
-      );
-      if (queueIdx === -1) break;
+      // UNA MESA LLENA NO ACEPTA A NADIE MAS.
+      //
+      // Sin esta comprobacion, `nextSeatable` seguia devolviendo un jugador
+      // valido para una mesa que ya tenia los 7 asientos, y todos se amontonaban
+      // en la primera. El motor reparte 300 jugadores sobre lo que cree que son
+      // 7 asientos, y el reparto del pot sale mal.
+      //
+      // Se comprueba el numero real de asientos y no `maxSeats` a secas, porque
+      // `maxSeats` es lo que la mesa DEBERIA tener y `seats.length` es lo que
+      // tiene: si alguien metio un asiento de mas, aqui se corta igual.
+      const capacity = Math.min(table.maxSeats || SEATS_PER_TABLE, SEATS_PER_TABLE);
 
-      const player = queue[queueIdx];
+      // Se llena la mesa EN BUCLE, no con un jugador por llamada.
+      //
+      // Con un solo asiento por invocacion, `trySeat` tendria que llamarse 300
+      // veces para llenar 43 mesas. Como se llama una vez por registro y otra por
+      // tick, el campo tardaria muchisimo en completarse y, peor, arrancaria con
+      // las mesas a medio llenar.
+      while (table.seats.length < capacity) {
+        const queueIdx = nextSeatable(queue, field.buyInUnits, table.buyInUnits);
+        if (queueIdx === -1) break;
 
-      // Verificar que el jugador no este ya en otra mesa del campo.
-      if (await this.isSeated(player.telegramId, field.fieldId)) {
-        queue.splice(queueIdx, 1);
-        continue;
-      }
+        const player = queue[queueIdx];
 
-      const seat = this.buildSeat(table, player.telegramId, player.chips, player.username);
-      table.seats.push(seat);
-      await table.save();
+        // Verificar que el jugador no este ya en otra mesa del campo.
+        if (await this.isSeated(player.telegramId, field.fieldId)) {
+          queue.splice(queueIdx, 1);
+          continue;
+        }
 
-      await Field.updateOne(
-        { _id: field._id },
-        {
-          $inc: { waiting: -1, seated: 1, playersRemaining: 1 },
-          $push: {
-            tables: {
-              tableId: table.tableId,
-              seated: 1,
-              eliminated: 0,
-              createdAt: new Date(),
-            } as FieldTable,
+        const seat = this.buildSeat(table, player.telegramId, player.chips, player.username);
+        table.seats.push(seat);
+        await table.save();
+
+        // Los contadores del campo suben UNA VEZ, sin condicion: este jugador se
+        // ha sentado, lo diga o no la lista de tablas.
+        await Field.updateOne(
+          { _id: field._id },
+          { $inc: { waiting: -1, seated: 1, playersRemaining: 1 } },
+        );
+
+        // Y la entrada de la mesa en field.tables solo se anade si no estaba.
+        //
+        // Antes se hacia $push en CADA asiento y luego dedupeFieldTables lo
+        // arreglaba: 300 pushes y 300 limpiezas para acabar con 43 entradas. Y era
+        // una condicion de carrera: si dos asientos de la misma mesa compiten, el
+        // dedupe puede correr antes de que exista el segundo push, dejando la
+        // entrada duplicada para siempre.
+        //
+        // El filtro $ne hace que solo una de las dos inserciones se aplique,
+        // porque Mongo evalua el filtro y escribe en una sola operacion.
+        await Field.updateOne(
+          { _id: field._id, 'tables.tableId': { $ne: table.tableId } },
+          {
+            $push: {
+              tables: {
+                tableId: table.tableId,
+                seated: 1,
+                eliminated: 0,
+                createdAt: new Date(),
+              } as FieldTable,
+            },
           },
-        },
-      );
+        );
 
-      // El `$push` anterior duplica la entrada de la mesa en cada asiento. Se
-      // deja una sola por mesa: el contador `seated` de la tabla es el que
-      // dice cuantos hay, no el numero de entradas.
-      await this.dedupeFieldTables(field._id.toString(), table.tableId);
-
-      queue.splice(queueIdx, 1);
-      queues.set(field.fieldId, queue);
-      seatedAny = true;
+        queue.splice(queueIdx, 1);
+        queues.set(field.fieldId, queue);
+        seatedAny = true;
+      }
     }
 
     // --- Arrancar si se lleno ---
@@ -391,7 +433,7 @@ export const fieldManager = {
       // jugador lo notaria al pasar de una mesa a otra del mismo campo.
       smallBlind: tier.blinds.small,
       bigBlind: tier.blinds.big,
-      buyInUnits: field.buyIn,
+      buyInUnits: field.buyInUnits,
       maxSeats: SEATS_PER_TABLE,
       seats: [],
       field: {
@@ -636,11 +678,29 @@ export const fieldManager = {
           continue;
         }
 
-        // Lo que le quedaba en la mesa vuelve a `balance.real`.
-        await this.refund(telegramId, Math.max(0, seat.chips + seat.bet));
-        seat.chips = 0;
-        seat.bet = 0;
-
+        // ------------------------------------------------------------------
+        // LAS FICHAS DEL ELIMINADO NO VUELVEN A SU CARTERA
+        //
+        // Este era el dreno mas grave que tenia el producto, y no se puede ver
+        // leyendo el codigo: `refund` suma a `balance.real` y parece una devolucion
+        // razonable.
+        //
+        // En un campo, un eliminado que conserva fichas las ha perdido: las fichas
+        // de un Sit'n'Go se quedan en el bote para los demas. Devolverlas seria:
+        //
+        //   1. Depositar 1 USDT.
+        //   2. Comprar entrada de 1 USDT a un campo.
+        //   3. Ser eliminado con las fichas casi intactas.
+        //   4. Recoger el buy-in de vuelta en `balance.real`.
+        //   5. Repetir.
+        //
+        // El unico coste del ciclo es el rake, y el rake se cobra POR MANO. Un
+        // jugador eliminado antes de la primera mano no paga nada: el ciclo es
+        // gratis y se puede repetir indefinidamente.
+        //
+        // Con esto las fichas se quedan en el asiento. No se ponen a cero porque
+        // `settleField` las barre al cerrar el campo, y ese barrido es lo que
+        // reparte el bote. Ponerlas a cero aqui las haria desaparecer.
         await this.recordResult(field, {
           position,
           telegramId,
@@ -896,113 +956,221 @@ export const fieldManager = {
       return { paid: [], totalPaid: 0, refunded: 0 };
     }
 
-    // --- Estimar el bote del campo ---
-    // En una mesa se juega con fichas, no con CUP. El bote del campo es lo que
-    // puso todo el mundo menos lo que se llevo el rake. Como el gestor de mesas
-    // cobra el rake por mano, aqui se reconstruye desde los contadores.
+// ------------------------------------------------------------------
+    // EL BOTE SON LAS FICHAS QUE HAY EN LAS MESAS
+    //
+    // Antes se hacía una de dos cosas, y las dos estaban mal:
+    //
+    //   a) Se calculaba el premio con `fieldPayout(buyInUnits, playersRemaining)`,
+    //      es decir un bote NUEVO calculado desde el buy-in y los participantes.
+    //   b) Después se devolvía a `balance.real` las fichas de TODOS los asientos
+    //      que quedaban, incluido el ganador.
+    //
+    // Las dos juntas creaban dinero de la nada: se pagaba un premio que no salía
+    // de ningún bote Y se devolvía el bote entero. Con 300 jugadores de 1 USDT, el
+    // campo terminaba con 129,25 USDT más de los que había.
+    //
+    // Y por debajo había un dreno mucho peor en `collectEliminations`, que
+    // devolvía las fichas del eliminado a su cartera. En un campo, eso significa
+    // comprar entrada, ser eliminado con las fichas intactas y recuperar el
+    // buy-in. Repetido, es un ciclo gratis.
+    //
+    // LO CORRECTO, y es como funciona un Sit'n'Go:
+    //
+    //   - Las fichas de un eliminado NO vuelven a su cartera. Se quedan en el bote
+    //     para los demás. Por eso el rake es real y el campo tiene sentido.
+    //   - El bote es lo que se barre de las mesas, no un cálculo paralelo.
+    //   - Se reparte entre las posiciones que existen, y lo que sobra (posiciones
+    //     sin nadie adjudicado) se lo lleva el ganador, que es como funciona de
+    //     verdad: el que gana se lleva la pila.
+    //
+    // Barrer las fichas y ponerlas a cero es también lo que impide que una
+    // segunda liquidación las pague otra vez.
     const tables = await Table.find({ 'field.fieldId': field.fieldId });
 
-    // Cuanto se ha repartido ya entre los eliminados (su cambio de fichas).
-    // Se recorre el historial de resultados guardado en el campo.
+    let swept = 0;
+    for (const t of tables) {
+      let tableSwept = 0;
+      for (const seat of t.seats) {
+        tableSwept += Math.max(0, seat.chips) + Math.max(0, seat.bet);
+        seat.chips = 0;
+        seat.bet = 0;
+      }
+      if (tableSwept > 0) {
+        swept += tableSwept;
+        await t.save();
+      }
+    }
+
     const grossPot = field.buyInsCollected;
-    const rake = field.rakeCollected;
+    let rake = field.rakeCollected;
     const netPot = Math.max(0, grossPot - rake);
 
-    // El premio del campo va a `balance.play` (Promotional Dollars): no se
-    // retira directamente, se desbloquea jugando a ratio 1:10.
+    // ------------------------------------------------------------------
+    // CUANTO SE REPARTE: NUNCA MAS DE `buyIns - rake`
     //
-    // ESTA ES LA REGLA QUE PROTEGE LA PLATAFORMA. Si el premio fuera a
-    // `balance.real`, ganar un campo (que requiere buy-in) seria
-    // indistinguible de un deposito, y un jugador podria comprar entradas con
-    // dinero de promocion y convertirlo a saldo retirable. Con el ratio 1:10,
-    // el premio sirve para jugar, no para retirar.
-    const paidPositionsLeft = PAID_POSITIONS;
+    // Lo repartido NO es lo barrado a secas, sino el menor de lo barrado y el neto
+    // que la plataforma debe. La diferencia se queda la plataforma.
+    //
+    // Esto lo fija una prueba, no una teoria. Si se reparte `swept` tal cual, y las
+    // fichas de las mesas son mas de `buyIns - rake`, se devuelve el rake a los
+    // jugadores y el producto deja de tener ingresos: es un juego gratis. En el
+    // test de integracion, un campo de 12 con 0,6 USDT de rake repartia 12 en vez
+    // de 11,4, y el sistema se quedaba sin nada.
+    //
+    // La razon por la que pueden quedar mas fichas de las previstas es que el rake
+    // se registra por mano y un campo liquidado a medias puede no haberse Playsado
+    // todas. Repartir el minimo hace que el error sea hacia el lado conservador:
+    // la plataforma se queda la diferencia en vez de regalarla.
+    const distributable = Math.min(swept, netPot);
+    const withheld = swept - distributable;
 
-    const fieldPayoutResult = fieldPayout(field.buyIn, field.playersRemaining);
-    const shares = fieldPayoutResult.entries;
+    if (swept !== netPot) {
+      logger.warn(
+        `Campo ${field.fieldId}: las fichas en las mesas (${formatUnits(swept)} USDT) ` +
+        `no cuadran con buyIns - rake (${formatUnits(netPot)} USDT). ` +
+        `Se reparten ${formatUnits(distributable)} y la plataforma retiene ` +
+        `${formatUnits(withheld)}.`,
+      );
+    }
+
+    // `rakeCollected` se FIJA, no se incrementa.
+    //
+    // El rake del campo tiene que ser exactamente lo que la plataforma se ha
+    // quedado, y eso es `grossPot - distributable` por definicion. Incrementarlo con
+    // lo retenido aqui lo contaria dos veces: el rake ya cobrado por mano mas la
+    // diferencia entre las fichas y el neto, que describen la misma realidad desde
+    // dos angulos.
+    //
+    // Fijarlo hace que la contabilidad del campo no pueda desviarse de la del
+    // dinero: si las dos cifras no coinciden, es que hay un bug, y el test de
+    // integracion lo detecta comparando el rake registrado con el dinero que de
+    // verdad salio de los saldos.
+    const rakeReal = Math.max(0, grossPot - distributable);
+    if (rakeReal !== rake) {
+      await Field.updateOne(
+        { _id: field._id },
+        { $set: { rakeCollected: rakeReal } },
+      );
+      rake = rakeReal;
+    }
+
+    // El reparto por posicion. `FIELD_PAYOUT` suma 100, asi que las partes cubren
+    // todo el bote; lo que sobre por posiciones sin adjudicado va al ganador.
+    const shares = splitPrize(distributable, FIELD_PAYOUT);
+
+    // Las posiciones ya adjudicadas durante el campo (las de `collectEliminations`).
+    // Se leen de `field`, no del documento cerrado: el cierre atomico de mas abajo
+    // todavia no se ha hecho cuando se reparte.
+    const results = field.results ?? [];
 
     const paid: FieldResultOut['paid'] = [];
+    /** Lo que ya se ha repartido, para no pagar dos veces la misma posicion. */
+    const paidByPosition = new Set<number>();
+    /** Dinero que no tiene destinatario y va al ganador. */
+    let remainder = 0;
 
-    // --- Ganador: posicion 1 ---
-    if (winner) {
-      const telegramId = Number(winner.playerId);
-      const share = shares.find(s => s.position === 1)?.amount ?? 0;
+    const winnerId = winner ? Number(winner.playerId) : null;
 
-      if (share > 0) {
-        // El premio va a `balance.play`: no es retirable (ECONOMY.prizeToBalance).
-        await User.updateOne(
-          { telegramId },
-          {
-            $inc: {
-              'balance.play': share,
-              'stats.totalFreerollWon': share,
-            },
-          },
-        );
-        paid.push({
-          position: 1,
-          telegramId,
-          username: winner.displayName,
-          amount: share,
-          tableId: tables.find(t => t.seats.includes(winner))?.tableId,
-        });
-        logger.info(
-          `Campo ${field.fieldId}: ganador ${telegramId} cobra ` +
-          `${formatUnits(share)} USDT de promocion`,
-        );
+    for (let i = 0; i < shares.length; i++) {
+      const position = i + 1;
+      const amount = shares[i];
+      if (amount <= 0) continue;
+
+      // La posicion 1 es el ganador. Las demas, los resultados ya registrados.
+      const result = position === 1
+        ? null
+        : results.find(r => r.position === position && !paidByPosition.has(r.position));
+
+      let telegramId: number | null = null;
+      let username: string | undefined;
+      let tableId: string | undefined;
+
+      if (position === 1 && winnerId !== null) {
+        telegramId = winnerId;
+        username = winner!.displayName;
+      } else if (result) {
+        telegramId = result.telegramId;
+        username = result.username;
+        tableId = result.tableId;
+        paidByPosition.add(position);
       }
 
-      // Devolver lo que le quedaba en la mesa mas su parte del bote no
-      // repartido. En un Sit'n'Go el ganador se lleva la pila Y el premio.
-      await this.refund(telegramId, Math.max(0, winner.chips + winner.bet));
+      if (telegramId === null) {
+        // Nadie ocupa esta posicion todavia (no se ha eliminado nadie todavia, o
+        // el campo se liquida antes de tiempo). No se pierde: al ganador.
+        remainder += amount;
+        continue;
+      }
+
+      await this.creditPrize(telegramId, amount, position);
+      paid.push({ position, telegramId, username, amount, tableId });
+    }
+
+    // Lo que no correspondia a ninguna posicion existente se lo lleva el ganador,
+    // que en un Sit'n'Go es exactamente lo que hace: se lleva la pila.
+    if (remainder > 0) {
+      if (winnerId !== null) {
+        await this.creditPrize(winnerId, remainder, 1);
+        logger.info(
+          `Campo ${field.fieldId}: ${formatUnits(remainder)} USDT de posiciones sin ` +
+          `adjudicar van al ganador ${winnerId}`,
+        );
+      } else {
+        // Sin ganador no hay a quien darselo. Se registra para que el operador lo
+        // vea en el panel: es dinero que la plataforma tiene que devolver a mano.
+        logger.error(
+          `Campo ${field.fieldId}: ${formatUnits(remainder)} USDT sin destinatario ` +
+          `(no hay ganador y hay posiciones sin adjudicar). Hay que devolverlos a mano.`,
+        );
+      }
     }
 
     // --- Cerrar el campo (atomico) ---
-    const closed = await Field.findOneAndUpdate(
+    const closed2 = await Field.findOneAndUpdate(
       { fieldId: field.fieldId, status: { $ne: 'finished' } },
       {
         $set: { status: 'finished', finishedAt: new Date() },
-        $inc: { paidPositionsLeft: -paidPositionsLeft },
+        $inc: { paidPositionsLeft: -PAID_POSITIONS },
       },
       { new: true },
     );
 
-    if (!closed) {
+    if (!closed2) {
       logger.warn(
-        `Campo ${field.fieldId}: ya liquidado por otravia. No se paga dos veces.`,
+        `Campo ${field.fieldId}: ya liquidado por otra via. No se paga dos veces.`,
       );
       return { paid, totalPaid: paid.reduce((s, p) => s + p.amount, 0), refunded: 0 };
     }
 
     // --- Devolver lo que no llego al bote ---
-    // Los jugadores que quedaron fuera antes de empezar (los que estaban en
-    // cola cuando el campo arranco) reciben su buy-in intacto.
+    // Los jugadores que quedaron fuera antes de empezar (los que estaban en cola
+    // cuando el campo arranco) reciben su buy-in intacto. Esto SI es una devolucion
+    // legitima: nunca llegaron a tener ficha en la mesa, asi que nunca entraron en
+    // el bote que se acaba de barrer.
     const refunded = await this.refundUnseated(field);
 
-    // Registrar el resultado.
     await Field.updateOne(
       { _id: field._id },
-      { $set: { results: [...closed.results, ...paid] } },
+      { $set: { results: [...results, ...paid] } },
     );
 
-    // Cerrar las mesas.
+    // Cerrar las mesas. Las fichas ya estan a cero por el barrido de arriba, asi
+    // que aqui solo se vacian los asientos y se marca el estado. NO se reembolsa
+    // nada: ese era el doble cobro.
     for (const t of tables) {
       if (t.status === 'finished') continue;
-      for (const seat of t.seats) {
-        if (seat.kind !== 'human' || seat.status === 'out') continue;
-        await this.refund(Number(seat.playerId), Math.max(0, seat.chips + seat.bet));
-      }
       t.seats = [];
       t.status = 'finished';
       if (t.field) t.field.fieldStatus = 'finished';
       await t.save();
     }
 
-    const totalPaid = paid.reduce((s, p) => s + p.amount, 0);
+    const totalPaid = paid.reduce((s, p) => s + p.amount, 0) + remainder;
 
     logger.info(
       `Campo ${field.fieldId} liquidado: bote ${formatUnits(grossPot)} USDT, ` +
-      `rake ${formatUnits(rake)} USDT, premio ${formatUnits(totalPaid)} USDT ` +
+      `rake ${formatUnits(rake)} USDT, repartido ${formatUnits(totalPaid)} USDT ` +
       `de promocion, reembolsos ${formatUnits(refunded)} USDT`,
     );
 
@@ -1080,7 +1248,7 @@ export const fieldManager = {
       kind: field.kind,
       tierId: field.tierId,
       status: field.status,
-      buyIn: field.buyIn,
+      buyIn: field.buyInUnits,
       targetField: field.targetField,
       seated: field.seated,
       waiting: field.waiting,
@@ -1145,6 +1313,43 @@ export const fieldManager = {
 
     unlockService.log(split, 'cash');
     return true;
+  },
+
+  /**
+   * Acredita un premio de campo en `balance.play`.
+   *
+   * ------------------------------------------------------------------
+   * POR QUE EL PREMIO VA A `play` Y NO A `real`
+   *
+   * ESTA ES LA REGLA QUE PROTEGE A LA PLATAFORMA DE PERDER EL DINERO DE OTROS.
+   *
+   * Si el premio fuera a `balance.real`, ganar un campo seria indistinguible de
+   * un deposito: se podrian comprar entradas con dinero de premio y, al jugarlas,
+   * desbloquearlo a saldo retirable. Con el ratio 1:10 de `unlockService`, ganar
+   * devuelve la décima parte de lo ganado en dinero gastable, y el resto sirve
+   * para jugar. El premio es saldo EN JUEGO, no un ahorro.
+   *
+   * Y por eso el premio NO puede distinguirse del buy-in al pagarse: los dos
+   * vuelven al mismo bote. El rake es lo unico que la plataforma se queda de forma
+   * permanente, y es la unica fuente de ingresos del producto.
+   */
+  async creditPrize(telegramId: number, amount: number, position: number): Promise<void> {
+    if (amount <= 0) return;
+
+    await User.updateOne(
+      { telegramId },
+      {
+        $inc: {
+          'balance.play': amount,
+          'stats.totalFreerollWon': amount,
+        },
+      },
+    );
+
+    logger.info(
+      `Campo: ${telegramId} cobra ${formatUnits(amount)} USDT de promocion ` +
+      `por la posicion ${position}`,
+    );
   },
 
   /** Devuelve saldo a `balance.real`. */

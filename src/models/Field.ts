@@ -57,8 +57,27 @@ export interface IField extends Document {
 
   status: FieldStatus;
 
-  /** Buy-in por jugador, en la moneda de la cuenta. */
-  buyIn: number;
+  /**
+   * Buy-in por jugador, en UNIDADES INTERNAS (1 USDT = 1 000).
+   *
+   * ------------------------------------------------------------------
+   * POR QUE EL NOMBRE LLEVA EL SUFIJO Y NO ES SOLO `buyIn`
+   *
+   * Este campo se llamaba `buyIn` y el gestor escribia `buyInUnits`. Como mongoose
+   * no avisa de las claves que sobran en un `create()`, el campo `buyIn` se
+   * quedaba sin rellenar, `required` lo rechazaba, y `openField` fallaba SIEMPRE.
+   *
+   * No se encontró leyendo el codigo. Se encontró el primer dia que se ejecuto
+   * `openField` contra un Mongo de verdad (ver `scripts/test-e2e-field.js`), que
+   * es la razon de que ese test exista.
+   *
+   * El nombre lleva el sufijo porque el sufijo es lo que evita la confusion de
+   * unidades. Un campo llamado `buyIn` invita a Assignarle USDT (1000) donde
+   * deberia ir unidades (1000_000), que es un error de mil veces. El mismo
+   * criterio que obliga a `withdrawal.rules.ts` a convertir los limites en el
+   * modulo en vez de confiar en la comparacion.
+   */
+  buyInUnits: number;
 
   /**
    * Participantes objetivo para arrancar. Al llenarse, `status` pasa a
@@ -185,7 +204,7 @@ const fieldSchema = new Schema<IField>(
       index: true,
     },
 
-    buyIn: { type: Number, required: true },
+    buyInUnits: { type: Number, required: true },
 
     targetField: { type: Number, required: true },
 
@@ -223,7 +242,7 @@ export const toPublicField = (field: IField) => ({
   tierId: field.tierId,
   prizeTier: field.prizeTier,
   status: field.status,
-  buyIn: field.buyIn,
+  buyIn: field.buyInUnits,
   targetField: field.targetField,
   waiting: field.waiting,
   seated: field.seated,

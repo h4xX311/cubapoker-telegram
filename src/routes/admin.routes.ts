@@ -429,7 +429,7 @@ router.get('/fields', async (_req: Request, res: Response) => {
         tierId: f.tierId,
         prizeTier: f.prizeTier,
         status: f.status,
-        buyInUsdt: unitsToUsdt(f.buyIn),
+        buyInUsdt: unitsToUsdt(f.buyInUnits),
         targetField: f.targetField,
         seated: f.seated,
         waiting: f.waiting,
