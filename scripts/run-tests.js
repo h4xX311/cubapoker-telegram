@@ -21,6 +21,7 @@ const SUITES = [
   { name: 'Reglas del campo', file: 'test-field.js' },
   { name: 'Atomicidad de posiciones', file: 'test-field-atomic.js' },
   { name: 'Reglas de retiro', file: 'test-withdrawal.js' },
+  { name: 'Depositos USDT en TRC20', file: 'test-usdt-deposit.js' },
   { name: 'Motor de poker', file: 'test-engine.js' },
 ];
 
