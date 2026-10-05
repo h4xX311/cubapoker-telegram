@@ -406,30 +406,60 @@ es del 95 %. No bloquea.
 | 3 | Panel de operador | **Hecho en código** | Montarlo y probarlo. Rutas en `/api/admin`, protege con `ADMIN_API_KEY`. |
 | 4 | TRC20 real | **Hecho en código** | La clave de TronGrid y una dirección TRON. Las otras 4 redes siguen sin soporte real. |
 
-### El quinto bloqueante, que no estaba en la lista: una base de datos
+### El quinto bloqueante: una base de datos - RESUELTO, y encontro bugs de verdad
 
-**Ninguna parte del campo se ha ejecutado nunca.** Las 395 pruebas son
-aritmetica pura: el motor, los repartos, las unidades, la atomicidad, las reglas
-de retiro. Las llamadas a Mongo de `field.manager.ts` (31 en total) no se han
+**Antes:** ninguna parte del campo se había ejecutado nunca. Las 395 pruebas eran
+aritmética pura y las 31 llamadas a Mongo de `field.manager.ts` no se habían
 ejecutado ni una vez.
 
-Desde esta máquina **no se puede**: `fastdl.mongodb.org`,
-`downloads.mongodb.org` y `mongodb.com` devuelven 403 en esta red, y las releases
-de GitHub no publican binarios de Windows. Se probaron tres versiones de Mongo
-por si era un problema de version; es el dominio, no la version.
+**Ahora:** hay MongoDB real corriendo y un test de integración que lo ejecuta
+(`scripts/test-e2e-field.js`, 26 comprobaciones). Está documentado en
+`scripts/MONGODB-LOCAL.md`.
 
-Lo que eso deja sin verificar, en orden de riesgo:
+Los servidores de descarga de MongoDB están bloqueados en esta red (403 en
+`fastdl.mongodb.org`, `downloads.mongodb.com`, `downloads.mongodb.org` y
+`mongodb.com`), pero los mirrors del repo apt oficial sí responden. El servidor se
+instala en WSL sin `sudo`, extrayendo el `.deb` con `dpkg-deb -x`.
 
-1. **El cobro del buy-in contra Mongo.** Si el `$inc` no es atomico, un jugador
-   compra entrada dos veces y el campo descuadra.
-2. **Las merges entre mesas.** La logica esta en `field.rules.ts` y probada, pero
-   la escritura en `Table` no.
-3. **La liquidacion del campo.** Que el premio salga bien esta probado
-   (`test-payout.js`, 5000 botes). Que se pague bien al usuario, no.
-4. **El apagado ordenado.** Es codigo nuevo y solo se ha probado que compila.
+### Lo que encontró el test: cuatro bugs que no se ven leyendo
 
-Por eso el orden correcto es: **Atlas desde una red con salida, y un test de
-integracion end-to-end** antes de abrir a un solo usuario de prueba.
+1. **`openField` fallaba siempre.** Escribía `buyInUnits` en un campo que el modelo
+   llamaba `buyIn`. Como es `required`, el primer registro de un jugador lanzaba
+   `Field validation failed`. El producto no arrancaba.
+
+2. **Los 300 jugadores jugaban en una mesa.** `trySeat` calculaba el número de
+   mesas sobre `queue.length`, y la cola se vacía al sentar a la gente: la cuenta
+   nunca pasaba de 1. Habia un segundo bug: no comprobaba que la mesa estuviera
+   llena, así que todos se amontonaban en la primera. 300 jugadores en una mesa de
+   7, con el pot repartido sobre un número de jugadores inexistente.
+
+3. **Dreno: las fichas del eliminado volvían a su cartera.** Comprar entrada,
+   ser eliminado con las fichas intactas y recuperar el buy-in. El rake se cobra por
+   mano, así que un eliminado antes de la primera mano no pagaba nada: ciclo gratis.
+
+4. **La liquidación creaba dinero.** Pagaba un premio calculado con
+   `fieldPayout(buyIn, playersRemaining)` —un bote nuevo que no salía de ningún
+   sitio— y además devolvía las fichas a `balance.real`. Con 300 jugadores de
+   1 USDT, el campo terminaba con **129,25 USDT más** de los que tenía.
+
+El 4 también lo detectó la prueba: repartía `swept` sin descontar el rake, así que
+devolvía los ingresos de la plataforma. Ahora reparte `min(swept, buyIns − rake)` y
+fija `rakeCollected` a `grossPot − repartido`, para que la contabilidad del campo no
+pueda desviarse de la del dinero.
+
+**La invariante que ahora se comprueba en cada ejecución:** el saldo total del
+sistema tras liquidar es exactamente el inicial menos el rake. Ni un centavo más,
+ni un centavo menos.
+
+### Lo que el test de integración todavía no cubre
+
+- Que el motor juegue bien **con los bots** a lo largo de un campo entero. Se
+  liquida a mano: no se juega una sola mano.
+- Las **merges** entre mesas.
+- El apagado ordenado con un campo a medias.
+
+Los tres se pueden cubrir con este mismo Mongo, llamando al motor de verdad. Ese es
+el siguiente paso.
 
 ### Lo que se cerro en codigo y conviene no deshacer
 
