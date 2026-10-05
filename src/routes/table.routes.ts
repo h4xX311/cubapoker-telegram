@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { tableManager } from '../game/table.manager';
 import { seatingService, TableError } from '../game/seating.service';
 import { fieldManager, FieldError } from '../game/field.manager';
+import { centrollService, CentrollError } from '../game/centroll.service';
 import { Field, toPublicField } from '../models/Field';
 import { requireTelegramAuth, getAuthedTelegramId } from '../middleware/telegramAuth';
 import { User } from '../models/User';
@@ -12,12 +13,17 @@ import {
   SEATS_PER_TABLE,
   FREEROLL_TARGET_FIELD,
   FREEROLL_MAX_FIELD,
+  CENTROLL,
+  UNLOCK_RATES,
 } from '../config/product';
 import {
-  fieldPayout,
-  tierRtp,
-  prizeDisclosure,
-} from '../services/payout.service';
+  WITHDRAWALS,
+  CUP_PER_USDT,
+  usdtToCup,
+} from '../config/currency';
+import { unitsToUsdt } from '../config/units';
+import { fieldPayout, prizeDisclosure } from '../services/payout.service';
+import { unlockService } from '../services/unlock.service';
 
 const router = Router();
 router.use(requireTelegramAuth);
@@ -31,10 +37,10 @@ router.get('/config', (_req: Request, res: Response) => {
     seatsPerTable: SEATS_PER_TABLE,
 
     cashTiers: TABLE_TIER_LIST.map(t => {
-      // El premio real depende de cuantos jugadores jueguen: sale del bote.
-      // A campo lleno se muestra ese, que es el mejor caso. La UI debe decir
-      // "desde" para no prometer una cifra que dependa de la ocupacion.
-      const full = fieldPayout(t.defaultBuyIn, t.fieldSize);
+      // El premio sale del bote del campo: sale multiplicando por 300
+      // participantes. `fieldPayout` trabaja en unidades internas, asi que se
+      // le pasa el buy-in en unidades y se convierte la salida a USDT.
+      const full = fieldPayout(t.buyInUnits, t.fieldSize);
       const winner = full.entries.find(e => e.position === 1);
 
       return {
@@ -42,25 +48,63 @@ router.get('/config', (_req: Request, res: Response) => {
         label: t.label,
         description: t.description,
         fieldSize: t.fieldSize,
-        minBuyIn: t.minBuyIn,
-        defaultBuyIn: t.defaultBuyIn,
         tables: Math.ceil(t.fieldSize / SEATS_PER_TABLE),
-        // Estimacion a campo lleno. El bote real depende de la ocupacion.
-        estNetPot: full.netPot,
-        estFirstPrize: winner?.amount ?? 0,
-        rtp: tierRtp(t.minBuyIn, t.fieldSize),
-        payout: full.entries,
+        buyIn: t.buyInUsdt,
+        blinds: {
+          small: unitsToUsdt(t.blinds.small),
+          big: unitsToUsdt(t.blinds.big),
+        },
+        stackInBigBlinds: t.stackInBigBlinds,
+        // Todo a USDT para la UI.
+        estNetPot: unitsToUsdt(full.netPot),
+        estFirstPrize: unitsToUsdt(winner?.amount ?? 0),
+        estRake: unitsToUsdt(full.rake),
+        payout: full.entries.map(e => ({
+          position: e.position,
+          percentage: e.percentage,
+          amount: unitsToUsdt(e.amount),
+        })),
       };
     }),
 
     // Texto de transparencia. La UI debe mostrarlo junto al premio: decir
-    // "premio garantizado" sin explicar que sale del bote y no es retirable es
-    // publicidad engañosa.
+    // "premio garantizado" sin explicar que sale del bote es publicidad
+    // engañosa.
     prizeDisclosure: prizeDisclosure(),
 
     freerollTiers: FREEROLL_PRIZES,
     freerollTargetField: FREEROLL_TARGET_FIELD,
     freerollMaxField: FREEROLL_MAX_FIELD,
+
+    // Centroll: buy-in de 1 centavo que consume saldo REAL y da fichas. Es la
+    // via por la que el dinero real entra al ciclo del freeroll.
+    centroll: {
+      buyIn: CENTROLL.buyInUsdt,
+      buyInCup: usdtToCup(CENTROLL.buyInUsdt),
+      prizeMultiplier: CENTROLL.prizeMultiplier,
+      targetField: CENTROLL.targetField,
+      maxField: CENTROLL.maxField,
+      maxRebuys: CENTROLL.maxRebuys,
+    },
+
+    // Mecanismo de Promotional Dollars: como se desbloquea `balance.play`.
+    unlock: {
+      rate: UNLOCK_RATES.cash,
+      ratioLabel: `1:${Math.round(1 / UNLOCK_RATES.cash)}`,
+      disclosure: unlockService.disclosure(),
+    },
+
+    // Limites de retiro, para que la UI no los tenga duplicados.
+    withdrawals: {
+      min: WITHDRAWALS.min,
+      maxPerTransaction: WITHDRAWALS.maxPerTransaction,
+      monthlyWinCap: WITHDRAWALS.monthlyWinCap,
+      defaultNetwork: WITHDRAWALS.defaultNetwork,
+      networkFees: WITHDRAWALS.networkFees,
+    },
+
+    // Equivalente en CUP, para que el usuario cubano razone en su moneda.
+    cupPerUsdt: CUP_PER_USDT,
   });
 });
 
@@ -165,6 +209,36 @@ router.get('/fields', async (_req: Request, res: Response) => {
   } catch (error) {
     logger.error('GET /game/fields:', error);
     res.status(500).json({ error: 'Error obteniendo los campos' });
+  }
+});
+
+/** Estado del centroll: buy-in, premio, cuantos inscritos. */
+router.get('/centroll', async (_req: Request, res: Response) => {
+  try {
+    res.json({ success: true, ...(await centrollService.status()) });
+  } catch (error) {
+    logger.error('GET /game/centroll:', error);
+    res.status(500).json({ error: 'Error obteniendo el centroll' });
+  }
+});
+
+/**
+ * Entrada a un centroll.
+ *
+ * Consume saldo REAL (no el de promoción), que es el requisito explícito de
+ * CoinPoker. El premio va a fichas de promoción.
+ */
+router.post('/centroll/join', async (req: Request, res: Response) => {
+  try {
+    const telegramId = getAuthedTelegramId(req);
+    const user = await User.findOne({ telegramId });
+    const result = await centrollService.register(telegramId, user?.username);
+    res.json({ success: true, ...result });
+  } catch (error) {
+    const status = error instanceof CentrollError ? 400 : 500;
+    res.status(status).json({
+      error: error instanceof Error ? error.message : 'No se pudo entrar al centroll',
+    });
   }
 });
 

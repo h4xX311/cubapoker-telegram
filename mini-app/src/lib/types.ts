@@ -1,4 +1,10 @@
-/** Tipos compartidos del Mini App. */
+/**
+ * Tipos compartidos del Mini App.
+ *
+ * MONEDA: la unidad de la cuenta es USDT (ver `config/currency.ts`), no CUP.
+ * CUP es solo la via de entrada/salida en Cuba y la referencia que el usuario
+ * ve debajo del saldo.
+ */
 
 export const PAGES = [
   'home',
@@ -7,6 +13,7 @@ export const PAGES = [
   'game',
   'tables',
   'freeroll',
+  'centroll',
   'tournaments',
   'vip',
   'referrals',
@@ -16,11 +23,19 @@ export const PAGES = [
 export type Page = (typeof PAGES)[number];
 
 export interface Balance {
-  /** CUP de deposito. Unico retirable. */
+  /**
+   * Saldo retirable, en USDT. Origen: depositos y ganancias.
+   *
+   * Un retiro solo puede consumir esta parte: el saldo de `play` se desbloquea a
+   * `real` jugando, no directamente.
+   */
   real: number;
-  /** CUP de promocion. Solo para jugar. */
+  /**
+   * Promotional Dollars, en USDT. NO es retirable: se desbloquea 1 de cada 10
+   * al usarlo. Origen: premios de freeroll, centrolls, logros y referidos.
+   */
   play: number;
-  /** Suma de ambos, para jugar en mesas. */
+  /** Suma de ambos: lo que puede gastar en jugar. */
   total: number;
   /** Alias de `real`, explicito para la UI de retiro. */
   withdrawable: number;
@@ -52,9 +67,9 @@ export interface Session {
 export interface PayoutEntry {
   /** Posicion final en el campo, 1-based. 1 = ganador. */
   position: number;
-  /** Importe estimado a campo lleno, en CUP. */
+  /** Importe en USDT, a campo lleno. */
   amount: number;
-  /** Porcentaje del bote que representa. */
+  /** Porcentaje del bote. */
   percentage: number;
 }
 
@@ -62,37 +77,72 @@ export interface CashTier {
   id: string;
   label: string;
   description: string;
-  /**
-   * Participantes del campo completo (multi-mesa). NO son asientos: un campo
-   * de 500 son ~72 mesas de 7. Ver `seatsPerTable`.
-   */
+  /** Participantes del campo (multi-mesa). NO son asientos. */
   fieldSize: number;
-  minBuyIn: number;
-  defaultBuyIn: number;
   /** Mesas de 7 que componen el campo. */
   tables: number;
-  /**
-   * Bote neto estimado a campo lleno (el 95% de lo que pone todo el mundo).
-   * El bote real depende de cuantos jueguen, asi que la UI debe decir "desde".
-   */
+  /** Buy-in por jugador, en USDT. */
+  buyIn: number;
+  blinds: { small: number; big: number };
+  /** Stack de referencia en ciegas grandes. */
+  stackInBigBlinds: number;
+  /** Bote neto estimado a campo lleno (95% de lo que pone todo el mundo). */
   estNetPot: number;
-  /** Premio estimado para el ganador, a campo lleno. */
+  /** Premio estimado para el ganador. */
   estFirstPrize: number;
-  /** RTP del campo, ~0.95. */
-  rtp: number;
-  /** Reparto por posicion. */
+  /** Rake estimado del campo completo. */
+  estRake: number;
   payout: PayoutEntry[];
+}
+
+/** Mecanismo de Promotional Dollars. */
+export interface UnlockInfo {
+  /** Fraccion que se desbloquea al jugar (0,1 = 1 de cada 10). */
+  rate: number;
+  /** Texto tipo "1:10". */
+  ratioLabel: string;
+  /** Explicacion para la interfaz. */
+  disclosure: string;
+}
+
+export interface WithdrawalLimits {
+  min: number;
+  maxPerTransaction: number;
+  monthlyWinCap: number;
+  defaultNetwork: string;
+  networkFees: Record<string, { fee: number; free: boolean }>;
+}
+
+export interface ProductConfig {
+  seatsPerTable: number;
+  cashTiers: CashTier[];
+  prizeDisclosure: string;
+  freerollTiers: readonly number[];
+  freerollTargetField: number;
+  freerollMaxField: number;
+  centroll: {
+    buyIn: number;
+    buyInCup: number;
+    prizeMultiplier: number;
+    targetField: number;
+    maxField: number;
+    maxRebuys: number;
+  };
+  unlock: UnlockInfo;
+  withdrawals: WithdrawalLimits;
+  cupPerUsdt: number;
 }
 
 export interface TableSummary {
   tableId: string;
-  kind: 'cash' | 'freeroll';
+  kind: 'cash' | 'freeroll' | 'centroll';
   tierId?: string;
   status: string;
+  /** Ciegas en USDT. */
   smallBlind: number;
   bigBlind: number;
-  minBuyIn: number;
-  guaranteedPrize: number;
+  /** Buy-in de la mesa, en USDT. */
+  buyIn: number;
   /** Asientos de esta mesa fisica (7). */
   maxSeats: number;
   /** Datos del campo multi-mesa al que pertenece. */

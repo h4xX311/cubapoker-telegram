@@ -9,10 +9,14 @@ import {
   FREEROLL_TARGET_FIELD,
   BOT_CONFIG,
   SEATS_PER_TABLE,
+  CENTROLL,
+  UNLOCK_RATES,
   getTier,
   type TableTierId,
 } from '../config/product';
 import { logger } from '../utils/logger';
+import { unlockService } from '../services/unlock.service';
+import { formatUnits, usdtToUnits, unitsToUsdt, blindsFor } from '../config/units';
 import { splitPrize, fieldPayout, prizeDisclosure } from '../services/payout.service';
 
 export class TableError extends Error {
@@ -60,22 +64,30 @@ export class SeatingService {
       throw new TableError('Ya estas sentado en otra mesa. Sal de ella primero.', 409);
     }
 
-    const buyIn = Math.max(
-      table.minBuyIn,
-      Math.min(params.buyIn || table.minBuyIn * 2, user.balance.real + user.balance.play),
-    );
+    // EL BUY-IN NO SE NEGOCIA EN UNA MESA DE CAMPO.
+    //
+    // Antes `params.buyIn` permitia comprar mas que el minimo y se calculaba un
+    // buy-in "mayor" con `minBuyIn * 2`. Eso es de mesa de cash: entras con la
+    // cantidad que quieras. En un campo todos pagan lo mismo, porque las fichas
+    // son la unidad de supervivencia del campo: si uno entra con el doble, el
+    // rake del campo deja de ser comparable entre jugadores y el reparto por
+    // posicion deja de significar nada.
+    //
+    // Asi que el buy-in es exactamente `table.buyInUnits`, sin parametros.
+    const finalBuyIn = table.buyInUnits;
 
     const available = user.balance.real + user.balance.play;
-    if (available < table.minBuyIn) {
+    if (available < finalBuyIn) {
       throw new TableError(
-        `Necesitas ${table.minBuyIn} CUP para esta mesa. Tienes ${available}.`,
+        `Necesitas ${formatUnits(finalBuyIn)} USDT para esta mesa. ` +
+        `Tienes ${formatUnits(available)}.`,
       );
     }
 
-    const finalBuyIn = Math.min(buyIn, available);
-
-    // Consumo: play primero, luego real
-    const fromPlay = Math.min(user.balance.play, finalBuyIn);
+    // Consumo: play primero, luego real. Y lo que sale de `play` se desbloquea
+    // a retirable segun el ratio: es el mecanismo de Promotional Dollars.
+    const split = await unlockService.splitBuyIn(telegramId, finalBuyIn, 'cash');
+    const fromPlay = split.fromPlay;
     const fromReal = finalBuyIn - fromPlay;
 
     const seat: ISeat = {
@@ -98,11 +110,13 @@ export class SeatingService {
 
     table.seats.push(seat);
 
+    // `splitBuyIn` ya descontó `fromPlay` de `play` y acreditó su unlock a
+    // `real`. Aquí solo se descuenta el resto del saldo real. Si se descontara
+    // también `play`, se cobraría dos veces la parte de promoción.
     await User.updateOne(
       { telegramId },
       {
         $inc: {
-          'balance.play': -fromPlay,
           'balance.real': -fromReal,
           'stats.tablesJoined': 1,
         },
@@ -140,7 +154,7 @@ export class SeatingService {
       return table as ITable;
     }
 
-    const tier = getTier(tierId || '') || TABLE_TIERS.t50;
+    const tier = getTier(tierId || '') || TABLE_TIERS.t1;
 
     // Buscar una mesa del mismo tier con sitio
     const existing = await Table.findOne({
@@ -168,10 +182,13 @@ export class SeatingService {
       kind: 'cash',
       tierId,
       status: 'waiting',
-      smallBlind: Math.max(1, Math.round(tier.defaultBuyIn / 200)),
-      bigBlind: Math.max(2, Math.round(tier.defaultBuyIn / 100)),
-      minBuyIn: tier.minBuyIn,
-      guaranteedPrize: tier.guaranteedPrize,
+      // Las ciegas vienen del tier ya calculadas en unidades. No se derivan
+      // aqui con `Math.round(buyIn / 100)`: dos mesas del mismo tier podrian
+      // acabar con ciegas distintas por el redondeo, y el jugador lo notaria al
+      // pasar de una a otra.
+      smallBlind: tier.blinds.small,
+      bigBlind: tier.blinds.big,
+      buyInUnits: tier.buyInUnits,
       // 7 asientos. `tier.fieldSize` es el numero de participantes del campo
       // completo (multi-mesa), no lo que cabe en una mesa.
       maxSeats: SEATS_PER_TABLE,
@@ -189,7 +206,8 @@ export class SeatingService {
 
     logger.info(
       `Mesa cash creada: ${tableId} ` +
-      `(7-max, campo de ${tier.fieldSize} participantes, premio ${tier.guaranteedPrize} CUP)`,
+      `(7-max, campo de ${tier.fieldSize}, buy-in ${tier.buyInUsdt} USDT ` +
+      `= ${tier.stackInBigBlinds} BB)`,
     );
     return table;
   }
@@ -299,15 +317,19 @@ export class SeatingService {
   /**
    * Registra a un jugador en un freeroll.
    *
-   * El freeroll no tiene buy-in: es gratuito. Los premios (5-50 CUP) se abonan
-   * a `balance.play`, que NO es retirable. Ese es el gancho: invita a entrar y
-   * a jugar, pero para sacar dinero hay que depositar.
+   * El freeroll no tiene buy-in: es gratuito. El premio del escalon se reparte
+   * entre los que quedan vivos, y las fichas iniciales de cada jugador son su
+   * parte de ese premio. Al eliminarse pierde esa parte.
+   *
+   * Lo que el ganador se lleva va a `balance.play` (Promotional Dollars): no se
+   * retira directamente, se desbloquea jugando a ratio 1:10. Ver
+   * `UNLOCK_RATES`.
    */
   async joinFreeroll(params: {
     telegramId: number;
     prizeTier?: number;
     freerollId?: string;
-  }): Promise<{ freerollId: string; position: number; players: number }> {
+  }): Promise<{ freerollId: string; position: number; players: number; startChips: number }> {
     const { telegramId } = params;
 
     const user = await User.findOne({ telegramId });
@@ -339,12 +361,24 @@ export class SeatingService {
       throw new TableError('Ya estas registrado en este freeroll', 409);
     }
 
+    // El stack inicial es la parte del premio que le toca a cada uno. Se calcula
+    // con la MISMA formula que `createFreeroll` usa para las ciegas, o el
+    // jugador entraria con fichas que no cubren ni la ciega grande y seria
+    // all-in antes de jugar.
+    const startChips = Math.max(
+      2,
+      Math.floor(
+        usdtToUnits(tier) /
+        ((freeroll.field?.targetField || FREEROLL_TARGET_FIELD) * 0.5),
+      ),
+    );
+
     const seat: ISeat = {
       index: freeroll.seats.length,
       kind: 'human',
       playerId: String(telegramId),
       displayName: user.firstName || user.username || `Jugador${telegramId}`,
-      chips: 1000, // stack inicial del freeroll
+      chips: startChips,
       bet: 0,
       totalBet: 0,
       status: 'active',
@@ -353,7 +387,7 @@ export class SeatingService {
       isBigBlind: false,
       handsPlayed: 0,
       handsWon: 0,
-      netChips: 1000,
+      netChips: startChips,
       joinedAt: new Date(),
     };
 
@@ -370,6 +404,7 @@ export class SeatingService {
       freerollId: freeroll.tableId,
       position: seat.index,
       players: freeroll.seats.length,
+      startChips,
     };
   }
 
@@ -387,16 +422,28 @@ export class SeatingService {
 
     const tableId = `freeroll-${tier}-${Date.now().toString(36)}`;
 
+    // Las fichas del freeroll son el PREMIO repartido entre los que quedan
+    // vivos. Con 1000 unidades de premio (1 USDT) entre hasta 300 jugadores, cada
+    // uno empieza con 3 unidades, que es la ciega pequena del micro.
+    //
+    // No son un buy-in comprado: el jugador no paga nada, y por eso la
+    // "ficha" inicial es la parte del premio que le toca por estar dentro. Al
+    // eliminarse, pierde esa parte, y el bote se reparte al final.
+    const startChips = Math.max(
+      2,
+      Math.floor(usdtToUnits(tier) / (targetField * 0.5)),
+    );
+    const { small, big } = blindsFor(startChips);
+
     const table = await Table.create({
       tableId,
       kind: 'freeroll',
       prizeTier: tier,
       status: 'waiting',
-      smallBlind: 5,
-      bigBlind: 10,
-      minBuyIn: 0,
-      // El bote del freeroll es el premio del escalon
-      guaranteedPrize: tier,
+      smallBlind: small,
+      bigBlind: big,
+      // 0: el freeroll no se compra.
+      buyInUnits: 0,
       // 7-max tambien en freeroll: una mesa de poker es una mesa de poker.
       maxSeats: SEATS_PER_TABLE,
       // Objetivo de inscripcion del campo multi-mesa
@@ -439,7 +486,15 @@ export class SeatingService {
 
     // Ordenar por fichas restantes
     const ranked = [...freeroll.seats].sort((a, b) => b.chips - a.chips);
-    const pot = freeroll.hand.pot || freeroll.guaranteedPrize;
+
+    // El bote de un freeroll es el PREMIO DEL ESCALON, no el bote de la ultima
+    // mano. El freeroll no cobra rake (RAKE.freerollPercentage = 0), asi que el
+    // bote es el premio entero.
+    //
+    // `prizeTier` esta en unidades internas, como todo lo demas. Usar
+    // `hand.pot` aqui seria un error de unidades: es el bote de UNA mano (unas
+    // decenas de unidades) y no el premio del campo (miles).
+    const pot = usdtToUnits(freeroll.prizeTier ?? 0);
 
     // El reparto lo calcula `splitPrize`, no `Math.floor` por porcentaje.
     //
@@ -460,7 +515,15 @@ export class SeatingService {
       const prize = shares[position - 1] ?? 0;
 
       if (prize > 0 && seat.kind === 'human') {
-        // SALDO NO RETIRABLE. Ver ECONOMY.prizeToBalance.
+        // AL SALDO DE PROMOCION (P$), NO RETIRABLE.
+        //
+        // El mecanismo de Promotional Dollars: el saldo de `play` no se retira,
+        // se desbloquea jugando a ratio 1:10. Un freeroll es entrada gratis, asi
+        // que si el premio fuera retirable seria un dreno directo: repetir
+        // freerolls para sacar dinero sin haber depositado nunca.
+        //
+        // Con el ratio, hay que jugar el 90% de esas fichas para intentar
+        // extraer el 10%, y por el camino se pierde casi todo.
         await User.updateOne(
           { telegramId: Number(seat.playerId) },
           {
@@ -511,7 +574,9 @@ export class SeatingService {
           players,
           maxSeats: t.maxSeats,
           phase: t.hand.phase,
-          pot: t.hand.pot || t.guaranteedPrize,
+          // El bote del freeroll es el premio del escalon, no el de la ultima
+          // mano (ver `settleFreeroll`).
+          pot: usdtToUnits(tier),
           tableId: t.tableId,
           status: t.status,
           // Inscritos de todas las mesas de este escalon, no solo de esta.
@@ -527,15 +592,22 @@ export class SeatingService {
         prizeTier: prize,
         // Asientos de esta mesa fisica (7).
         maxPlayers: found?.maxSeats ?? SEATS_PER_TABLE,
-        // Participantes del campo: es lo que la UI debe mostrar como "jugadores".
+        // Participantes del campo: es lo que la UI muestra como "inscritos".
         players: found?.fieldRegistered ?? 0,
         fieldTarget: found?.fieldTarget ?? FREEROLL_TARGET_FIELD,
         phase: found?.phase ?? 'waiting',
-        pot: found?.pot ?? prize,
+        // El bote es el premio del escalon, en USDT para la UI.
+        pot: unitsToUsdt(usdtToUnits(prize)),
         tableId: found?.tableId,
         payout: FREEROLL_PAYOUT,
-        // El premio del freeroll va a `balance.play`, que no es retirable.
+        /**
+         * El premio va a `balance.play`, que NO se retira: se desbloquea 1 de
+         * cada 10 jugando. Ver `UNLOCK_RATES`.
+         *
+         * Este flag lo lee la UI para no prometer dinero retirable.
+         */
         withdrawable: false,
+        unlockRatio: `1:${Math.round(1 / UNLOCK_RATES.freeroll)}`,
       };
     });
   }

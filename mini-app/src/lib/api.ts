@@ -118,12 +118,16 @@ export const api = {
   myTable: () => request<{ tableId: string | null }>('/game/my-table'),
 
   // Freerolls
-  freerolls: () => request<{ freerolls: any[] }>('/game/freerolls'),
+  freerolls: () => request<any>('/game/freerolls'),
   joinFreeroll: (prizeTier: number, freerollId?: string) =>
     request<any>('/game/freerolls/join', {
       method: 'POST',
       body: { prizeTier, freerollId },
     }),
+
+  // Centrolls: buy-in de saldo real, premio en fichas de promocion
+  centroll: () => request<any>('/game/centroll'),
+  joinCentroll: () => request<any>('/game/centroll/join', { method: 'POST' }),
 
   // Torneos
   tournaments: () => request<any>('/game/tournaments'),

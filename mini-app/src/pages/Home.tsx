@@ -1,28 +1,76 @@
 import type { Page, Session } from '../lib/types';
+import { fmtUsdt, fmtCup, PromoBalanceNote } from '../components/Balance';
 
 interface HomeProps {
   user: Session | null;
   onNavigate: (page: Page) => void;
+  cupPerUsdt?: number;
 }
 
 const NAV: { page: Page; emoji: string; label: string; sub: string; accent: string }[] = [
-  { page: 'tables', emoji: '🃏', label: 'Campos cash', sub: '7-max · 50 a 500', accent: 'from-[#00d26a] to-[#00b894]' },
-  { page: 'freeroll', emoji: '🎁', label: 'Freeroll', sub: 'Gratis · 5-50 CUP', accent: 'from-[#ffd700] to-[#ffb700]' },
-  { page: 'tournaments', emoji: '🏆', label: 'Torneos', sub: 'Con premio', accent: 'from-[#e67e22] to-[#d35400]' },
-  { page: 'vip', emoji: '👑', label: 'VIP', sub: 'Menos rake', accent: 'from-[#9b59b6] to-[#8e44ad]' },
-  { page: 'achievements', emoji: '🎖️', label: 'Logros', sub: 'Recompensas', accent: 'from-[#3498db] to-[#2980b9]' },
-  { page: 'referrals', emoji: '👥', label: 'Referidos', sub: 'Gana 10%', accent: 'from-[#16a085] to-[#1abc9c]' },
+  {
+    page: 'tables',
+    emoji: '🃏',
+    label: 'Campos cash',
+    sub: '1 a 100 USDT',
+    accent: 'from-[#00d26a] to-[#00b894]',
+  },
+  {
+    page: 'freeroll',
+    emoji: '🎁',
+    label: 'Freeroll',
+    sub: 'Gratis · sin buy-in',
+    accent: 'from-[#ffd700] to-[#ffb700]',
+  },
+  {
+    page: 'centroll',
+    emoji: '⚡',
+    label: 'Centroll',
+    sub: '0,01 USDT',
+    accent: 'from-[#e67e22] to-[#d35400]',
+  },
+  {
+    page: 'tournaments',
+    emoji: '🏆',
+    label: 'Torneos',
+    sub: 'Próximamente',
+    accent: 'from-[#9b59b6] to-[#8e44ad]',
+  },
+  {
+    page: 'vip',
+    emoji: '👑',
+    label: 'VIP',
+    sub: 'Menos rake',
+    accent: 'from-[#3498db] to-[#2980b9]',
+  },
+  {
+    page: 'achievements',
+    emoji: '🎖️',
+    label: 'Logros',
+    sub: 'Recompensas',
+    accent: 'from-[#16a085] to-[#1abc9c]',
+  },
+  {
+    page: 'referrals',
+    emoji: '👥',
+    label: 'Referidos',
+    sub: 'Gana 10%',
+    accent: 'from-[#7f8c8d] to-[#95a5a6]',
+  },
 ];
 
-export function Home({ user, onNavigate }: HomeProps) {
+export function Home({ user, onNavigate, cupPerUsdt = 120 }: HomeProps) {
   const real = user?.balance?.real ?? 0;
   const play = user?.balance?.play ?? 0;
   const total = user?.balance?.total ?? 0;
   const stats = user?.stats;
 
+  // Cuanto puede extraerse del saldo de promocion: el 10% de lo que tiene.
+  // Es un techo teorico; en la practica es menos porque se pierde jugando.
+  const maxExtractable = Math.floor(play * 10) / 100;
+
   return (
     <div className="p-4 pb-10 animate-fadeIn">
-      {/* Saludo */}
       <div className="mb-5">
         <p className="text-[#a0a0b0] text-sm">Hola</p>
         <h1 className="text-2xl font-bold text-white truncate">
@@ -30,7 +78,7 @@ export function Home({ user, onNavigate }: HomeProps) {
         </h1>
       </div>
 
-      {/* Saldo: se separan real y promocion porque solo uno es retirable */}
+      {/* Saldo. La unidad de la cuenta es USDT; el CUP es referencia. */}
       <section
         className="rounded-2xl p-5 mb-2"
         style={{
@@ -43,27 +91,28 @@ export function Home({ user, onNavigate }: HomeProps) {
           <span className="text-[#a0a0b0] text-xs uppercase tracking-wide">
             Saldo total
           </span>
-          {user?.vip && <span className="badge badge-warning text-[10px]">{user.vip}</span>}
+          {user?.vip && (
+            <span className="badge badge-warning text-[10px]">{user.vip}</span>
+          )}
         </div>
 
-        <p className="text-4xl font-bold text-white leading-none">
-          {total}
-          <span className="text-lg text-[#a0a0b0] font-normal ml-2">CUP</span>
+        <p className="text-4xl font-bold text-white leading-none">{fmtUsdt(total)}</p>
+        <p className="text-sm text-[#a0a0b0] mt-1">
+          USDT · {fmtCup(total, cupPerUsdt)} CUP
         </p>
 
-        {/* Desglose */}
         <div className="grid grid-cols-2 gap-3 mt-4 pt-4 border-t border-white/10">
           <div>
             <p className="text-[10px] text-[#a0a0b0] uppercase tracking-wide">
-              Real · retirable
+              Retirable
             </p>
-            <p className="text-lg font-bold text-[#00d26a]">{real}</p>
+            <p className="text-lg font-bold text-[#00d26a]">{fmtUsdt(real)}</p>
           </div>
           <div>
             <p className="text-[10px] text-[#a0a0b0] uppercase tracking-wide">
-              Promoción · solo jugar
+              Promoción
             </p>
-            <p className="text-lg font-bold text-[#ffd700]">{play}</p>
+            <p className="text-lg font-bold text-[#ffd700]">{fmtUsdt(play)}</p>
           </div>
         </div>
 
@@ -77,31 +126,20 @@ export function Home({ user, onNavigate }: HomeProps) {
           <button
             onClick={() => onNavigate('withdraw')}
             className="flex-1 btn btn-outline py-2.5 text-sm"
-            disabled={real < 1000}
-            title={real < 1000 ? 'Minimo 1000 CUP retirables' : undefined}
+            disabled={real < 10}
+            title={real < 10 ? 'Mínimo 10 USDT retirables' : undefined}
           >
             Retirar
           </button>
         </div>
       </section>
 
-      {/* Aviso de saldo promo si existe */}
       {play > 0 && (
-        <div
-          className="rounded-xl p-3 mb-5 flex items-start gap-2.5"
-          style={{ background: 'rgba(255,215,0,0.08)', border: '1px solid rgba(255,215,0,0.25)' }}
-        >
-          <span className="text-sm">⚠️</span>
-          <p className="text-[11px] text-[#a0a0b0] leading-relaxed">
-            Tienes <strong className="text-[#ffd700]">{play} CUP</strong> de promoción
-            (freerolls y logros). Sirven para jugar en cualquier mesa cash pero{' '}
-            <strong className="text-white">no se pueden retirar</strong>. Tu saldo
-            retirable es {real} CUP.
-          </p>
+        <div className="mb-5">
+          <PromoBalanceNote play={play} maxExtractable={maxExtractable} />
         </div>
       )}
 
-      {/* Navegacion principal */}
       <div className="grid grid-cols-2 gap-3 mb-6">
         {NAV.map((item, i) => (
           <button
@@ -121,7 +159,6 @@ export function Home({ user, onNavigate }: HomeProps) {
         ))}
       </div>
 
-      {/* Estadisticas */}
       <h2 className="text-[#a0a0b0] text-xs uppercase tracking-wide mb-3">
         Mi actividad
       </h2>
@@ -131,13 +168,12 @@ export function Home({ user, onNavigate }: HomeProps) {
         <Stat label="Freerolls" value={stats?.freerollsPlayed ?? 0} color="#3498db" />
       </div>
 
-      {/* Confianza */}
       <div className="card flex items-start gap-3">
         <span className="text-lg">🔒</span>
         <div>
           <p className="text-sm font-semibold text-white mb-1">Juego responsable</p>
           <p className="text-xs text-[#a0a0b0] leading-relaxed">
-            Los retiros se procesan en 24-48 h. Si deja de ser divertido, tómate un
+            Los retiros se procesan en 24-72 h. Si deja de ser divertido, tómate un
             descanso. Solo para mayores de 18 años.
           </p>
         </div>

@@ -6,8 +6,22 @@
  * la logica de juego.
  */
 
-export type TableKind = 'cash' | 'freeroll';
-export type TableTierId = 't50' | 't100' | 't300' | 't500';
+import { usdtToUnits, blindsFor } from './units';
+
+export type TableKind = 'cash' | 'freeroll' | 'centroll';
+
+/**
+ * Los cuatro niveles de campo.
+ *
+ * Antes eran 't50' | 't100' | 't300' | 't500', nombrados por el TAMANO del
+ * campo. Ahora escalan por el buy-in (1/5/25/100 USDT) y todos son de 300
+ * participantes, asi que el nombre tiene que reflejar lo que los diferencia.
+ *
+ * OJO: cambiar estos ids rompe los registros de `Field.tierId` y `Table.tierId`
+ * de los campos que ya esten guardados. Si hay datos en produccion hay que
+ * hacer una migracion de ids, no solo cambiar la constante.
+ */
+export type TableTierId = 't1' | 't5' | 't25' | 't100';
 
 /**
  * Asientos por mesa fisica.
@@ -83,9 +97,14 @@ export const ECONOMY = {
   netPotShare: 1 - 0.05,
 
   /**
-   * El premio de un campo se abona a `balance.play` (no retirable).
-   * Razon: es premio de juego, no devolucion de deposito. Retirarlo convertiria
-   * un Sit n Go en un esquema de salida de dinero sin cobertura.
+   * El premio de un campo o freeroll se abona a `balance.play`, que NO es
+   * retirable directamente: se desbloquea jugando a ratio 1:10 (ver
+   * `UNLOCK_RATES` y `services/unlock.service.ts`).
+   *
+   * Razon: un campo de dinero exige buy-in, pero un freeroll no. Si el premio
+   * fuera retirable, ganar un freeroll seria indistinguible de un deposito y un
+   * jugador podria repetirlo para sacar dinero sin depositar nunca. Con el
+   * ratio, hay que jugar el 90% de las fichas para extraer el 10%.
    */
   prizeToBalance: 'play' as const,
 
@@ -93,8 +112,8 @@ export const ECONOMY = {
   disclosure:
     'El premio sale del bote del campo: es el 95% de lo que puso todo el mundo ' +
     'en juego, menos el 5% de rake. Se reparte entre los primeros lugares y se ' +
-    'abona como saldo de promocion, que sirve para jugar en cualquier campo y no ' +
-    'se puede retirar.',
+    'abona como saldo de promocion: sirve para jugar en cualquier campo y se ' +
+    'desbloquea 1 de cada 10 a saldo retirable jugando.',
 } as const;
 
 /**
@@ -114,96 +133,253 @@ export const ECONOMY = {
 export const PAID_POSITIONS = FIELD_PAYOUT.length;
 
 /**
- * Campos cash con premio garantizado.
+/**
+ * Campos cash en USDT.
  *
- * `fieldSize` es el numero de participantes del campo completo (multi-mesa),
- * NO los asientos de una mesa. El premio es del campo entero y se reparte a las
- * primeras posiciones (ver `FIELD_PAYOUT`).
+ * ------------------------------------------------------------------
+ * LOS CUATRO NIVELES ESCALAN EN BUY-IN, NO EN TAMANO DE CAMPO
+ *
+ * Antes los cuatro tenian el mismo buy-in por jugador (2000 CUP el mas alto) y
+ * lo que variaba era `fieldSize` (50/100/300/500). Eso hacia que el campo de 50
+ * y el de 500 fueran el mismo juego con distinta duracion: el jugador no tenia
+ * motivo para elegir uno u otro, y el campo de 500 tardaba horas en llenarse con
+ * una base de usuarios pequeña.
+ *
+ * Ahora los cuatro escalan en buy-in y TODOS son de 300 participantes (43 mesas
+ * de 7). El jugador elige cuanto arriesga, y el tiempo de espera es siempre el
+ * mismo.
+ *
+ * ------------------------------------------------------------------
+ * LOS STAKES EN USDT, CON SU EQUIVALENTE EN CUP
+ *
+ *   nivel      buy-in    CUP       stack    bote bruto    rake    1o lugar
+ *   micro      1 USDT    120 CUP   50 BB      300 USDT     15       128 USDT
+ *   bajo       5 USDT    600 CUP   50 BB    1 500 USDT     75       641 USDT
+ *   medio     25 USDT  3 000 CUP  100 BB    7 500 USDT    375     3 206 USDT
+ *   alto     100 USDT 12 000 CUP  100 BB   30 000 USDT  1 500    12 825 USDT
+ *
+ * El micro a 1 USDT (120 CUP) es el nivel de entrada real: el deposito minimo de
+ * EnZona es de 500 CUP, o sea 4,17 USDT, con lo que se pueden comprar cuatro
+ * entradas. Sin ese nivel, un usuario|clubbersano que entra con 500 CUP no
+ * tiene nada que jugar.
+ *
+ * Los 100 USDT del nivel alto son un stack de poker serio. El rake de ese
+ * campo son 1 500 USDT por evento, que es lo que paga la infraestructura.
  */
 export interface TableTier {
   id: TableTierId;
-  /** Participantes totales del campo (multi-mesa) */
+  /** Participantes del campo (multi-mesa). 300 en los cuatro niveles. */
   fieldSize: number;
-  /** Premio total garantizado del campo, en CUP */
-  guaranteedPrize: number;
-  /** Buy-in minimo por jugador para poderouw registrarse */
-  minBuyIn: number;
-  /** Buy-in por defecto al registrarse */
-  defaultBuyIn: number;
+  /**
+   * Buy-in por jugador, en UNIDADES INTERNAS (1/1000 de USDT).
+   *
+   * Ojo: no es USDT. Las fichas del motor son enteras y un stack de 1 USDT con
+   * ciega de 0,02 no es representable en USDT enteros. Ver `config/units.ts`.
+   */
+  buyInUnits: number;
+
+  /** Buy-in en USDT, solo para la interfaz y los textos. */
+  buyInUsdt: number;
+
   label: string;
   description: string;
+
+  /**
+   * Ciegas en unidades internas.
+   *
+   * Se guardan aqui y no se derivan en el momento de crear la mesa, porque una
+   * ciega que dependa del redondeo en cada creacion puede dar dos valores
+   * distintos para el mismo tier, y eso hace que dos mesas del mismo nivel
+   * jueguen con stacks perceived distintos.
+   */
+  blinds: { small: number; big: number };
+
+  /** Stack de referencia en ciegas grandes, para mostrarlo en la UI. */
+  stackInBigBlinds: number;
 }
 
+/**
+ * Construye un tier.
+ *
+ * Las unidades internas se calculan UNA vez, al cargar el modulo, con
+ * `usdtToUnits()`. Es deterministico y no depende de cuando se llame.
+ *
+ * El `stackInBigBlinds` es informacion de UI: el stack en unidades dividido
+ * entre la ciega grande. Con buy-in de 1 USDT y ciega de 0,02, son 50 BB, que es
+ * un stack normal de poker.
+ */
+const tier = (
+  id: TableTierId,
+  label: string,
+  buyInUsdt: number,
+): TableTier => ({
+  id,
+  fieldSize: 300,
+  buyInUsdt,
+  buyInUnits: usdtToUnits(buyInUsdt),
+  blinds: blindsFor(buyInUsdt),
+  // Stack en ciegas grandes: unidades / ciega grande. Con 1 USDT y ciega de
+  // 0,02 son 50 BB.
+  stackInBigBlinds: Math.round(
+    usdtToUnits(buyInUsdt) / blindsFor(buyInUsdt).big,
+  ),
+  label,
+  description: `300 participantes · buy-in ${buyInUsdt} USDT`,
+});
+
 export const TABLE_TIERS: Record<TableTierId, TableTier> = {
-  t50: {
-    id: 't50',
-    fieldSize: 50,
-    guaranteedPrize: 50,
-    minBuyIn: 200,
-    defaultBuyIn: 500,
-    label: 'Campo 50',
-    description: '50 participantes · Premio 50 CUP',
-  },
-  t100: {
-    id: 't100',
-    fieldSize: 100,
-    guaranteedPrize: 100,
-    minBuyIn: 500,
-    defaultBuyIn: 1000,
-    label: 'Campo 100',
-    description: '100 participantes · Premio 100 CUP',
-  },
-  t300: {
-    id: 't300',
-    fieldSize: 300,
-    guaranteedPrize: 300,
-    minBuyIn: 1000,
-    defaultBuyIn: 2500,
-    label: 'Campo 300',
-    description: '300 participantes · Premio 300 CUP',
-  },
-  t500: {
-    id: 't500',
-    fieldSize: 500,
-    guaranteedPrize: 500,
-    minBuyIn: 2000,
-    defaultBuyIn: 5000,
-    label: 'Campo 500',
-    description: '500 participantes · Premio 500 CUP',
-  },
+  // Micro: 1000 unidades con ciega grande de 10 -> 100 BB de stack.
+  t1: tier('t1', 'Micro', 1),
+  t5: tier('t5', 'Bajo', 5),
+  t25: tier('t25', 'Medio', 25),
+  t100: tier('t100', 'Alto', 100),
 };
 
 export const TABLE_TIER_LIST: TableTier[] = [
-  TABLE_TIERS.t50,
+  TABLE_TIERS.t1,
+  TABLE_TIERS.t5,
+  TABLE_TIERS.t25,
   TABLE_TIERS.t100,
-  TABLE_TIERS.t300,
-  TABLE_TIERS.t500,
 ];
 
-/** Escalones de premio del freeroll, en CUP. */
-export const FREEROLL_PRIZES = [5, 10, 20, 30, 40, 50] as const;
+/**
+ * Escalones de freeroll, en USDT.
+ *
+ * El premio entra en `balance.play` (Promotional Dollars): no se retira
+ * directamente, se desbloquea jugando a ratio 1:10. Ver `UNLOCK_RATES`.
+ *
+ * WHY THESE AND NOT 5-50 CUP
+ * -------------------------
+ * Los numeros anteriores (5, 10, 20, 30, 40, 50 CUP) estaban calibrados a una
+ * moneda que ya no es la de la cuenta. Con la cuenta en USDT, un premio de 50
+ * CUP son 0,42 USDT: menos que una ronda de un centroll. Es un premio que no
+ * justifica entrar.
+ *
+ * La escala de aqui da algo con lo que se puede seguir jugando: ganar el
+ * escalon de 50 USDT da 50 USDT de promocion, con lo que se pueden comprar
+ * cinco entradas de campo micro o cincuenta centrolls. El freeroll tiene que
+ * ser una via de entrada, no un premio symbolic.
+ */
+export const FREEROLL_PRIZES = [1, 3, 10, 25, 50, 200] as const;
 
 /**
- * Participantes objetivo para que arranque el campo de un freeroll.
+ * Campo objetivo para que arranque un freeroll.
  *
- * El freeroll se ofrece como "ilimitado", y para el jugador lo es: no paga
- * nada. Pero un campo sin tope es un problema operativo. Con 20 000 inscritos
- * hacen falta casi 3 000 mesas de 7 y el campo tardaria horas en llegar a mesa
- * final, con los jugadores sentados esperando. Ademas, sin tope cerrado, un
- * mismo usuario podria abrir campos en bucle y acaparar los premios de
- * promocion (que, al ser no retirables, son dinero promotional y no real).
- *
- * 300-seat: unas 43 mesas de 7. Es un campo grande que se resuelve en un
- * intervalo razonable y hace que el premio de 50 CUP se sienta competitivo.
+ * 300 son 43 mesas de 7: grande, pero llega a mesa final en un rato. Un campo
+ * de 500 (72 mesas) tardaria horas en llenarse con la base de usuarios de un
+ * proyecto nuevo, y la gente se cansaria esperando.
  */
 export const FREEROLL_TARGET_FIELD = 300;
 
-/** Techo duro de inscritos por freeroll. Pasado esto, se cierra el campo. */
+/**
+ * Techo duro de inscritos por freeroll.
+ *
+ * "Ilimitado" no puede ser ilimitado de verdad. Con 20 000 inscritos harian
+ * falta casi 3 000 mesas y el campo tardaria horas en llegar a mesa final; sin
+ * tope, el mismo usuario podria abrir campos en bucle y acaparar los premios.
+ *
+ * El tope protege al operador. Por eso hay que anunciarlo en la UI: si el
+ * jugador se inscribe y el campo se cierra a 900, tiene que saberlo antes.
+ */
 export const FREEROLL_MAX_FIELD = 900;
 
-/** Reparto del freeroll segun posicion final (porcentaje del bote). */
+/**
+ * Reparto del freeroll segun posicion final (porcentaje del bote).
+ *
+ * Suma 100 porque el freeroll no aplica rake: todo el bote se reparte. Es lo
+ * unico que hace que un freeroll sea un giveaway real.
+ */
 export const FREEROLL_PAYOUT = [50, 30, 20] as const;
 
+// ==========================================================================
+// CENTROLLS
+// ==========================================================================
+
+/**
+ * Centroll: buy-in de 0,01 USDT que consume saldo REAL.
+ *
+ * ------------------------------------------------------------------
+ * QUE RESUELVE
+ *
+ * El freeroll de CubaPoker era gratis de verdad, sin ninguna via de ingresos:
+ * el operador pagaba el premio y no cobraba nada a cambio. CoinPoker tiene
+ * esta pieza y es la que hace su freeroll rentable:
+ *
+ *   "CoinPoker Centrolls: $0.01 Buy-Ins"
+ *   "These events require you to have a real money balance of at least $0.01"
+ *
+ * El bucle es: deposito -> centroll -> fichas de promocion -> centroll o
+ * freeroll. El centroll es el punto por el que entra el dinero real, y el
+ * freeroll es el que lo devuelve como fichas.
+ *
+ * Con el cambio a USDT, 0,01 USDT son 1,2 CUP: accesible para un usuario
+ * cubano, y sin una fraccion tan pequena que el sistema de fichas enteros no
+ * pueda representarla. Ese es el limite real: las fichas son enteras.
+ */
+export const CENTROLL = {
+  /** Buy-in en USDT. Con fichas enteras, 0,01 no es representable: ver abajo. */
+  buyInUsdt: 1,
+
+  /**
+   * TICKETS, no fichas.
+   *
+ * En CoinPoker el premio de un centroll es una entrada a un satelite, nunca
+   * dinero: "Do centrolls have cash prizes? No, all prizes in your centrolls are
+   * paid in the form of tickets".
+   *
+   * Aqui el equivalente al ticket es `balance.play`: acceso a mas centrolls y
+   * freerolls, que es exactamente la misma funcion sin la contabilidad extra de
+   * un inventario de tickets. El premio NO se convierte en saldo retirable mas
+   * que por la via normal de juego (1:10).
+   */
+  prizeToBalance: 'play' as const,
+
+  /** Multiplicador del premio sobre el buy-in. 30x es conservador para empezar. */
+  prizeMultiplier: 30,
+
+  /** Campo objetivo del centroll. Mas pequeno que el freeroll: es un bucle rapido. */
+  targetField: 100,
+
+  /** Techo duro. Mas bajo que el del freeroll: son mucho mas frecuentes. */
+  maxField: 300,
+
+  /** Cuantas veces se puede reentrar por $0,01, como CoinPoker. */
+  maxRebuys: 5,
+} as const;
+
+/**
+ * Rates de desbloqueo de `balance.play` a saldo retirable.
+ *
+ * ------------------------------------------------------------------
+ * MODELO COINPOKER, CON UNA EXCEPCION DELIBERADA
+ *
+ * CoinPoker (coinpoker.com/help/promotional-dollars/):
+ *
+ *   | Game        | Unlock Ratio |
+ *   | Cash Games  | 1:10         |
+ *   | Tournaments | 1:1          |
+ *
+ * Aplicamos 1:10 a TODO, incluidos los campos. La razon es que en CubaPoker los
+ * freerolls y los campos dan ENTRADA GRATIS: con 1:1, ganar un freeroll
+ * produciria saldo retirable sin haber depositado nunca, que es un dreno
+ * directo. Con 1:10 el premio es P$ y hay que jugarlas para extraer valor,
+ * perdiendo el 90% por el camino.
+ *
+ * Es una adaptacion consciente, no un descuido. Si alguna vez hay eventos
+ * con entrada de pago (torneos con buy-in de saldo real), 1:1 es
+ * razonable ahi y se puede anadir como contexto nuevo.
+ */
+export const UNLOCK_RATES = {
+  /** Mesas cash y campos Sit'n'Go: 1 de cada 10. */
+  cash: 0.1,
+  /** Freerolls: tambien 1:10, por el argumento del drenaje. */
+  freeroll: 0.1,
+  /** Centrolls: 1:10 tambien, porque dan entrada de pago pero el premio es P$. */
+  centroll: 0.1,
+} as const;
+
+/** Contextos en los que se puede desbloquear `balance.play`. */
+export type UnlockContext = keyof typeof UNLOCK_RATES;
 /**
  * REGLAS DE SALDO
  * ------------------------------------------------------------------

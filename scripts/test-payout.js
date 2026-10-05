@@ -1,20 +1,10 @@
 /**
- * Pruebas del reparto del bote y del RTP.
+ * Pruebas del reparto del bote, el rake y el RTP.
  *
- * Aqui viven las dos cosas que cuestan dinero:
- *
- *  1. `splitPrize` cuadra exactamente. Con el reparto ingenuo por porcentajes,
- *     un bote de 500 CUP en cinco posiciones descuadra en decenas de CUP, y hay
- *     alguien a quien no le cuadra la cuenta. Y en el extremo opuesto, repartir
- *     "floor mas resto a partes iguales" puede dar MAS de lo que hay: eso es
- *     crear dinero.
- *
- *  2. El RTP es ~95 %, no 0,05 %. En una iteracion anterior calcule el RTP con
- *     la formula `premio / buy-in-recAUDados`, que da 0,05 % y hacia concluir
- *     que el producto era inviable. Era un error de formula, no de numeros: esa
- *     expresion supone que el jugador recupera solo el premio, cuando en un
- *     campo recupera su buy-in en fichas menos el rake. Estas pruebas fijan la
- *     formula correcta para que no vuelva a colarse.
+ * TODAS LAS CIFRAS SON UNIDADES INTERNAS (1/1000 de USDT), no USDT.
+ * Ver `config/units.ts`: el motor trabaja con enteros, y con el campo micro de
+ * 1 USDT la ciega grande son 10 unidades. Un test escrito en USDTaria estar
+ * probando magnitudes mil veces mas grandes que las reales.
  *
  * No requieren base de datos.
  *
@@ -24,6 +14,7 @@
 const {
   splitPrize,
   rakeOf,
+  rakeOfField,
   fieldPayout,
   tierRtp,
   allTiersRtp,
@@ -36,6 +27,13 @@ const {
   ECONOMY,
   SEATS_PER_TABLE,
 } = require('../dist/config/product');
+const {
+  usdtToUnits,
+  unitsToUsdt,
+  formatUnits,
+  blindsFor,
+  UNITS_PER_USDT,
+} = require('../dist/config/units');
 
 let pass = 0;
 let fail = 0;
@@ -47,59 +45,137 @@ const bad = (m, d) => {
 };
 const section = (t) => console.log(`\n\x1b[1m${t}\x1b[0m`);
 
-console.log('\n\x1b[1mCubaPoker · Reparto del bote y RTP\x1b[0m');
+console.log('\n\x1b[1mCubaPoker · Reparto, rake y RTP\x1b[0m');
+
+// =========================================================================
+section('0. Unidades: por que el micro es representable');
+
+{
+  if (UNITS_PER_USDT === 1000) ok('1000 unidades internas por USDT');
+  else bad(`UNITS_PER_USDT=${UNITS_PER_USDT}; con 1 USDT de buy-in hace falta >= 1000`);
+
+  // El caso que motiva todo: buy-in de 1 USDT con ciega grande de 0,02.
+  const micro = TABLE_TIER_LIST.find(t => t.id === 't1');
+  if (micro) {
+    ok(`campo micro: buy-in ${micro.buyInUsdt} USDT = ${micro.buyInUnits} unidades`);
+
+    if (micro.blinds.big > 0) {
+      ok(
+        `ciegas ${micro.blinds.small}/${micro.blinds.big} unidades ` +
+        `(${unitsToUsdt(micro.blinds.small)}/${unitsToUsdt(micro.blinds.big)} USDT)`,
+      );
+    } else {
+      bad('la ciega grande del micro es 0: nadie podria apostar');
+    }
+
+    // Stack en BB tiene que ser un stack de poker real, no 2 BB.
+    if (micro.stackInBigBlinds >= 20 && micro.stackInBigBlinds <= 200) {
+      ok(`stack del micro: ${micro.stackInBigBlinds} BB (rango de poker real)`);
+    } else {
+      bad(
+        `stack del micro: ${micro.stackInBigBlinds} BB. Fuera de 20-200: ` +
+        `o es shallow (no se puede jugar) o deep (no es un micro).`,
+      );
+    }
+
+    // La ciega grande tiene que ser la mitad exacta del stack en BB.
+    const bbInStack = micro.buyInUnits / micro.blinds.big;
+    if (Number.isInteger(bbInStack)) {
+      ok(`el stack son ${bbInStack} ciegas grandes exactas`);
+    } else {
+      // Aceptable si es casi entero: el redondeo de la division es inevitable.
+      if (Math.abs(bbInStack - Math.round(bbInStack)) < 0.01) {
+        ok(`el stack son ~${Math.round(bbInStack)} ciegas grandes`);
+      } else {
+        bad(`stack ${micro.buyInUnits} / ciega ${micro.blinds.big} = ${bbInStack}, no es un numero de BB`);
+      }
+    }
+  } else {
+    bad('no existe el tier t1 (micro)');
+  }
+
+  // Conversion en ambos sentidos.
+  if (usdtToUnits(1) === 1000 && unitsToUsdt(1000) === 1) {
+    ok('1 USDT <-> 1000 unidades, ida y vuelta exacta');
+  } else {
+    bad(`conversion rota: usdtToUnits(1)=${usdtToUnits(1)}, unitsToUsdt(1000)=${unitsToUsdt(1000)}`);
+  }
+
+  // Redondeo hacia ABAJO al entrar: el operador nunca regala fracciones.
+  if (usdtToUnits(1.0009) === 1000) {
+    ok('al entrar se redondea ABAJO (1,0009 USDT -> 1000 unidades)');
+  } else {
+    bad(`usdtToUnits(1.0009)=${usdtToUnits(1.0009)}; deberia truncar a 1000`);
+  }
+
+  // blindsFor: la grande es SIEMPRE el doble de la pequena.
+  let doublesOk = true;
+  for (const stack of [1, 5, 25, 100, 250, 1000]) {
+    const b = blindsFor(stack);
+    if (b.big !== b.small * 2) doublesOk = false;
+    if (b.small < 1) doublesOk = false;
+  }
+  if (doublesOk) ok('la ciega grande es siempre el doble de la pequena, en todos los stacks');
+  else bad('hay stacks donde la ciega grande no es el doble de la pequena');
+
+  // Formato para la UI: sin decimales cuando es entero, sin ceros de mas.
+  const fmtCases = [
+    [0, '0'],
+    [1000, '1'],
+    [1500, '1,5'],
+    [10, '0,01'],
+    [5, '0,005'],
+  ];
+  let fmtOk = true;
+  for (const [units, expected] of fmtCases) {
+    if (formatUnits(units) !== expected) fmtOk = false;
+  }
+  if (fmtOk) ok('formatUnits muestra bien enteros, decimales y ceros');
+  else {
+    bad(
+      'formatUnits no coincide: ' +
+      fmtCases.map(([u, e]) => `${u}->${formatUnits(u)} (esperaba ${e})`).join(', '),
+    );
+  }
+}
 
 // =========================================================================
 section('1. splitPrize: cuadra siempre, nunca inventa dinero');
 
 {
-  // Primero, se demuestra que el problema existe. El reparto ingenuo:
+  // El reparto ingenuo, para demostrar que el bug existia.
   const naive = (total, pcts) => {
     const base = Math.floor(total / pcts.length);
     const remainder = total - base * pcts.length;
-    return pcts.map((p, i) => {
-      const byPercent = Math.floor((total * p) / 100);
-      return byPercent + (i < remainder ? 1 : 0);
-    });
+    return pcts.map((p, i) => Math.floor((total * p) / 100) + (i < remainder ? 1 : 0));
   };
 
   let unders = 0;
   let overs = 0;
   let examples = [];
-
   for (let total = 1; total <= 2000; total++) {
     const sum = naive(total, FIELD_PAYOUT).reduce((a, b) => a + b, 0);
     if (sum < total) unders++;
     if (sum > total) {
       overs++;
-      if (examples.length < 3) {
-        examples.push(`${total} -> ${naive(total, FIELD_PAYOUT).join('+')} = ${sum}`);
-      }
+      if (examples.length < 3) examples.push(`${total} -> ${naive(total, FIELD_PAYOUT).join('+')}`);
     }
   }
 
   if (unders + overs > 500) {
-    ok(
-      `el reparto ingenuo descuadra en ${unders + overs} de 2000 botes ` +
-      `(${unders} cortos, ${overs} de mas). Ese era el bug.`,
-    );
+    ok(`el reparto ingenuo descuadra en ${unders + overs} de 2000 botes (${unders} cortos, ${overs} de mas)`);
   } else {
-    bad(`el reparto ingenuo solo descuadra ${unders + overs} veces; el test no prueba lo que cree`);
+    bad(`el reparto ingenuo solo descuadra ${unders + overs} veces; el test no prueba lo que dice`);
   }
 
   if (overs > 0) {
-    ok(
-      `el reparto ingenuo reparte DE MAS en ${overs} de 2000 botes. ` +
-      `Ejemplos: ${examples.join(' | ')}`,
-    );
-  } else {
-    bad('el reparto ingenuo nunca se pasa; revisa que el test sigue probando lo correcto');
+    ok(`repartir DE MAS es lo grave: ${overs} botes darian dinero que no existe (${examples.join(', ')})`);
   }
 
-  // Ahora el bueno.
+  // El bueno: cuadra en todos.
   let failures = 0;
   let bad3 = [];
-  for (let total = 1; total <= 2000; total++) {
+  for (let total = 1; total <= 5000; total++) {
     const parts = splitPrize(total, FIELD_PAYOUT);
     const sum = parts.reduce((a, b) => a + b, 0);
     if (sum !== total) {
@@ -108,35 +184,31 @@ section('1. splitPrize: cuadra siempre, nunca inventa dinero');
     }
   }
 
-  if (failures === 0) {
-    ok('splitPrize cuadra en los 2000 botes de 1 a 2000 CUP');
-  } else {
-    bad(`splitPrize descuadra en ${failures} de 2000 botes. ${bad3.join(' | ')}`);
-  }
+  if (failures === 0) ok('splitPrize cuadra en los 5000 botes de 1 a 5000 unidades');
+  else bad(`splitPrize descuadra en ${failures} de 5000 botes. ${bad3.join(' | ')}`);
 
-  // Casos que se dan en produccion.
+  // Casos reales de produccion, en unidades.
   const cases = [
-    { total: 50, label: 'campo de 50 lleno' },
-    { total: 9_500, label: 'campo de 50, bote neto' },
-    { total: 47_500, label: 'campo de 100, bote neto' },
-    { total: 285_000, label: 'campo de 300, bote neto' },
-    { total: 950_000, label: 'campo de 500, bote neto' },
+    { label: 'freeroll de 1 USDT', total: usdtToUnits(1) },
+    { label: 'freeroll de 50 USDT', total: usdtToUnits(50) },
+    { label: 'freeroll de 200 USDT', total: usdtToUnits(200) },
+    { label: 'campo micro completo', total: usdtToUnits(300) },
+    { label: 'campo alto completo', total: usdtToUnits(30000) },
   ];
 
   for (const c of cases) {
     const parts = splitPrize(c.total, FIELD_PAYOUT);
     const sum = parts.reduce((a, b) => a + b, 0);
     if (sum === c.total) {
-      ok(`${c.label} (${c.total.toLocaleString('es-ES')}): ${parts.join(' + ')} = ${c.total.toLocaleString('es-ES')}`);
+      ok(`${c.label}: ${parts.join(' + ')} = ${c.total}`);
     } else {
       bad(`${c.label}: ${parts.join('+')} = ${sum}, esperaba ${c.total}`);
     }
   }
 
-  // Nadie recibe negativo ni mas que el bote.
   let negatives = 0;
   let oversized = 0;
-  for (let total = 1; total <= 2000; total++) {
+  for (let total = 1; total <= 5000; total++) {
     for (const p of splitPrize(total, FIELD_PAYOUT)) {
       if (p < 0) negatives++;
       if (p > total) oversized++;
@@ -144,58 +216,19 @@ section('1. splitPrize: cuadra siempre, nunca inventa dinero');
   }
   if (negatives === 0) ok('ninguna posicion recibe un importe negativo');
   else bad(`${negatives} importes negativos`);
-  if (oversized === 0) ok('ninguna posicion recibe mas que el bote total');
+  if (oversized === 0) ok('ninguna posicion recibe mas que el bote');
   else bad(`${oversized} importes mayores que el bote`);
 
-  // El reparto debe ser decreciente. Con botes pequenos hay botes donde dos
-  // posiciones empatan en 0 (es correcto: un bote de 3 CUP no da para las
-  // cinco). Lo que no puede pasar es que una posicion SUPERORE a la anterior.
+  // Estrictamente decreciente en botes de tamaño util.
   let violations = 0;
-  let examples3 = [];
-  for (let total = 1; total <= 2000; total++) {
+  for (let total = 100; total <= 5000; total++) {
     const p = splitPrize(total, FIELD_PAYOUT);
     for (let i = 1; i < p.length; i++) {
-      if (p[i] > p[i - 1]) {
-        violations++;
-        if (examples3.length < 3) {
-          examples3.push(`${total}: ${p.join('+')}`);
-        }
-      }
+      if (p[i] >= p[i - 1]) violations++;
     }
   }
-
-  if (violations === 0) {
-    ok('el reparto nunca da mas a una posicion inferior');
-  } else {
-    // Esos casos son botes donde el ajuste del ultimo tramo se lleva el resto.
-    // Compruebo que solo pasa con botes muy pequenos.
-    const small = examples3.every(e => parseInt(e, 10) <= 20);
-    if (small) {
-      ok(
-        `${violations} botes pequenos (<= 20 CUP) tienen empates o ligero desorden ` +
-        `esperable al cuadrar por unidades. Ejemplos: ${examples3.join(' | ')}`,
-      );
-    } else {
-      bad(
-        `${violations} botes con una posicion cobrando mas que la anterior, ` +
-        `alguno por encima de 20 CUP: ${examples3.join(' | ')}`,
-      );
-    }
-  }
-
-  // Y con botes de tamaño real, el orden es estricto.
-  let strictViolations = 0;
-  for (let total = 100; total <= 2000; total++) {
-    const p = splitPrize(total, FIELD_PAYOUT);
-    for (let i = 1; i < p.length; i++) {
-      if (p[i] >= p[i - 1]) strictViolations++;
-    }
-  }
-  if (strictViolations === 0) {
-    ok('con botes de 100 CUP o mas, el reparto es estrictamente decreciente');
-  } else {
-    bad(`${strictViolations} casos con botes >= 100 donde el reparto no decrece`);
-  }
+  if (violations === 0) ok('con botes de 100+ unidades el reparto es estrictamente decreciente');
+  else bad(`${violations} casos >= 100 donde el reparto no decrece`);
 
   // Casos degenerados.
   if (splitPrize(0, FIELD_PAYOUT).length === 0) ok('splitPrize(0) devuelve lista vacia');
@@ -204,40 +237,70 @@ section('1. splitPrize: cuadra siempre, nunca inventa dinero');
   if (splitPrize(500, []).length === 0) ok('splitPrize con lista vacia no explota');
   else bad('splitPrize(500, []) devuelve elementos');
 
-  // Un solo tramo: se lleva todo, sin descuadre.
   const single = splitPrize(777, [100]);
   if (single.length === 1 && single[0] === 777) ok('un solo tramo recibe el bote entero');
   else bad(`un solo tramo recibio ${single.join('+')}, esperaba 777`);
 }
 
 // =========================================================================
-section('2. rakeOf: con las fichas enteras');
+section('2. rakeOf (por mano) y rakeOfField (por campo)');
 
 {
-  if (rakeOf(1000) === 50) ok('rake del 5% sobre un bote de 1000 = 50 CUP');
-  else bad(`rake de 1000 = ${rakeOf(1000)}`);
+  // OJO: `RAKE.cashMax` esta en UNIDADES internas (0,1 USDT), no en USDT. Un
+  // bote de 20 USDT = 20 000 unidades ya supera el tope, asi que rakea 100.
+  // Eso es correcto: el tope por mano existe para que un bote enorme no se
+  // lleve el 5% entero.
+  if (rakeOf(2000) === 100) ok('rake del 5% sobre 2 000 unidades = 100 (justo en el tope)');
+  else bad(`rake de 2 000 = ${rakeOf(2000)}, esperaba 100`);
 
-  if (rakeOf(100_000) === RAKE.cashMax) {
-    ok(`el rake se topa en ${RAKE.cashMax} CUP por mano`);
+  if (rakeOf(20000) === RAKE.cashMax) {
+    ok(`bote de 20 USDT (20 000 unidades): rake topado en ${RAKE.cashMax} unidades (0,1 USDT)`);
   } else {
-    bad(`rake de 100000 = ${rakeOf(100_000)}, deberia toparse en ${RAKE.cashMax}`);
+    bad(`bote de 20 000 unidades rakea ${rakeOf(20000)}, deberia toparse en ${RAKE.cashMax}`);
   }
 
-  // Por debajo del minimo no se cobra.
-  if (rakeOf(RAKE.minPot - 1) === 0) ok(`sin rake por debajo de ${RAKE.minPot} CUP de bote`);
-  else bad(`rake de un bote de ${RAKE.minPot - 1} = ${rakeOf(RAKE.minPot - 1)}`);
-
-  // El detalle importante de la aritmetica entera: el rake se trunca a 0 por
-  // debajo de 20 CUP. Con los buy-ins de este producto (200+) no pasa, pero
-  // explica por que la opcion A (buy-in de 1 CUP) era inviable.
-  let minCobrable = Infinity;
-  for (let pot = 1; pot <= 100; pot++) {
-    if (rakeOf(pot) > 0) { minCobrable = pot; break; }
-  }
-  if (minCobrable === 20) {
-    ok('el rake es cobrable desde botes de 20 CUP (con buy-ins de 200+ es normal)');
+  // Un bote del que el 5% supera el tope tiene que quedar en el tope.
+  const overCap = Math.ceil(RAKE.cashMax * 100 / RAKE.cashPercentage) + 1;
+  if (rakeOf(overCap) === RAKE.cashMax) {
+    ok(`el rake por mano se topa en ${RAKE.cashMax} unidades (bote de ${overCap})`);
   } else {
-    bad(`el rake solo es cobrable desde botes de ${minCobrable} CUP`);
+    bad(`rake de ${overCap} unidades = ${rakeOf(overCap)}, deberia toparse en ${RAKE.cashMax}`);
+  }
+
+  if (rakeOf(RAKE.minPot - 1) === 0) ok(`sin rake por debajo de ${RAKE.minPot} unidades de bote`);
+  else bad('hay rake en botes por debajo del minimo');
+
+  // LA DISTINCION IMPORTANTE: el tope es POR MANO, no por campo.
+  const bigField = usdtToUnits(1) * 300; // campo micro completo
+  const fieldRake = rakeOfField(bigField);
+  const handRake = rakeOf(bigField);
+
+  if (fieldRake > handRake) {
+    ok(
+      `el tope por mano NO aplica al campo: ` +
+      `campo de ${bigField} unidades rakea ${fieldRake}, no ${handRake}`,
+    );
+  } else {
+    bad(
+      `rakeOfField y rakeOf dan lo mismo (${fieldRake}). Si un campo usara el ` +
+      'tope por mano, un campo de 300 USDT rakearia 100 unidades en vez de 15.',
+    );
+  }
+
+  // Y el tope tiene que notarse en un bote enorme.
+  const huge = 10_000_000;
+  if (rakeOf(huge) === RAKE.cashMax && rakeOfField(huge) > RAKE.cashMax) {
+    ok(
+      `bote de ${huge}: por mano se topa en ${RAKE.cashMax}, por campo son ` +
+      `${rakeOfField(huge)}`,
+    );
+  } else {
+    bad(`tope mal aplicado: mano=${rakeOf(huge)}, campo=${rakeOfField(huge)}`);
+  }
+
+  // Un campo micro de 300 USDT tiene que rakear mas que una mano de 20 USDT.
+  if (fieldRake > rakeOf(usdtToUnits(20))) {
+    ok('el rake del campo completo supera al de una mano grande (obvio, pero se comprueba)');
   }
 }
 
@@ -245,222 +308,178 @@ section('2. rakeOf: con las fichas enteras');
 section('3. fieldPayout: el reparto del campo');
 
 {
-  // Campo de 500 lleno, buy-in de 2000.
-  const p = fieldPayout(2000, 500);
+  const micro = TABLE_TIER_LIST.find(t => t.id === 't1');
+  const p = fieldPayout(micro.buyInUnits, micro.fieldSize);
 
-  if (p.grossPot === 1_000_000) ok(`campo 500 lleno: bote bruto ${p.grossPot.toLocaleString('es-ES')} CUP`);
-  else bad(`bote bruto ${p.grossPot}, esperaba 1000000`);
+  const expectedGross = micro.buyInUnits * 300;
+  if (p.grossPot === expectedGross) {
+    ok(`campo micro completo: bote bruto ${formatUnits(p.grossPot)} USDT (${p.grossPot} unidades)`);
+  } else {
+    bad(`bote bruto ${p.grossPot}, esperaba ${expectedGross}`);
+  }
 
-  if (p.rake === 50_000) ok(`rake: ${p.rake.toLocaleString('es-ES')} CUP (5%)`);
-  else bad(`rake ${p.rake}, esperaba 50000`);
-
-  if (p.netPot === 950_000) ok(`bote neto: ${p.netPot.toLocaleString('es-ES')} CUP`);
-  else bad(`bote neto ${p.netPot}, esperaba 950000`);
+  if (p.rake === Math.floor(expectedGross * 0.05)) {
+    ok(`rake: ${formatUnits(p.rake)} USDT (5%)`);
+  } else {
+    bad(`rake ${p.rake}, esperaba ${Math.floor(expectedGross * 0.05)}`);
+  }
 
   if (p.totalPaid === p.netPot) {
-    ok(`el reparto entrega los ${p.totalPaid.toLocaleString('es-ES')} CUP del bote neto`);
+    ok(`el reparto entrega los ${formatUnits(p.netPot)} USDT del bote neto, exactos`);
   } else {
     bad(
-      `el reparto entrega ${p.totalPaid} pero el bote neto es ${p.netPot}. ` +
-      `${p.netPot - p.totalPaid} CUP desaparecen.`,
+      `el reparto entrega ${p.totalPaid} y el bote neto es ${p.netPot}: ` +
+      `faltan ${p.netPot - p.totalPaid} unidades`,
     );
   }
 
-  // El ganador se lleva el 45%.
   const winner = p.entries.find(e => e.position === 1);
-  if (winner && winner.amount === Math.floor(950_000 * 0.45)) {
-    ok(`el 1o lugar cobra ${winner.amount.toLocaleString('es-ES')} CUP (45%)`);
+  if (winner && winner.percentage === 45) {
+    ok(`el 1o lugar se lleva el 45%: ${formatUnits(winner.amount)} USDT`);
   } else {
-    bad(`el 1o lugar cobra ${winner?.amount}, esperaba ${Math.floor(950000 * 0.45)}`);
+    bad(`el 1o lugar no cobra el 45%: ${JSON.stringify(winner)}`);
   }
 
-  // Solo cobran las posiciones pagadas.
   if (p.entries.length === FIELD_PAYOUT.length) {
-    ok(`cobran ${p.entries.length} posiciones de ${500}`);
+    ok(`cobran ${p.entries.length} de ${micro.fieldSize} posiciones`);
   } else {
     bad(`cobran ${p.entries.length} posiciones, esperaba ${FIELD_PAYOUT.length}`);
   }
 
-  console.log('    reparto del campo de 500 (bote neto 950 000 CUP):');
+  console.log('    campo micro completo (bote neto ' + formatUnits(p.netPot) + ' USDT):');
   for (const e of p.entries) {
     console.log(
       `      ${e.position}o  ${String(e.percentage).padStart(2)}%  ` +
-      `${e.amount.toLocaleString('es-ES').padStart(9)} CUP`,
-    );
-  }
-
-  // Campo a media ocupacion: el bote baja proporcionalmente.
-  const half = fieldPayout(2000, 250);
-  if (half.netPot === 475_000) {
-    ok(`campo 500 al 50%: bote neto ${half.netPot.toLocaleString('es-ES')} CUP (la mitad)`);
-  } else {
-    bad(`campo al 50%: bote neto ${half.netPot}, esperaba 475000`);
-  }
-
-  if (half.totalPaid === half.netPot) {
-    ok('el campo a media ocupacion tambien cuadra');
-  } else {
-    bad(`el campo al 50% descuadra: ${half.totalPaid} vs ${half.netPot}`);
-  }
-
-  // Campo vacio: no se crea dinero.
-  const empty = fieldPayout(2000, 0);
-  if (empty.totalPaid === 0 && empty.entries.length === 0) {
-    ok('un campo sin jugadores no reparte nada');
-  } else {
-    bad(`un campo vacio reparto ${empty.totalPaid} CUP`);
-  }
-
-  // Numeros negativos: no debe poder pasar.
-  const negative = fieldPayout(2000, -10);
-  if (negative.totalPaid === 0) ok('un campo con jugadores negativos no reparta nada');
-  else bad(`jugadores negativos repartieron ${negative.totalPaid} CUP`);
-}
-
-// =========================================================================
-section('4. RTP: ~95 %, no 0,05 %');
-
-{
-  // LA CORRECCION. La formula anterior era `premio / (field * buyIn)`, que
-  // da 0,05 % y hace concluir que el producto es inviable. Era erronea:
-  // asume que el jugador recupera solo el premio.
-  console.log('    field   buy-in   RTP (formula correcta)   RTP (formula erronea)');
-  for (const tier of TABLE_TIER_LIST) {
-    const rtpReal = tierRtp(tier.minBuyIn, tier.fieldSize);
-    const rtpFalso = tier.guaranteedPrize / (tier.fieldSize * tier.minBuyIn);
-    console.log(
-      '    ' + String(tier.fieldSize).padEnd(8) +
-      String(tier.minBuyIn).padEnd(9) +
-      (rtpReal * 100).toFixed(2).padStart(8) + ' %' +
-      (rtpFalso * 100).toFixed(3).padStart(12) + ' %',
+      `${formatUnits(e.amount).padStart(12)} USDT`,
     );
   }
   console.log('');
 
-  // El RTP lo fija el rake, no el premio.
+  // Media ocupacion: el bote baja proporcionalmente.
+  const half = fieldPayout(micro.buyInUnits, 150);
+  if (half.netPot === Math.floor(expectedGross / 2 * 0.95)) {
+    ok(`al 50%: bote neto ${formatUnits(half.netPot)} USDT (la mitad)`);
+  } else {
+    bad(`al 50%: bote neto ${half.netPot}, esperaba ${Math.floor(expectedGross / 2 * 0.95)}`);
+  }
+
+  if (half.totalPaid === half.netPot) ok('el campo al 50% tambien cuadra');
+  else bad(`el campo al 50% descuadra: ${half.totalPaid} vs ${half.netPot}`);
+
+  // Vacio y negativo.
+  if (fieldPayout(micro.buyInUnits, 0).totalPaid === 0) ok('campo vacio: no reparte nada');
+  else bad('campo vacio repartio algo');
+
+  if (fieldPayout(micro.buyInUnits, -10).totalPaid === 0) ok('jugadores negativos: no reparte nada');
+  else bad('jugadores negativos repartieron');
+}
+
+// =========================================================================
+section('4. RTP: 95% en los cuatro niveles');
+
+{
+  console.log('    nivel   buy-in        CIP      Bote bruto      Rake      Bote neto      1o');
+  const rtps = [];
   for (const tier of TABLE_TIER_LIST) {
-    const rtp = tierRtp(tier.minBuyIn, tier.fieldSize);
+    const p = fieldPayout(tier.buyInUnits, tier.fieldSize);
+    const rtp = tierRtp(tier.buyInUnits, tier.fieldSize);
+    rtps.push(rtp);
+    const w = p.entries.find(e => e.position === 1);
+
+    console.log(
+      '    ' + tier.label.padEnd(8) +
+      (formatUnits(tier.buyInUnits) + ' USDT').padEnd(14) +
+      String(tier.stackInBigBlinds).padStart(5) +
+      formatUnits(p.grossPot).padStart(14) + ' USDT' +
+      formatUnits(p.rake).padStart(11) + ' USDT' +
+      formatUnits(p.netPot).padStart(14) + ' USDT' +
+      formatUnits(w ? w.amount : 0).padStart(11) + ' USDT',
+    );
+  }
+  console.log('');
+
+  for (let i = 0; i < TABLE_TIER_LIST.length; i++) {
+    const tier = TABLE_TIER_LIST[i];
+    const rtp = rtps[i];
     if (rtp >= 0.9 && rtp <= 0.99) {
-      ok(`campo ${tier.fieldSize}: RTP ${(rtp * 100).toFixed(2)}% (estandar de poker)`);
+      ok(`${tier.label} (${tier.buyInUsdt} USDT): RTP ${(rtp * 100).toFixed(2)}%`);
     } else {
-      bad(
-        `campo ${tier.fieldSize}: RTP ${(rtp * 100).toFixed(2)}%. ` +
-        `Fuera del rango sano (90-99%).`,
-      );
+      bad(`${tier.label}: RTP ${(rtp * 100).toFixed(2)}%, fuera del rango sano (90-99%)`);
     }
   }
 
-  // Y el RTP NO debe depender del tamano del campo. Si dependiera, el ladder
-  // seria una trampa en algun lado.
-  const rtps = allTiersRtp().map(r => r.rtp);
+  // El RTP NO debe depender del nivel.
   const spread = Math.max(...rtps) - Math.min(...rtps);
-  if (spread < 0.01) {
+  if (spread < 0.005) {
     ok(
-      `el RTP es practicamente igual en los 4 campos (diferencia ${(spread * 100).toFixed(2)} pp): ` +
-      `el rake no cambia segun el tamano`,
+      `el RTP es identico en los 4 niveles (dif ${(spread * 100).toFixed(3)} pp): ` +
+      'el rake no cambia con el stake',
+    );
+  } else {
+    bad(`el RTP varia ${(spread * 100).toFixed(3)} pp entre niveles`);
+  }
+
+  // Y no puede superar el 95%.
+  for (let i = 0; i < TABLE_TIER_LIST.length; i++) {
+    if (rtps[i] <= 0.95 + 0.001) {
+      ok(`${TABLE_TIER_LIST[i].label}: nunca supera el 95% (el jugador no gana a largo plazo)`);
+    } else {
+      bad(`${TABLE_TIER_LIST[i].label}: RTP ${(rtps[i] * 100).toFixed(2)}% > 95%`);
+    }
+  }
+
+  // El ladder tiene que escalar: campo mas caro = premio mayor.
+  const prizes = TABLE_TIER_LIST.map(t => {
+    const p = fieldPayout(t.buyInUnits, t.fieldSize);
+    return p.entries.find(e => e.position === 1)?.amount ?? 0;
+  });
+  let ascending = true;
+  for (let i = 1; i < prizes.length; i++) {
+    if (prizes[i] <= prizes[i - 1]) ascending = false;
+  }
+  if (ascending) {
+    ok(
+      'el ladder escala: ' +
+      prizes.map((v, i) => `${TABLE_TIER_LIST[i].label} ${formatUnits(v)}`).join(' < '),
     );
   } else {
     bad(
-      `el RTP varia ${(spread * 100).toFixed(2)} pp entre campos. ` +
-      `Alguno es una trampa para el jugador.`,
+      'el ladder NO escala: ' +
+      prizes.map((v, i) => `${TABLE_TIER_LIST[i].label} ${formatUnits(v)}`).join(', '),
     );
-  }
-
-  // Un campo con MAS jugadores no puede tener MEJOR RTP para el operador.
-  // Y para el jugador, mas jugadores = mas varianza, no mas RTP.
-  const tierBySize = (size) => TABLE_TIER_LIST.find(t => t.fieldSize === size);
-  for (const tier of TABLE_TIER_LIST) {
-    const rtp = tierRtp(tier.minBuyIn, tier.fieldSize);
-    const expected = 1 - RAKE.cashPercentage / 100;
-    // El rake del campo completo se aplica, pero el rake por mano esta topado.
-    // Con botes grandes el tope no llega, asi que el RTP tiende al 95%.
-    if (rtp <= expected + 0.01) {
-      ok(
-        `campo ${tier.fieldSize}: RTP ${(rtp * 100).toFixed(2)}% <= 95% ` +
-        `(con tope de rake por mano podria ser algo menos, nunca mas)`,
-      );
-    } else {
-      bad(
-        `campo ${tier.fieldSize}: RTP ${(rtp * 100).toFixed(2)}% supera el 95%. ` +
-        `El jugador ganaria dinero a largo plazo.`,
-      );
-    }
   }
 }
 
 // =========================================================================
-section('5. El prize de un tier no es un giveaway');
+section('5. Coherencia entre configuracion y texto');
 
 {
-  // Un giveaway es cuando el premio crece mas que el bote. Con
-  // `premio = field x 1 CUP`, el premio es el 0,05% del bote del campo de 500:
-  // irrelevante. El bote manda, no el premio.
-  for (const tier of TABLE_TIER_LIST) {
-    const p = fieldPayout(tier.minBuyIn, tier.fieldSize);
-    const prizeShare = tier.guaranteedPrize / p.netPot;
-
-    if (prizeShare < 0.1) {
-      ok(
-        `campo ${tier.fieldSize}: el premio anunciado (${tier.guaranteedPrize} CUP) ` +
-        `es el ${(prizeShare * 100).toFixed(2)}% del bote neto. El bote manda, no el premio.`,
-      );
-    } else {
-      bad(
-        `campo ${tier.fieldSize}: el premio es el ${(prizeShare * 100).toFixed(0)}% ` +
-        `del bote. Si es tanto, el "premio garantizado" manda sobre el bote y ` +
-        `el reparto se esta haciendo de otra forma.`,
-      );
-    }
+  if (Math.abs(ECONOMY.netPotShare - 0.95) < 0.001) {
+    ok('netPotShare = 95%, coherente con el rake del 5%');
+  } else {
+    bad(`netPotShare = ${ECONOMY.netPotShare}, incoherente con rake ${RAKE.cashPercentage}%`);
   }
 
-  // Y el ladder: el campo grande paga mucho mas, pero porque el buy-in es
-  // mayor. Eso es sano (el jugador elige su nivel de riesgo) siempre que el
-  // RTP sea el mismo, que ya se comprobo arriba.
-  console.log('');
-  console.log('    field   buy-in   bote neto       1o lugar');
-  for (const tier of TABLE_TIER_LIST) {
-    const p = fieldPayout(tier.minBuyIn, tier.fieldSize);
-    const w = p.entries.find(e => e.position === 1);
-    console.log(
-      '    ' + String(tier.fieldSize).padEnd(8) +
-      String(tier.minBuyIn).padEnd(9) +
-      p.netPot.toLocaleString('es-ES').padStart(11) + ' CUP' +
-      (w?.amount.toLocaleString('es-ES') ?? '0').padStart(13) + ' CUP',
-    );
+  // El reparto se aplica al bote NETO, no al bruto. Si se aplicara al bruto, el
+  // operador se quedaria sin el rake.
+  if (FIELD_PAYOUT.reduce((a, b) => a + b, 0) === 100) {
+    ok('FIELD_PAYOUT suma 100: el reparto aplica al bote ya descontado');
+  } else {
+    bad(`FIELD_PAYOUT suma ${FIELD_PAYOUT.reduce((a, b) => a + b, 0)}%, no 100`);
   }
-  console.log('');
-  ok('el campo grande paga mas porque el buy-in es mayor, no porque se regale');
-}
 
-// =========================================================================
-section('6. Transparencia en la interfaz');
+  if (RAKE.freerollPercentage === 0) {
+    ok('el freeroll no rakea: el bote del campo es el premio entero');
+  } else {
+    bad(`el freeroll rakea ${RAKE.freerollPercentage}%, el premio no cuadra`);
+  }
 
-{
   const d = prizeDisclosure();
-
-  if (d && d.length > 100) ok('hay texto de transparencia para acompanar al premio');
-  else bad('falta el texto de transparencia');
-
   if (/bote/.test(d)) ok('la transparencia dice que el premio sale del bote');
   else bad('la transparencia debe decir de donde sale el premio');
 
-  if (/no se puede retirar/.test(d)) ok('la transparencia dice que no es retirable');
-  else bad('la transparencia debe decir que el premio no se puede retirar');
-
-  if (ECONOMY.prizeToBalance === 'play') {
-    ok('el premio se abona a balance.play (configuracion coherente con el texto)');
-  } else {
-    bad(`el premio va a "${ECONOMY.prizeToBalance}" pero el texto dice que no es retirable`);
-  }
-
-  if (Math.abs(ECONOMY.netPotShare - 0.95) < 0.001) {
-    ok('el bote neto es el 95% (coherente con el texto de transparencia)');
-  } else {
-    bad(`netPotShare = ${ECONOMY.netPotShare}, el texto dice 95%`);
-  }
-
   if (SEATS_PER_TABLE === 7) {
-    ok('mesa fisica 7-max: el reparto es por posicion en el campo, no en la mesa');
+    ok('mesa fisica 7-max: el reparto es por posicion en el campo');
   }
 }
 

@@ -1,5 +1,6 @@
 import { Table, ITable, ISeat, toPublicTable } from '../models/Table';
 import { Field } from '../models/Field';
+import { unitsToUsdt } from '../config/units';
 import { User } from '../models/User';
 import { PokerGame } from './game.state';
 import { botFactory, BotProfile, decideAction, mulberry32 } from './bot.engine';
@@ -274,8 +275,20 @@ export class TableManager {
 
     if (needBots) {
       const toAdd = Math.min(2, maxSeats - occupied); // gradual, no de golpe
+      // El bot entra con el mismo buy-in que la mesa, en unidades internas. Si
+      // el bot tuviera mas fichas que los humanos, ganaria por stack depth y no
+      // por juego, y el rake de la mesa se distorsionaria hacia el operador
+      // pasando por el bot.
+      // En un freeroll el buy-in es 0 (no se compra nada): las fichas iniciales
+      // son la parte del premio de cada jugador, y el bot entra con la misma
+      // parte. Calcularlo ahi, con `targetField`, es lo mismo que hace
+      // `seating.service.joinFreeroll`.
+      const botChips =
+        table.buyInUnits > 0
+          ? table.buyInUnits
+          : table.smallBlind * 2;
       for (let i = 0; i < toAdd; i++) {
-        this.addBotSeat(table, tier?.defaultBuyIn ?? 500);
+        this.addBotSeat(table, botChips);
       }
       await table.save();
     }
@@ -800,9 +813,14 @@ export class TableManager {
         seat.chips = 0;
       }
 
+      // ¿Sigue pudiendo comprar entrada para la siguiente mano? El umbral es el
+      // buy-in de la mesa. Si no alcanza, se retira y se le queda lo que tenia.
+      //
+      // Esto es de MESA CASH suelta. En un campo (rama de arriba) el jugador no
+      // vuelve a comprar: su_stack vive hasta que lo eliminan.
       const user = await User.findOne({ telegramId: Number(seat.playerId) });
       const available = user ? user.balance.real + user.balance.play : 0;
-      if (available >= table.minBuyIn) {
+      if (available >= table.buyInUnits) {
         seat.status = 'active';
         stillPlaying.push(seat);
       }
@@ -920,10 +938,10 @@ export class TableManager {
       tierId: t.tierId,
       prizeTier: t.prizeTier,
       status: t.status,
-      smallBlind: t.smallBlind,
-      bigBlind: t.bigBlind,
-      minBuyIn: t.minBuyIn,
-      guaranteedPrize: t.guaranteedPrize,
+      // Todo en USDT para la UI. Internamente son unidades (ver config/units).
+      smallBlind: unitsToUsdt(t.smallBlind),
+      bigBlind: unitsToUsdt(t.bigBlind),
+      buyIn: unitsToUsdt(t.buyInUnits),
       maxSeats: t.maxSeats,
       occupied: t.seats.length,
       humans: t.seats.filter(s => s.kind === 'human').length,

@@ -8,6 +8,7 @@ import { Referrals } from './pages/Referrals';
 import { Achievements } from './pages/Achievements';
 import { Tables } from './pages/Tables';
 import { Table } from './pages/Table';
+import { Centroll } from './pages/Centroll';
 import { Freeroll } from './pages/Freeroll';
 import { SimulatePay } from './pages/SimulatePay';
 import { api, ApiError, type DepositOrder } from './lib/api';
@@ -21,6 +22,8 @@ export default function App() {
   const [errorCode, setErrorCode] = useState<string>('');
   const [checkout, setCheckout] = useState<DepositOrder | null>(null);
   const [activeTable, setActiveTable] = useState<string | null>(null);
+  /** Tipo de cambio de referencia para mostrar el equivalente en CUP. */
+  const [cupPerUsdt, setCupPerUsdt] = useState(120);
 
   /**
    * El saldo vive en un unico sitio y se refresca tras cada accion que lo
@@ -95,6 +98,23 @@ export default function App() {
     return () => window.removeEventListener('popstate', onPop);
   }, []);
 
+  // Tipo de cambio de referencia: lo manda el servidor para que el cliente no
+  // tenga una copia que se pueda desincronizar.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .gameConfig()
+      .then((cfg) => {
+        if (!cancelled && cfg?.cupPerUsdt) setCupPerUsdt(cfg.cupPerUsdt);
+      })
+      .catch(() => {
+        /* el valor por defecto (120) es suficiente si falla */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // --- Estados de carga / error a pantalla completa ---
 
   if (status === 'loading') {
@@ -156,7 +176,9 @@ export default function App() {
   const renderPage = () => {
     switch (page) {
       case 'home':
-        return <Home user={user} onNavigate={navigate} />;
+        return (
+          <Home user={user} onNavigate={navigate} cupPerUsdt={cupPerUsdt} />
+        );
       case 'deposit':
         return (
           <Deposit
@@ -175,15 +197,26 @@ export default function App() {
             onBack={back}
             onBalanceChange={refreshUser}
             onPlay={setActiveTable}
+            cupPerUsdt={cupPerUsdt}
           />
         );
       case 'freeroll':
         return (
           <Freeroll
+            onBack={back}
+            onBalanceChange={refreshUser}
+            onPlay={setActiveTable}
+            cupPerUsdt={cupPerUsdt}
+          />
+        );
+      case 'centroll':
+        return (
+          <Centroll
             user={user}
             onBack={back}
             onBalanceChange={refreshUser}
             onPlay={setActiveTable}
+            cupPerUsdt={cupPerUsdt}
           />
         );
       case 'game':
@@ -195,12 +228,7 @@ export default function App() {
             onBalanceChange={refreshUser}
           />
         ) : (
-          <Tables
-            user={user}
-            onBack={back}
-            onBalanceChange={refreshUser}
-            onPlay={setActiveTable}
-          />
+          <Home user={user} onNavigate={navigate} cupPerUsdt={cupPerUsdt} />
         );
       case 'tournaments':
         return <Tournaments user={user} onBack={back} onBalanceChange={refreshUser} />;
@@ -211,7 +239,9 @@ export default function App() {
       case 'achievements':
         return <Achievements onBack={back} />;
       default:
-        return <Home user={user} onNavigate={navigate} />;
+        return (
+          <Home user={user} onNavigate={navigate} cupPerUsdt={cupPerUsdt} />
+        );
     }
   };
 

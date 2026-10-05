@@ -1,4 +1,5 @@
 import mongoose, { Document, Schema } from 'mongoose';
+import { unitsToUsdt } from '../config/units';
 
 /**
  * Estado de un asiento en la mesa.
@@ -83,9 +84,15 @@ export interface ITable extends Document {
 
   smallBlind: number;
   bigBlind: number;
-  minBuyIn: number;
-  /** Premio garantizado (cash) o bote del freeroll */
-  guaranteedPrize: number;
+  /**
+   * Buy-in de la mesa, en UNIDADES INTERNAS (1/1000 de USDT).
+   *
+   * No es `minBuyIn` como antes: en un campo el buy-in es unico y lo fija el
+   * tier. Antes cada mesa tenia su propio minimo y podia aceptar a alguien con
+   * menos fichas que los demas, lo que en un campo es una excepcion sin sentido:
+   * todos pagan lo mismo para tener las mismas fichas.
+   */
+  buyInUnits: number;
 
   seats: ISeat[];
   /** Asientos de esta mesa fisica. Siempre SEATS_PER_TABLE (7). */
@@ -190,8 +197,7 @@ const tableSchema = new Schema<ITable>({
 
   smallBlind: { type: Number, required: true },
   bigBlind: { type: Number, required: true },
-  minBuyIn: { type: Number, required: true },
-  guaranteedPrize: { type: Number, default: 0 },
+  buyInUnits: { type: Number, required: true },
 
   seats: { type: [seatSchema], default: [] },
   maxSeats: { type: Number, required: true },
@@ -250,8 +256,13 @@ export const toPublicTable = (table: ITable, viewerSeat?: number) => {
     status: table.status,
     smallBlind: table.smallBlind,
     bigBlind: table.bigBlind,
-    minBuyIn: table.minBuyIn,
-    guaranteedPrize: table.guaranteedPrize,
+    // El buy-in viaja en unidades internas, pero la UI lo necesita en USDT.
+    // Convertir aqui y no en el cliente: la regla de redondeo (hacia abajo al
+    // entrar, ver `config/units.ts`) tiene que ser la misma en todas partes.
+    buyInUnits: table.buyInUnits,
+    buyInUsdt: unitsToUsdt(table.buyInUnits),
+    smallBlindUsdt: unitsToUsdt(table.smallBlind),
+    bigBlindUsdt: unitsToUsdt(table.bigBlind),
 
     maxSeats: table.maxSeats,
     occupied: table.seats.length,

@@ -23,6 +23,8 @@ import {
   nextSeatable,
 } from './field.rules';
 import { logger } from '../utils/logger';
+import { formatUnits, unitsToUsdt } from '../config/units';
+import { unlockService } from '../services/unlock.service';
 
 /**
  * Gestor de campos multi-mesa.
@@ -107,7 +109,7 @@ export const fieldManager = {
       kind: 'cash',
       tierId,
       status: 'filling',
-      buyIn: tier.defaultBuyIn,
+      buyInUnits: tier.buyInUnits,
       targetField: tier.fieldSize,
       waiting: 0,
       seated: 0,
@@ -119,7 +121,7 @@ export const fieldManager = {
 
     logger.info(
       `Campo ${fieldId} abierto: ${tier.fieldSize} participantes, ` +
-      `premio del bote ${tier.defaultBuyIn * tier.fieldSize} CUP, ` +
+      `bote bruto ${formatUnits(tier.buyInUnits * tier.fieldSize)} USDT, ` +
       `${field.plannedTables} mesas de ${SEATS_PER_TABLE}`,
     );
 
@@ -163,15 +165,15 @@ export const fieldManager = {
       }
     }
 
-    if (!this.canAfford(telegramId, tier.defaultBuyIn)) {
+    if (!this.canAfford(telegramId, tier.buyInUnits)) {
       throw new FieldError(
-        `No tienes saldo para un buy-in de ${tier.defaultBuyIn} CUP.`,
+        `No tienes saldo para un buy-in de ${tier.buyInUsdt} USDT.`,
         'INSUFFICIENT_FUNDS',
       );
     }
 
     // --- Cobro del buy-in, una sola vez ---
-    const charged = await this.chargeBuyIn(telegramId, tier.defaultBuyIn);
+    const charged = await this.chargeBuyIn(telegramId, tier.buyInUnits);
     if (!charged) {
       throw new FieldError(
         'No se pudo cobrar el buy-in. Intentalo de nuevo.',
@@ -181,13 +183,13 @@ export const fieldManager = {
 
     await Field.updateOne(
       { _id: field._id },
-      { $inc: { waiting: 1, buyInsCollected: tier.defaultBuyIn } },
+      { $inc: { waiting: 1, buyInsCollected: tier.buyInUnits } },
     );
     field.waiting += 1;
-    field.buyInsCollected += tier.defaultBuyIn;
+    field.buyInsCollected += tier.buyInUnits;
 
     const queue = queues.get(field.fieldId) ?? [];
-    queue.push({ telegramId, chips: tier.defaultBuyIn, username });
+    queue.push({ telegramId, chips: tier.buyInUnits, username });
     queues.set(field.fieldId, queue);
 
     const position = queue.length;
@@ -274,7 +276,7 @@ export const fieldManager = {
       const queueIdx = nextSeatable(
         queue,
         field.buyIn,
-        table.minBuyIn,
+        table.buyInUnits,
       );
       if (queueIdx === -1) break;
 
@@ -333,11 +335,13 @@ export const fieldManager = {
       kind: 'cash',
       tierId: field.tierId,
       status: 'waiting',
-      // Ciegas al 1/100 del buy-in: con 2000 CUP, 20/40. Stack de 100 BB.
-      smallBlind: Math.max(1, Math.round(field.buyIn / 100)),
-      bigBlind: Math.max(2, Math.round(field.buyIn / 50)),
-      minBuyIn: tier.minBuyIn,
-      guaranteedPrize: 0,
+      // Las ciegas salen del tier ya calculadas en unidades internas. No se
+      // derivan aqui con `Math.round(buyIn / 100)`: el redondeo puede dar dos
+      // valores distintos para el mismo tier segun cuando se cree la mesa, y el
+      // jugador lo notaria al pasar de una mesa a otra del mismo campo.
+      smallBlind: tier.blinds.small,
+      bigBlind: tier.blinds.big,
+      buyInUnits: field.buyIn,
       maxSeats: SEATS_PER_TABLE,
       seats: [],
       field: {
@@ -825,8 +829,18 @@ export const fieldManager = {
     const rake = field.rakeCollected;
     const netPot = Math.max(0, grossPot - rake);
 
-    const payout = fieldPayout(field.buyIn, field.targetField);
-    const shares = payout.entries;
+    // El premio del campo va a `balance.play` (Promotional Dollars): no se
+    // retira directamente, se desbloquea jugando a ratio 1:10.
+    //
+    // ESTA ES LA REGLA QUE PROTEGE LA PLATAFORMA. Si el premio fuera a
+    // `balance.real`, ganar un campo (que requiere buy-in) seria
+    // indistinguible de un deposito, y un jugador podria comprar entradas con
+    // dinero de promocion y convertirlo a saldo retirable. Con el ratio 1:10,
+    // el premio sirve para jugar, no para retirar.
+    const paidPositionsLeft = PAID_POSITIONS;
+
+    const fieldPayoutResult = fieldPayout(field.buyIn, field.playersRemaining);
+    const shares = fieldPayoutResult.entries;
 
     const paid: FieldResultOut['paid'] = [];
 
@@ -854,7 +868,8 @@ export const fieldManager = {
           tableId: tables.find(t => t.seats.includes(winner))?.tableId,
         });
         logger.info(
-          `Campo ${field.fieldId}: ganador ${telegramId} cobra ${share} CUP`,
+          `Campo ${field.fieldId}: ganador ${telegramId} cobra ` +
+          `${formatUnits(share)} USDT de promocion`,
         );
       }
 
@@ -868,7 +883,7 @@ export const fieldManager = {
       { fieldId: field.fieldId, status: { $ne: 'finished' } },
       {
         $set: { status: 'finished', finishedAt: new Date() },
-        $inc: { paidPositionsLeft: -Math.min(field.paidPositionsLeft, PAID_POSITIONS) },
+        $inc: { paidPositionsLeft: -paidPositionsLeft },
       },
       { new: true },
     );
@@ -907,8 +922,9 @@ export const fieldManager = {
     const totalPaid = paid.reduce((s, p) => s + p.amount, 0);
 
     logger.info(
-      `Campo ${field.fieldId} liquidado: bote ${grossPot} CUP, rake ${rake} CUP, ` +
-      `premio ${totalPaid} CUP, reembolsos ${refunded} CUP`,
+      `Campo ${field.fieldId} liquidado: bote ${formatUnits(grossPot)} USDT, ` +
+      `rake ${formatUnits(rake)} USDT, premio ${formatUnits(totalPaid)} USDT ` +
+      `de promocion, reembolsos ${formatUnits(refunded)} USDT`,
     );
 
     return { paid, totalPaid, refunded };
@@ -1015,32 +1031,40 @@ export const fieldManager = {
   },
 
   /**
-   * Cobra el buy-in: `play` primero, `real` despues.
+   * Cobra el buy-in: `play` primero (con su desbloqueo a 1:10), `real` despues.
    *
-   * Devuelve false si no habia saldo. Se hace en dos pasos con reintento
-   * porque el saldo puede cambiar entre la comprobacion y el cobro.
+   * Delega el reparto en `unlockService.splitBuyIn()`, que es el unico sitio
+   * donde se toca `balance.play` para una compra. Si aqui se hiciera el reparto a
+   * mano, el desbloqueo podria quedar sin aplicar en unos caminos y aplicarse dos
+   * veces en otros, y el descuadre seria invisible.
+   *
+   * Devuelve false si no habia saldo.
    */
   async chargeBuyIn(telegramId: number, amount: number): Promise<boolean> {
     const user = await User.findOne({ telegramId });
     if (!user) return false;
 
-    const playAvailable = user.balance.play;
-    const fromPlay = Math.min(playAvailable, amount);
+    if (user.balance.real + user.balance.play < amount) return false;
+
+    // Lo que sale de `play` se desbloquea a retirable segun el ratio.
+    const split = await unlockService.splitBuyIn(telegramId, amount, 'cash');
+    const fromPlay = split.fromPlay;
     const fromReal = amount - fromPlay;
 
-    if (fromReal > user.balance.real) return false;
-
+    // `splitBuyIn` ya descontó `fromPlay` de `play` y acreditó el unlock a
+    // `real`. Aquí solo se descuenta el resto de `real`: si se descontara
+    // tambien `play`, la parte de promoción se cobraría dos veces.
     await User.updateOne(
       { telegramId },
       {
         $inc: {
-          'balance.play': -fromPlay,
           'balance.real': -fromReal,
           'stats.tablesJoined': 1,
         },
       },
     );
 
+    unlockService.log(split, 'cash');
     return true;
   },
 

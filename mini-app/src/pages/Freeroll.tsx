@@ -2,16 +2,30 @@ import { useState, useEffect } from 'react';
 import { api, ApiError } from '../lib/api';
 import type { FreerollSummary } from '../lib/types';
 import { PageHeader } from '../components/Layout';
+import { fmtUsdt, fmtCup } from '../components/Balance';
 
 interface Props {
-  user: any;
   onBack: () => void;
   onBalanceChange?: () => void | Promise<any>;
   onPlay: (tableId: string) => void;
+  cupPerUsdt?: number;
 }
 
-export function Freeroll({ onBack, onBalanceChange, onPlay }: Props) {
+/**
+ * Freerolls: entrada gratis, premio en saldo de promocion.
+ *
+ * No recibe `user` porque la pantalla no muestra saldo: la unica accion es
+ * apuntarse, y el estado de la cuenta ya esta en la cabecera.
+ */
+export function Freeroll({
+  onBack,
+  onBalanceChange,
+  onPlay,
+  cupPerUsdt = 120,
+}: Props) {
   const [freerolls, setFreerolls] = useState<FreerollSummary[]>([]);
+  const [targetField, setTargetField] = useState(300);
+  const [maxField, setMaxField] = useState(900);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<number | null>(null);
   const [error, setError] = useState('');
@@ -20,6 +34,8 @@ export function Freeroll({ onBack, onBalanceChange, onPlay }: Props) {
     try {
       const res = await api.freerolls();
       setFreerolls(res.freerolls || []);
+      if (res.targetField) setTargetField(res.targetField);
+      if (res.maxField) setMaxField(res.maxField);
     } catch {
       setFreerolls([]);
     } finally {
@@ -41,7 +57,9 @@ export function Freeroll({ onBack, onBalanceChange, onPlay }: Props) {
       await onBalanceChange?.();
       if (res.tableId) onPlay(res.tableId);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'No se pudo entrar al freeroll.');
+      setError(
+        err instanceof ApiError ? err.message : 'No se pudo entrar al freeroll.',
+      );
     } finally {
       setBusy(null);
     }
@@ -51,21 +69,25 @@ export function Freeroll({ onBack, onBalanceChange, onPlay }: Props) {
     <div className="p-4 pb-10 animate-fadeIn">
       <PageHeader title="Freerolls" onBack={onBack} />
 
-      {/* Aviso de saldo no retirable */}
+      {/* El mecanismo del ratio. Sin esto el jugador no entiende su saldo. */}
       <div
         className="rounded-2xl p-4 mb-5"
-        style={{ background: 'rgba(255,215,0,0.08)', border: '1px solid rgba(255,215,0,0.3)' }}
+        style={{
+          background: 'rgba(255,215,0,0.08)',
+          border: '1px solid rgba(255,215,0,0.3)',
+        }}
       >
         <div className="flex items-start gap-3">
-          <span className="text-xl">⚠️</span>
+          <span className="text-xl">🎁</span>
           <div>
             <p className="text-sm font-bold text-[#ffd700] mb-1">
-              El saldo que ganes aquí no se puede retirar
+              Entrada gratis, premio en saldo de promoción
             </p>
             <p className="text-xs text-[#a0a0b0] leading-relaxed">
-              Los premios de freeroll son CUP de promoción. Sirven para jugar en
-              cualquier mesa cash de CubaPoker, pero para retirar dinero necesitas
-              depositar con EnZona, QvaPay o USDT.
+              No pagas nada por entrar. Lo que ganas es saldo de promoción: sirve
+              para jugar en cualquier campo, y al usarlo se desbloquea{' '}
+              <strong className="text-white">1 de cada 10</strong> a saldo
+              retirable. El resto se consume jugando.
             </p>
           </div>
         </div>
@@ -84,11 +106,9 @@ export function Freeroll({ onBack, onBalanceChange, onPlay }: Props) {
       ) : (
         <div className="space-y-3">
           {freerolls.map((f, i) => {
-            const payout = f.payout ?? [50, 30, 20];
-            // El campo arranca al llegar al objetivo de inscripcion, no al
-            // llenarse una mesa. Con 7-max, un freeroll son ~43 mesas.
-            const target = f.fieldTarget || f.maxPlayers;
+            const target = f.fieldTarget || targetField;
             const isFull = f.players >= target;
+            const pct = Math.min(100, Math.round((f.players / target) * 100));
 
             return (
               <article
@@ -104,56 +124,49 @@ export function Freeroll({ onBack, onBalanceChange, onPlay }: Props) {
                 <header className="flex items-start justify-between mb-3 relative">
                   <div>
                     <h3 className="font-bold text-white flex items-center gap-2">
-                      <span>🎁</span> Freeroll {f.prizeTier} CUP
+                      <span>🎁</span> Freeroll {fmtUsdt(f.prizeTier)} USDT
                     </h3>
                     <p className="text-xs text-[#a0a0b0] mt-1">
-                      Sin buy-in · {f.players}/{target} inscritos
+                      {fmtCup(f.prizeTier, cupPerUsdt)} CUP de premio · sin buy-in
                     </p>
                   </div>
                   <span className="badge badge-warning text-[10px]">
-                    {isFull ? 'Lleno' : f.phase === 'running' ? 'En curso' : 'Abierto'}
+                    {isFull ? 'Cerrado' : f.phase === 'running' ? 'En curso' : 'Abierto'}
                   </span>
                 </header>
 
-                {/* Progreso de inscripcion del campo */}
-                {(() => {
-                  const pct = Math.min(100, Math.round((f.players / target) * 100));
-                  return (
-                    <div className="mb-3 relative">
-                      <div className="flex justify-between text-[10px] mb-1">
-                        <span className="text-[#a0a0b0]">
-                          Campo: <strong className="text-white">{f.players}</strong> de {target}
-                        </span>
-                        <span className="text-[#a0a0b0]">{pct}%</span>
-                      </div>
-                      <div className="progress-bar">
-                        <div
-                          className="progress-bar-fill"
-                          style={{ width: `${pct}%`, background: '#ffd700' }}
-                        />
-                      </div>
-                      <p className="text-[10px] text-[#6c6c80] mt-1">
-                        {f.players} de {target} plazas ocupadas. Arranca al completarse; las
-                        mesas de 7 se fusionan hasta la mesa final.
-                      </p>
-                    </div>
-                  );
-                })()}
+                {/* Progreso de inscripcion */}
+                <div className="mb-3 relative">
+                  <div className="flex justify-between text-[10px] mb-1">
+                    <span className="text-[#a0a0b0]">
+                      Campo: <strong className="text-white">{f.players}</strong> de {target}
+                    </span>
+                    <span className="text-[#a0a0b0]">{pct}%</span>
+                  </div>
+                  <div className="progress-bar">
+                    <div
+                      className="progress-bar-fill"
+                      style={{ width: `${pct}%`, background: '#ffd700' }}
+                    />
+                  </div>
+                  <p className="text-[10px] text-[#6c6c80] mt-1">
+                    Arranca al completarse. Tope de {maxField} inscritos.
+                  </p>
+                </div>
 
-                {/* Reparto por posicion. Ojo: es sobre el campo entero, no sobre
-                    los 7 jugadores de una mesa. */}
-                <div className="flex gap-2 mb-3">
-                  {payout.map((pct, idx) => (
+                {/* Reparto */}
+                <div className="flex gap-2 mb-3 relative">
+                  {f.payout.map((pctShare, idx) => (
                     <div
                       key={idx}
                       className="flex-1 text-center p-2 rounded-xl"
                       style={{ background: '#0f0f1a' }}
                     >
-                      <p className="text-[10px] text-[#a0a0b0]">
+                      <p className="text-[9px] text-[#a0a0b0]">
                         {['1º', '2º', '3º'][idx] ?? `${idx + 1}º`}
                       </p>
                       <p className="text-sm font-bold text-[#ffd700]">
-                        {Math.floor((f.pot * pct) / 100)}
+                        {fmtUsdt(Math.floor((f.pot * pctShare) / 100))}
                       </p>
                     </div>
                   ))}
@@ -162,7 +175,7 @@ export function Freeroll({ onBack, onBalanceChange, onPlay }: Props) {
                 <button
                   onClick={() => join(f)}
                   disabled={busy === f.prizeTier || isFull}
-                  className="w-full btn btn-gold py-2.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="w-full btn btn-gold py-2.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed relative"
                 >
                   {busy === f.prizeTier
                     ? 'Registrando…'
@@ -175,14 +188,6 @@ export function Freeroll({ onBack, onBalanceChange, onPlay }: Props) {
           })}
         </div>
       )}
-
-      <div className="mt-5 card">
-        <p className="text-xs text-[#a0a0b0] leading-relaxed">
-          <span className="text-white font-semibold">Sin buy-in:</span> no pagas para
-          entrar. Si ganas, el premio va directo a tu saldo de promoción y ya puedes
-          usarlo en las mesas cash.
-        </p>
-      </div>
     </div>
   );
 }

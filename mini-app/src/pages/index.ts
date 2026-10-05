@@ -4,6 +4,7 @@ export { Withdraw } from './Withdraw';
 export { Tables } from './Tables';
 export { Table } from './Table';
 export { Freeroll } from './Freeroll';
+export { Centroll } from './Centroll';
 export { Tournaments } from './Tournaments';
 export { VIP } from './VIP';
 export { Referrals } from './Referrals';

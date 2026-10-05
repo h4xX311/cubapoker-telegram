@@ -184,15 +184,15 @@ export const allTiersRtp = () =>
   TABLE_TIER_LIST.map(t => ({
     id: t.id,
     fieldSize: t.fieldSize,
-    buyIn: t.minBuyIn,
-    rtp: tierRtp(t.minBuyIn, t.fieldSize),
+    buyIn: t.buyInUnits,
+    rtp: tierRtp(t.buyInUnits, t.fieldSize),
   }));
 
 /**
  * Texto que la UI debe mostrar junto al premio.
  *
- * "Premio garantizado" sin explicar que es el 95 % del bote y que no es
- * retirable es publicidad engañosa. En Cuba, sin marco legal de juego online,
- * un reclamo por publicidad falsa es el riesgo mas probable del proyecto.
+ * "Premio garantizado" sin explicar de donde sale el dinero es publicidad
+ * engañosa. En Cuba, sin marco legal de juego online, un reclamo por publicidad
+ * falsa es el riesgo mas probable del proyecto.
  */
 export const prizeDisclosure = (): string => ECONOMY.disclosure;
