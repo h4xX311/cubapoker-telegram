@@ -58,6 +58,32 @@ export class SeatingService {
 
     const table = await this.resolveTable(params.tableId, params.tierId);
 
+    // ------------------------------------------------------------------
+    // ENTRAR A UN CAMPO NO SE HACE POR AQUI
+    //
+    // Este metodo coloca al jugador directamente en una mesa. En un campo eso
+    // rompe tres cosas a la vez:
+    //
+    //  1. El campo no lleva la cuenta. `field.playersRemaining` y
+    //     `field.buyInsCollected` no se incrementan, asi que el bote del campo
+    //     sale mal y las posiciones pagadas se descuadran.
+    //
+    //  2. El jugador no pasa por la cola, asi que no hay forma de reasignarlo si
+    //     la mesa donde cae se llena antes de tiempo.
+    //
+    //  3. El field manager no sabe que existe, asi que nunca lo recoge al
+    //     eliminarlo ni le asigna posicion.
+    //
+    // Para jugar un campo hay que usar `fieldManager.register()`. Este metodo
+    // se queda solo con las mesas cash sueltas, que no pertenecen a ningun
+    // campo.
+    if (table.field?.fieldId) {
+      throw new TableError(
+        'Esa mesa es parte de un campo. Entra por el campo, no por la mesa.',
+        409,
+      );
+    }
+
     // No puede estar en dos mesas a la vez
     const otherSeat = await this.findSeatAnywhere(telegramId, table.tableId);
     if (otherSeat) {
@@ -212,10 +238,38 @@ export class SeatingService {
     return table;
   }
 
-  /** Retira al jugador de la mesa y le devuelve lo que tiene en ella. */
+  /**
+   * Retira al jugador de una MESA CASH SUELTA y le devuelve lo que tiene.
+   *
+   * ------------------------------------------------------------------
+   * EN UN CAMPO ESTO ESTA PROHIBIDO
+   *
+   * En un campo Sit'n'Go, levantarse de la mesa y recuperar el buy-in es un
+   * dreno trivial: el jugador entra, cobra su parte del premio al ganar y, al
+   * salir, recupera las fichas intactas. Puede repetirlo cuantas veces quiera y
+   * la plataforma paga cada ronda.
+   *
+   * Ademas rompe la contabilidad del campo: el field manager lleva la cuenta de
+   * `playersRemaining` y de las posiciones pagadas. Un jugador que se va sin
+   * pasar por `collectEliminations()` deja su contador desfasado, y el siguiente
+   * que sea eliminado recibe una posicion que no le corresponde.
+   *
+   * La salida de un campo la gestiona `field.manager` cuando el jugador queda
+   * eliminado: ahi se le adjudica la posicion correcta y se le devuelve lo que
+   * le quede en la mesa.
+   */
   async standUp(telegramId: number, tableId: string): Promise<{ returned: number }> {
     const table = await Table.findOne({ tableId });
     if (!table) throw new TableError('Mesa no encontrada', 404);
+
+    // ESTA ES LA COMPROBACION QUE IMPIDE EL DRENO.
+    if (table.field?.fieldId) {
+      throw new TableError(
+        'Esta mesa es parte de un campo: no se puede salir a mitad. ' +
+        'Tu posición depende de hasta dónde llegues.',
+        409,
+      );
+    }
 
     const seatIndex = table.seats.findIndex(
       s => s.kind === 'human' && s.playerId === String(telegramId),

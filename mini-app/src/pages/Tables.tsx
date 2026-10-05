@@ -53,16 +53,46 @@ export function Tables({
     return () => clearInterval(timer);
   }, []);
 
-  const register = async (tableId: string, tierId: string) => {
-    if (!tableId) return;
+  /**
+   * Entrar a un CAMPO, no a una mesa.
+   *
+   * La API correcta es `/fields/:tierId/register`, no `/game/sit`. El campo se
+   * encarga de la cola, el reparto por mesas y la contabilidad de posiciones.
+   * Sentarse en una mesa suelta saltaria las tres cosas.
+   *
+   * La respuesta no trae `tableId` porque el jugador entra en una COLA: el campo
+   * le asigna mesa cuando haya sitio. Por eso, tras registrarse, hay que
+   * preguntar al campo cual es su mesa en vez de asumirla.
+   */
+  const register = async (tierId: string) => {
     setBusy(tierId);
     setError('');
     try {
-      await api.sit({ tableId });
+      const res = await api.registerToField(tierId);
       await onBalanceChange?.();
-      onPlay(tableId);
+
+      if (res.seated) {
+        // Le asignaron mesa: abrirla.
+        const status = await api.fieldStatus(res.fieldId);
+        const myTable = status?.tables?.[0]?.tableId;
+        if (myTable) {
+          onPlay(myTable);
+          return;
+        }
+      }
+
+      // Entra en cola. Se informa y se vuelve al lobby.
+      setError(
+        res.seated
+          ? 'Te hemos sentado. Vuelve a la lista para ver tu mesa.'
+          : `Registrado en la cola (#${res.position}). Te asignaremos mesa cuando haya sitio.`,
+      );
+      await load();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'No se pudo entrar al campo.');
+      setError(
+        err instanceof ApiError ? err.message : 'No se pudo entrar al campo.',
+      );
+    } finally {
       setBusy(null);
     }
   };
@@ -190,8 +220,8 @@ export function Tables({
                   )}
 
                   <button
-                    onClick={() => register(fieldTables[0]?.tableId, tier.id)}
-                    disabled={busy === tier.id || !fieldTables.length || !canAfford}
+                    onClick={() => register(tier.id)}
+                    disabled={busy === tier.id || !canAfford}
                     className="w-full btn btn-primary py-2.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {busy === tier.id

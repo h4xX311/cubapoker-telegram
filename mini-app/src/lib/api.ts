@@ -129,6 +129,15 @@ export const api = {
   centroll: () => request<any>('/game/centroll'),
   joinCentroll: () => request<any>('/game/centroll/join', { method: 'POST' }),
 
+  // Campos multi-mesa. Ojo: entrar a un campo NO es sentarse en una mesa.
+  // El campo gestiona la cola, el reparto por mesas y las posiciones.
+  fields: () => request<any>('/game/fields'),
+  registerToField: (tierId: string) =>
+    request<any>(`/game/fields/${tierId}/register`, { method: 'POST' }),
+  leaveField: (fieldId: string) =>
+    request<any>(`/game/fields/${fieldId}/leave`, { method: 'POST' }),
+  fieldStatus: (fieldId: string) => request<any>(`/game/fields/${fieldId}`),
+
   // Torneos
   tournaments: () => request<any>('/game/tournaments'),
   registerTournament: (id: string) =>

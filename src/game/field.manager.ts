@@ -15,7 +15,6 @@ import {
 import {
   shouldMergeTables,
   planMerge,
-  positionOnElimination,
   remainingAfterEliminations,
   isFieldComplete,
   tablesForField,
@@ -23,6 +22,7 @@ import {
   nextSeatable,
 } from './field.rules';
 import { logger } from '../utils/logger';
+import { assignPosition } from './field.atomic';
 import { formatUnits, unitsToUsdt } from '../config/units';
 import { unlockService } from '../services/unlock.service';
 
@@ -538,8 +538,17 @@ export const fieldManager = {
       for (const seat of busted) {
         const telegramId = Number(seat.playerId);
 
-        // Decremento atomico. El valor devuelto es el contador ANTES de
-        // decrementar, que es exactamente la posicion del eliminado.
+        // Decremento atomico. `new: false` devuelve el documento ANTES del $inc,
+        // y ese `playersRemaining` es la posicion del eliminado.
+        //
+        // El filtro `playersRemaining: { $gte: 1 }` hace dos cosas a la vez:
+        // que la operacion falle si no quedan vivos (pagar de mas es peor que
+        // pagar de menos), y que Mongo serialice las eliminaciones concurrentes
+        // sobre el mismo documento, de modo que dos jugadores que caen en el
+        // mismo tick lean valores distintos.
+        //
+        // La aritmetica de la posicion vive en `field.atomic.ts`, con tests
+        // propios. Aqui solo se pide el numero.
         const updated = await Field.findOneAndUpdate(
           { _id: field._id, playersRemaining: { $gte: 1 } },
           { $inc: { playersRemaining: -1, eliminated: 1 } },
@@ -555,7 +564,19 @@ export const fieldManager = {
           continue;
         }
 
-        const position = positionOnElimination(updated.playersRemaining);
+        const position = assignPosition({
+          playersRemaining: updated.playersRemaining,
+          eliminated: updated.eliminated,
+        }).position;
+
+        if (position === undefined) {
+          logger.error(
+            `Campo ${field.fieldId}: contador incoherente al eliminar a ` +
+            `${telegramId} (playersRemaining=${updated.playersRemaining}). ` +
+            'Se salta la adjudicacion.',
+          );
+          continue;
+        }
 
         // Lo que le quedaba en la mesa vuelve a `balance.real`.
         await this.refund(telegramId, Math.max(0, seat.chips + seat.bet));
