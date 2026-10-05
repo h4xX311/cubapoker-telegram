@@ -386,7 +386,7 @@ no es siempre.
 2. Plan de pago Render ← sin esto las partidas se cortan
 3. Panel de operador   ← sin esto los retiros se atascan
 4. TRC20 real          ← la más simple, valida el circuito completo
-5. Field manager       ← sin esto el campo de 500 no existe
+5. Base de datos real  ← sin esto el campo no se ha ejecutado nunca
 6. Logros/rachas/VIP   ← honestidad con lo prometido
 7. EnZona + QvaPay     ← requiere cuenta de empresa
 8. Resto de cadenas
@@ -395,10 +395,58 @@ no es siempre.
 La economía del campo ya está resuelta (§0): el premio sale del bote y el RTP
 es del 95 %. No bloquea.
 
-Los puntos 1 a 4 son los mínimos para abrir a un grupo pequeño de usuarios de
-prueba. El 5 es necesario para que el producto sea lo que promete; hasta
-entonces, la opción honesta es mostrar 7-max de mesa única y quitar el "campo de
-500" de la interfaz.
+---
+
+## 3-bis. Estado de los cuatro bloqueantes (5 de octubre de 2026)
+
+| # | Bloqueante | Estado | Qué falta de verdad |
+|---|---|---|---|
+| 1 | Legal | **Pendiente, no se puede hacer aquí** | Un abogado. Los borradores de T&C, juego responsable y privacidad están escritos (`LEGAL/`) pero NO son asesoría legal. |
+| 2 | Plan de pago Render | **Hecho en código** | Pagar los 7 USDT/mes. `render.yaml` ya dice `plan: starter`. |
+| 3 | Panel de operador | **Hecho en código** | Montarlo y probarlo. Rutas en `/api/admin`, protege con `ADMIN_API_KEY`. |
+| 4 | TRC20 real | **Hecho en código** | La clave de TronGrid y una dirección TRON. Las otras 4 redes siguen sin soporte real. |
+
+### El quinto bloqueante, que no estaba en la lista: una base de datos
+
+**Ninguna parte del campo se ha ejecutado nunca.** Las 395 pruebas son
+aritmetica pura: el motor, los repartos, las unidades, la atomicidad, las reglas
+de retiro. Las llamadas a Mongo de `field.manager.ts` (31 en total) no se han
+ejecutado ni una vez.
+
+Desde esta máquina **no se puede**: `fastdl.mongodb.org`,
+`downloads.mongodb.org` y `mongodb.com` devuelven 403 en esta red, y las releases
+de GitHub no publican binarios de Windows. Se probaron tres versiones de Mongo
+por si era un problema de version; es el dominio, no la version.
+
+Lo que eso deja sin verificar, en orden de riesgo:
+
+1. **El cobro del buy-in contra Mongo.** Si el `$inc` no es atomico, un jugador
+   compra entrada dos veces y el campo descuadra.
+2. **Las merges entre mesas.** La logica esta en `field.rules.ts` y probada, pero
+   la escritura en `Table` no.
+3. **La liquidacion del campo.** Que el premio salga bien esta probado
+   (`test-payout.js`, 5000 botes). Que se pague bien al usuario, no.
+4. **El apagado ordenado.** Es codigo nuevo y solo se ha probado que compila.
+
+Por eso el orden correcto es: **Atlas desde una red con salida, y un test de
+integracion end-to-end** antes de abrir a un solo usuario de prueba.
+
+### Lo que se cerro en codigo y conviene no deshacer
+
+Tres drenos y un fallo de infraestructura, con sus pruebas:
+
+- **`standUp` devolvia el buy-in** a quien entraba en una mesa de campo y salia.
+  Ahora `sitDown` y `standUp` rechazan cualquier mesa con `field.fieldId`.
+- **`/game/sit` entraba a los campos por la puerta de atrás**, sin pasar por la
+  cola: `playersRemaining` no se incrementaba y las posiciones se descuadraban. La
+  interfaz usa ahora `/fields/:tierId/register`.
+- **`settleWithdrawal` hacia `$inc` sin filtro.** El saldo se consume al aprobar,
+  no al pedir, asi que entre pedir y aprobar el jugador puede jugar y vaciar su
+  `balance.real`; el `$inc` lo dejaba en negativo y cada retiro era una forma de
+  sacar doble. Ahora el filtro es `{ 'balance.real': { $gte: amount } }`.
+- **El plan `free` de Render suspende a los 15 min.** Con un campo de 500
+  jugadores en marcha, eso deja fichas bloqueadas y un webhook de pagos sin
+  responder. Cambiado a `starter`.
 
 ---
 
