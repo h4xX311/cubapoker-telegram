@@ -152,6 +152,27 @@ export function Tables({
     setBusy('sit');
     setError('');
     try {
+      // ------------------------------------------------------------------
+      // PRIMERO: DONDE ESTOY YA SENTADO
+      //
+      // Si se pulsa este boton con la sesion ya sentada, `sit` responde "Ya estas sentado
+      // en otra mesa. Sal de ella primero." y el boton de salir, que vive en la VISTA DE
+      // MESA, no se llega a ver nunca. El mensaje pide una salida desde una pantalla a la
+      // que no deja entrar: un callejon sin salida.
+      //
+      // Asi que antes de sentarse se pregunta donde se esta. Si hay mesa, se abre. Asi el
+      // "sal de ella primero" deja de ser un bucle cerrado, porque la aplicacion te lleva
+      // justo a donde puedes salir.
+      //
+      // Y no se cobra el buy-in dos veces: no se llama a `sit` si ya hay mesa.
+      // ------------------------------------------------------------------
+      const donde = await api.myTable();
+      if (donde?.tableId) {
+        setBusy(null);
+        onPlay(donde.tableId);
+        return;
+      }
+
       const res = await api.sit({ tierId });
       await onBalanceChange?.();
       if (res?.tableId) {
