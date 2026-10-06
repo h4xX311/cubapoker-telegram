@@ -1,5 +1,6 @@
 import { Card, createDeck, shuffleDeck } from './card.utils';
 import { evaluateHand, HandResult } from './hand.evaluator';
+import { settlePot } from './sidepots';
 
 export type GamePhase = 'waiting' | 'preflop' | 'flop' | 'turn' | 'river' | 'showdown' | 'finished';
 export type PlayerAction = 'fold' | 'check' | 'call' | 'raise' | 'all_in';
@@ -476,39 +477,83 @@ export class PokerGame {
         player.hand = evaluateHand(allCards);
       }
 
+      // Ordenados de mejor mano a peor. El reparto de empates sale de agrupar por
+      // valor de mano: los que tienen exactamente el mismo valor estan empatados y
+      // se reparten el bote a partes iguales.
       const sorted = [...activePlayers].sort((a, b) => {
         if (!a.hand || !b.hand) return 0;
         return b.hand.value - a.hand.value;
       });
 
-      const bestHand = sorted[0].hand!;
-      const winners = sorted.filter(p => p.hand!.value === bestHand.value);
+      const grupos: { valor: number; ids: string[] }[] = [];
+      for (const p of sorted) {
+        const valor = p.hand!.value;
+        const ultimo = grupos[grupos.length - 1];
+        if (ultimo && ultimo.valor === valor) ultimo.ids.push(p.id);
+        else grupos.push({ valor, ids: [p.id] });
+      }
 
-      // Los想到这里 van los datos que vera el cliente. `amount` se rellena
-      // despues de repartir, porque el reparto con resto depende del bote real.
-      const winnerIds = winners.map(w => w.id);
-      this.state.winners = winners.map(w => ({
-        playerId: w.id,
-        amount: 0,
-        hand: w.hand!,
+      // --------------------------------------------------------------------
+      // LO QUE PONE CADA UNO, INCLUIDOS LOS QUE PLIEGAN
+      //
+      // Un jugador que pliega tambien deja fichas en el bote: las que fueron igualadas.
+      // Por eso se pasan TODOS los jugadores y no solo los activos. Si se pasara
+      // solo los activos, el bote saldria mas pequeno que `state.pot` y esas fichas
+      // desaparecerian del sistema al terminar la mano.
+      // --------------------------------------------------------------------
+      const contributions = this.state.players.map(p => ({
+        id: p.id,
+        amount: p.totalBet,
       }));
 
-      // Reparte entre todos los empatados. Un empate divide el bote: darlo
-      // entero a uno solo seria robarle a los demas, y en una mesa grande los
-      // empates son frequentes, no una excepcion.
-      const pot = this.state.pot;
-      const shares = Array.from(
-        { length: winnerIds.length },
-        (_, i) =>
-          Math.floor(pot / winnerIds.length) +
-          (i < pot % winnerIds.length ? 1 : 0),
-      );
+      // --------------------------------------------------------------------
+      // REPARTO CON BOTES LATERALES
+      //
+      // Antes: el bote entero a los ganadores de la mejor mano, sin mas. Eso hacia
+      // que un all-in corto se llevara tambien el bote de los stacks grandes.
+      //
+      // Ahora: el bote se parte en tramos segun lo que puso cada uno, y cada tramo
+      // solo lo gana quien es elegible a el. La aritmetica esta en `sidepots.ts` y
+      // se prueba sin mesa en `scripts/test-sidepots.js`.
+      //
+      // El motor NO devuelve las apuestas no igualadas antes de esto, y no hace
+      // falta: el tramo final, al que solo llega quien puso la apuesta mas alta, se
+      // le devuelve entero a ese jugador. Es el mismo resultado, pero sin un paso
+      // extra que se pueda olvidar.
+      // --------------------------------------------------------------------
+      const premios = settlePot(contributions, grupos.map(g => g.ids));
 
-      awardPot(winnerIds, shares);
+      // Se acreditan las fichas. El total repartido puede ser menor que el bote si
+      // algun tramo se queda sin elegibles (no puede ocurrir con dos jugadores
+      // vivos o mas, pero no se fia uno), y en ese caso el resto vuelve al mejor
+      // para que el sistema no cree ni pierda dinero.
+      const boteReal = this.state.pot;
+      let repartido = 0;
+      for (const [id, amount] of Object.entries(premios)) {
+        const player = this.state.players.find(p => p.id === id);
+        if (!player) continue;
+        player.chips += amount;
+        repartido += amount;
+      }
 
-      this.state.winners = this.state.winners.map(w => ({
-        ...w,
-        amount: shares[winnerIds.indexOf(w.playerId)] ?? 0,
+      if (repartido < boteReal) {
+        const mejor = grupos[0]?.ids[0];
+        const fallback = mejor
+          ? this.state.players.find(p => p.id === mejor)
+          : undefined;
+        if (fallback) fallback.chips += boteReal - repartido;
+      }
+
+      this.state.pot = 0;
+
+      // Para el cliente se announce SOLO quien gano el showdown. Los que se llevaron
+      // un tramo lateral sin ganar la mano (porque los de mejor mano no eran
+      // elegibles ahi) cobran igual, pero no se presentan como ganadores de la mano:
+      // en el cliente sale que nounieron la mano, que es verdad.
+      this.state.winners = grupos[0].ids.map(id => ({
+        playerId: id,
+        amount: premios[id] ?? 0,
+        hand: this.state.players.find(p => p.id === id)!.hand!,
       }));
     }
 

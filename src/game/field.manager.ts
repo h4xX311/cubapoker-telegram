@@ -321,7 +321,32 @@ export const fieldManager = {
     // esperan: los sentados ya ocupan las suyas.
     const registered = field.seated + field.waiting;
     const wantedTables = tablesForField(Math.max(registered, queue.length, 2));
-    const liveTables = field.tables.filter(t => !t.mergedInto);
+
+    // ------------------------------------------------------------------
+    // LAS MESAS SE CUENTAN EN LA BASE DE DATOS, NO EN `field.tables`
+    //
+    // Antes se contaba sobre `field.tables`, que es una COPIA desnormalizada dentro
+    // del documento del campo. Esa copia se mantiene con `$push` condicionado, y por
+    // tanto puede quedarse corta: si el push de una mesa no se aplica (porque la
+    // entrada ya estaba, o porque la actualizacion no llego a tiempo), `field.tables`
+    // dice que hay menos mesas de las que hay, el bucle de creacion cree que le
+    // faltan mesas y vuelve a crear la numero 1... con `seats: []`.
+    //
+    // Eso BORRA a los jugadores que ya estaban sentados en ella. El contador del campo
+    // no baja (solo baja al adjudicarse una eliminacion), asi que queda un jugador de
+    // mas para siempre y el campo nunca cuadra.
+    //
+    // Se vio jugando un campo entero: 14 jugadores registrados, 14 incrementos de
+    // `playersRemaining`, y 13 asientos en las mesas. Sin ninguna posicion adjudicada
+    // de por medio, o sea, el jugador se perdia al SENTAR, no al eliminar.
+    //
+    // La verdad son los documentos de `Table`. Es una consulta mas por ciclo, y evita
+    // que una copia decide cuantos jugadores hay.
+    // ------------------------------------------------------------------
+    const liveTables = await Table.find({
+      'field.fieldId': field.fieldId,
+      'field.mergedInto': { $exists: false },
+    });
 
     if (liveTables.length < wantedTables) {
       for (let i = liveTables.length; i < wantedTables; i++) {
@@ -678,11 +703,46 @@ export const fieldManager = {
 
     if (vivos === field.playersRemaining) return;
 
+    // ------------------------------------------------------------------
+    // DIAGNOSTICO DE QUIEN FALTA
+    //
+    // Saber que el numero no cuadra no dice nada. Saber QUE jugador no esta donde
+    // deberia si dice mucho, y es la diferencia entre diez minutos y dos horas.
+    //
+    // Se listan tres conjuntos:
+    //   - quien tiene posicion adjudicada pero no esta en ninguna mesa viva: se fue
+    //     sin que nadie lo recogiera. Es el caso que nos importa.
+    //   - quien esta en las mesas pero no tiene posicion: aun no ha sido eliminado,
+    //     o se ha colado sin adjudicar.
+    //   - el desajuste de identificadores, por si el problema es de ids y no de
+    //     jugadores.
+    // ------------------------------------------------------------------
+    const conPosicion = new Set(
+      (field.results ?? []).map((r) => r.telegramId).filter((id) => Number.isFinite(id)),
+    );
+    const sinPosicion = [...vistos].filter((id) => !conPosicion.has(id));
+    const sinMesa = [...conPosicion].filter((id) => !vistos.has(id));
+
     logger.warn(
       `Campo ${field.fieldId}: el contador de vivos decia ` +
       `${field.playersRemaining} y hay ${vivos} jugadores reales en las mesas. ` +
       'Se corrige al valor real.',
     );
+
+    if (sinMesa.length > 0) {
+      logger.warn(
+        `  ${sinMesa.length} con posicion adjudicada pero NO estan en ninguna mesa viva: ` +
+        sinMesa.slice(0, 12).join(', ') +
+        (sinMesa.length > 12 ? '...' : ''),
+      );
+    }
+    if (sinPosicion.length > 0) {
+      logger.warn(
+        `  ${sinPosicion.length} en las mesas SIN posicion adjudicada: ` +
+        sinPosicion.slice(0, 12).join(', ') +
+        (sinPosicion.length > 12 ? '...' : ''),
+      );
+    }
 
     await Field.updateOne({ _id: field._id }, { $set: { playersRemaining: vivos } });
     field.playersRemaining = vivos;
