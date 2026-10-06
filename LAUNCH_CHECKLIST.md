@@ -692,6 +692,83 @@ Los seis primeros tardan menos de un minuto cada uno. Los tres ultimos necesitan
 MongoDB de verdad. La regla que se ha seguido: **si un fallo se puede montar con
 cifras exactas, se prueba con cifras exactas, no jugando el campo entero.**
 
+## 3-bis-cuarta. El campo se queda en 2 jugadores. Estado exacto
+
+No es un balance de lo que funciona: es una nota de traspaso. Lo que se ha descartado,
+lo que queda, y por donde seguir.
+
+### LO QUE SI ESTA VERIFICADO
+
+- **El dinero cuadra.** "Ninguna invariante se rompio en ninguna ronda", en las 12 000
+  rondas del ultimo test. Nueve bugs de dinero cerrados y verificados.
+- **El rake es el 5 % real**, no el 53 % que salia antes.
+- **Las mesas cierran limpiamente** y liberan los asientos `out`.
+- **La eliminacion funciona**: el campo baja de 14 jugadores a 2, con 12 de las 13
+  posiciones adjudicadas sin repetir ninguna.
+- **100 228 turnos de humano** con la IA de produccion, no atajos.
+
+### EL ESTADO EXACTO
+
+El campo se queda con 2 jugadores vivos y un tercero sentado marcado `eliminated` con
+cero fichas, sin adjudicar:
+
+    campo: status=final seated=14 vivos=2 eliminated=12 deadChips=0
+      t1: 4:active:7704   0:ELIMINATED:0   1:active:6281     mano=11998  fase=idle
+      t2: 5 asientos `out`, status=finished
+
+### LO QUE SE HA DESCARTADO, Y COMO
+
+| Hipotesis | Como se ha descartado |
+|---|---|
+| `startHand` no arranca la mano | Aviso instrumentado: 0 disparos en 8 000 ciclos |
+| `startGame` devuelve false | Sale un ERROR en ese caso: 0 errores en todo el log |
+| El bot no puede jugar y cuelga la mesa | Aviso instrumentado: 0 disparos. Corregido igualmente |
+| `processTable` revienta antes de llegar | 0 "Error procesando mesa" |
+| La IA es demasiado pasiva | 6,9 acciones por mano: las manos llegan al showdown |
+| El reloj de los humanos les roba el turno | **Era cierto.** Corregido: 82 630 -> 100 228 turnos |
+| El reconciliador resucita eliminados | **Era cierto.** Corregido: ya no sube el contador |
+| Faltan fichas por el camino | Conservado en las 12 000 rondas |
+
+### LO QUE QUEDA
+
+Un unico hecho, y es el que bloquea: **el asiento `eliminated` con cero fichas no lo
+recoge `collectEliminations`**. Si lo recogiera, el contador bajaria a 1 y
+`checkCompletion` liquidaria.
+
+Por que no lo recoge es lo que no esta resuelto. Las dos razonables:
+
+1. `collectEliminations` se ejecuta sobre una copia de la mesa leida antes de que el
+   gestor de mesas marcase el asiento `eliminated`, y para cuando vuelve a mirar ya no
+   lo ve. Es una carrera entre los dos gestores, y es el mismo tipo de problema que las
+   otras tres veces de hoy.
+2. El filtro de asientos que usa `collectEliminations` exige algo mas que
+   `status === 'eliminated'` (por ejemplo `hand.phase === 'idle'`, o que la mesa no
+   tenga ninguna mano viva), y el asiento no lo cumple.
+
+### POR DONDE SE SIGUE
+
+Instrumentar `collectEliminations` con una linea por ciclo: cuantos asientos ve, cuantos
+cualifican por cada filtro, y por que descarta el que queda. Es la misma tecnica que
+destapo el bug del bot y el del reloj, y las dos veces fue una sola linea que decidia si
+un asiento cuenta o no.
+
+Alternativa, si se quiere atajar antes: **que `collectEliminations` no dependa de una
+copia**. Que lea los asientos con una consulta dirigida a los que estan `eliminated` y
+con cero fichas, en vez de recorrer las mesas que le llegaron antes.
+
+### LO QUE NO SE DEBE HACER
+
+No tocar los limites ni el reloj del test para que pase. El campo tarda del orden de
+3 700 manos en dejar a un jugador en una mesa, con varianza enorme (la misma mesa ha
+terminado en 39 manos y en 3 713). Subir el limite a ojo solo mueve el sitio donde
+falla.
+
+Y no volver a poner una red que escriba sobre el contador de otro gestor: las tres
+regresiones de hoy han salido de ahi (`field.tables`, el reloj, y el reconciliador).
+Una red que "corrige" al dueño de la fuente de verdad es la causa, no el remedio.
+
+---
+
 ## 5. Cómo probar el flujo ahora
 
 ```bash
