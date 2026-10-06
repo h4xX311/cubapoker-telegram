@@ -4,6 +4,7 @@ import { seatingService, TableError } from '../game/seating.service';
 import { fieldManager, FieldError } from '../game/field.manager';
 import { centrollService, CentrollError } from '../game/centroll.service';
 import { Field, toPublicField } from '../models/Field';
+import { Table } from '../models/Table';
 import { requireTelegramAuth, getAuthedTelegramId } from '../middleware/telegramAuth';
 import { User } from '../models/User';
 import { logger } from '../utils/logger';
@@ -196,16 +197,68 @@ router.get('/fields/:fieldId', async (req: Request, res: Response) => {
   }
 });
 
-/** Campos abiertos ahora mismo. */
-router.get('/fields', async (_req: Request, res: Response) => {
+/**
+ * Campos abiertos ahora mismo, y EN CUAL DE ELLOS ESTA EL QUE PREGUNTA.
+ *
+ * ------------------------------------------------------------------
+ * POR QUE hace falta `miCampo`
+ *
+ * La lista de campos decia cuantos hay y cuantos faltan, pero no si el que pregunta esta
+ * sentado en alguno. Sin eso, la interfaz no puede ni avisar de que ya estas dentro ni
+ * ofrecerte salir.
+ *
+ * Y quedarse dentro sin poder salir es el peor estado posible en un campo: el buy-in esta
+ * cobrado, estas sentado, y no hay ninguna accion posible. Con poca liquidez, que es como
+ * empieza todo producto, es lo que le pasa al primer usuario que entra.
+ *
+ * Por eso la ruta lleva autenticacion: sin ella no se puede saber de quien se trata.
+ *
+ * `puedeSalir` solo es true en `filling`. Una vez que el campo ha arrancado no se puede
+ * salir (seria Steiner sus fichas al bote y quedarse con el premio sin jugar), y el boton
+ * tiene que decirlo en vez de fallar.
+ * ------------------------------------------------------------------
+ */
+router.get('/fields', requireTelegramAuth, async (req: Request, res: Response) => {
   try {
+    const telegramId = getAuthedTelegramId(req);
+
     const fields = await Field.find({
       status: { $in: ['filling', 'running', 'final'] },
     })
       .sort({ createdAt: -1 })
       .limit(20);
 
-    res.json({ success: true, fields: fields.map(f => toPublicField(f)) });
+    // Que campo de estos tiene a este usuario sentado, y en que mesa.
+    const tableIds = fields.flatMap((f) => f.tables.map((t) => t.tableId));
+    const mio = new Map<string, { fieldId: string; tableId: string; status: string }>();
+
+    if (tableIds.length > 0) {
+      const mesas = await Table.find({
+        tableId: { $in: tableIds },
+        seats: { $elemMatch: { playerId: String(telegramId) } },
+      }).select('tableId field.fieldId');
+
+      for (const mesa of mesas) {
+        const fieldId = mesa.field?.fieldId;
+        if (fieldId && !mio.has(fieldId)) {
+          mio.set(fieldId, {
+            fieldId,
+            tableId: mesa.tableId,
+            status: mesa.field?.fieldStatus ?? 'filling',
+          });
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      fields: fields.map((f) => ({
+        ...toPublicField(f),
+        miCampo: mio.get(f.fieldId) ?? null,
+      })),
+      // El mismo dato en la raiz, para que la interfaz no tenga que recorrer la lista.
+      miCampo: [...mio.values()][0] ?? null,
+    });
   } catch (error) {
     logger.error('GET /game/fields:', error);
     res.status(500).json({ error: 'Error obteniendo los campos' });

@@ -28,14 +28,27 @@ export function Tables({
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState('');
+  /**
+   * Campo en el que esta sentado este usuario, si esta en alguno.
+   *
+   * Sin esto no hay forma de ni avisar ni dejarle salir, y quedarse dentro sin salida es el
+   * peor estado posible: buy-in cobrado, asiento ocupado y ninguna accion posible.
+   */
+  const [miCampo, setMiCampo] = useState<{
+    fieldId: string;
+    tableId: string;
+    status: string;
+  } | null>(null);
 
   const load = async () => {
     try {
-      const [listRes, cfg] = await Promise.all([
+      const [listRes, cfg, camposRes] = await Promise.all([
         api.listTables(),
         api.gameConfig(),
+        api.fields(),
       ]);
       setTables(listRes.tables || []);
+      setMiCampo((camposRes as any)?.miCampo ?? null);
       setTiers(cfg.cashTiers || []);
       if (cfg.seatsPerTable) setSeatsPerTable(cfg.seatsPerTable);
       if (cfg.prizeDisclosure) setDisclosure(cfg.prizeDisclosure);
@@ -97,6 +110,34 @@ export function Tables({
     }
   };
 
+  /**
+   * Salir del campo antes de que arranque, con devolucion del buy-in.
+   *
+   * El boton solo sale cuando el campo esta en `filling`: despues ya no se puede, y
+   * decirlo es mejor que dejar que falle con un error.
+   */
+  const leaveField = async () => {
+    if (!miCampo) return;
+    setBusy('leave');
+    setError('');
+    try {
+      const r = await api.leaveField(miCampo.fieldId);
+      await onBalanceChange?.();
+      setMiCampo(null);
+      setError(
+        `Has salido del campo. ` +
+          (r?.refunded
+            ? `Se te han devuelto ${r.refunded} unidades de tu buy-in.`
+            : 'Tu buy-in te ha sido devuelto.'),
+      );
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'No se pudo salir del campo.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const balance = user?.balance?.total ?? 0;
 
   return (
@@ -123,6 +164,60 @@ export function Tables({
       {error && (
         <div className="bg-[#ff4757]/15 border border-[#ff4757] rounded-xl p-3 mb-4">
           <p className="text-sm text-[#ff8a94]">{error}</p>
+        </div>
+      )}
+
+      {/* ------------------------------------------------------------------
+          ESTAS DENTRO DE UN CAMPO
+
+          Este panel es la diferencia entre "estoy esperando" y "estoy atrapado". Sin el,
+          un usuario que entra en un campo que no se llena ve su buy-in cobrado, su
+          asiento ocupado, y el siguiente intento le dice "Ya estas jugando en un campo"
+          sin explicar nada ni ofrecer nada.
+
+          Con el, sabe cuanto falta, por que no arranca, y puede salir con el buy-in
+          entero. Que es lo que hace cualquiera antes de que haya liquidez.
+      ------------------------------------------------------------------ */}
+      {miCampo && (
+        <div
+          className="rounded-2xl p-4 mb-5"
+          style={{ background: '#16213e', border: '1px solid #00d26a' }}
+        >
+          <div className="flex items-start gap-3">
+            <div className="text-2xl">🎯</div>
+            <div className="flex-1 min-w-0">
+              <p className="font-bold text-white text-sm">
+                {miCampo.status === 'filling'
+                  ? 'Estas esperando a que se llene el campo'
+                  : 'Tu campo ha arrancado'}
+              </p>
+              <p className="text-xs text-[#a0a0b0] mt-1">
+                {miCampo.status === 'filling'
+                  ? 'Tu buy-in esta reservado. Cuando se llene el campo te reparten mesa ' +
+                    'y empieza la partida. Si te arrepientes, puedes salir y te lo devuelven.'
+                  : 'Ya no se puede salir: estas jugando. Suerte.'}
+              </p>
+            </div>
+          </div>
+
+          {miCampo.status === 'filling' && (
+            <button
+              onClick={leaveField}
+              disabled={busy === 'leave'}
+              className="w-full btn btn-outline py-2.5 text-sm mt-3 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {busy === 'leave' ? 'Saliendo…' : 'Salir del campo y recuperar mi buy-in'}
+            </button>
+          )}
+
+          {miCampo.status !== 'filling' && miCampo.tableId && (
+            <button
+              onClick={() => onPlay(miCampo.tableId)}
+              className="w-full btn btn-primary py-2.5 text-sm mt-3"
+            >
+              Ir a mi mesa
+            </button>
+          )}
         </div>
       )}
 
