@@ -265,21 +265,80 @@ export const fieldManager = {
       );
     }
 
+    // ------------------------------------------------------------------
+    // (a) ESTA EN LA COLA
+    //
+    // La cola esta en memoria, asi que solo existe si el proceso no se ha reiniciado desde
+    // que el jugador se apunto. Y aun asi es el caso raro: `trySeat` sienta en cuanto
+    // hay sitio, y las mesas se crean segun hacen falta.
+    // ------------------------------------------------------------------
     const queue = queues.get(fieldId) ?? [];
     const idx = queue.findIndex(p => p.telegramId === telegramId);
-    if (idx === -1) {
-      throw new FieldError('No estas en la cola de este campo', 'NOT_IN_QUEUE');
+    const estabaEnCola = idx !== -1;
+
+    if (estabaEnCola) {
+      queue.splice(idx, 1);
+      queues.set(fieldId, queue);
     }
 
-    queue.splice(idx, 1);
-    queues.set(fieldId, queue);
-
-    // Lo que no llego a sentarse esta integro: se devuelve entero.
-    await this.refund(telegramId, field.buyInUnits);
-    await Field.updateOne(
-      { _id: field._id },
-      { $inc: { waiting: -1, buyInsCollected: -field.buyInUnits } },
+    // ------------------------------------------------------------------
+    // (b) ESTA SENTADO EN UNA MESA
+    //
+    // Este es el caso NORMAL, y el que no estaba. Antes no se miraba, con lo que el
+    // asiento se quedaba en la mesa: el buy-in se devolvia pero el jugador seguia
+    // sentado, y al intentar registrarse de nuevo `register` le decia "Ya estas jugando
+    // en un campo" sin dejarle hacer nada. Atascado, con el dinero ya devuelto.
+    //
+    // El `$pull` lleva el `field.fieldId`, asi que si por un bug de fusion estuviera
+    // en dos mesas, sale de las dos.
+    // ------------------------------------------------------------------
+    const soltado = await Table.updateMany(
+      {
+        'field.fieldId': fieldId,
+        seats: { $elemMatch: { playerId: String(telegramId), status: { $ne: 'out' } } },
+      },
+      { $pull: { seats: { playerId: String(telegramId) } } },
     );
+
+    // (c) NI EN LA COLA NI SENTADO
+    if (!estabaEnCola && soltado.modifiedCount === 0) {
+      throw new FieldError(
+        'No estas apuntado a este campo. Puede que el campo ya haya empezado.',
+        'NOT_IN_FIELD',
+      );
+    }
+
+    // ------------------------------------------------------------------
+    // LOS CONTADORES, Y POR QUE NO SE RESTAN A CIEGAS
+    //
+    // Antes se restaba `waiting: -1` siempre. Si el jugador estaba SENTADO, el waiting no
+    // se habia incremento, asi que restarlo lo dejaba en negativo: el campo se quedaba
+    // Informando de un jugador esperando que no existia.
+    //
+    // Y `buyInsCollected` se ajusta en los dos casos, que es lo que hace que el bote del
+    // campo cuadre con el dinero que hay en las carteras.
+    // ------------------------------------------------------------------
+    if (estabaEnCola) {
+      await Field.updateOne(
+        { _id: field._id },
+        { $inc: { waiting: -1, buyInsCollected: -field.buyInUnits } },
+      );
+    } else {
+      await Field.updateOne(
+        { _id: field._id },
+        { $inc: { seated: -1, playersRemaining: -1, buyInsCollected: -field.buyInUnits } },
+      );
+    }
+
+    // Lo que no llego a jugar esta integro: se devuelve entero.
+    await this.refund(telegramId, field.buyInUnits);
+
+    if (soltado.modifiedCount > 0) {
+      logger.info(
+        `Campo ${fieldId}: el jugador ${telegramId} ha salido del campo antes de ` +
+        `empezar. Se le devuelve ${field.buyInUnits} unidades.`,
+      );
+    }
 
     return { refunded: field.buyInUnits };
   },
