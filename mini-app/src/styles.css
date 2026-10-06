@@ -33,37 +33,59 @@
     border: 1px solid #2a2a4a;
   }
 
-  .btn {
+  /* ------------------------------------------------------------------*/
+  /* LA PARTE COMUN DE LOS BOTONES*/
+  /**/
+  /* Va en un selector con varias clases, y no como `.btn` mas `@apply btn` en cada*/
+  /* variante, por dos motivos:*/
+  /**/
+  /*  - Tailwind no permite usar `@apply` con una clase propia: da error al compilar.*/
+  /*  - si la parte comun estuviera repetida en cuatro sitios, cualquier cambio habria que*/
+  /*   copiarla cuatro veces, y olvidar una deja un boton con otra forma sin que se note.*/
+  /* ------------------------------------------------------------------*/
+  .btn,
+  .btn-primary,
+  .btn-danger,
+  .btn-gold,
+  .btn-outline {
     @apply inline-flex items-center justify-center gap-2 font-semibold rounded-xl
            transition-all duration-200 select-none;
   }
 
-  .btn:disabled {
+  .btn:disabled,
+  .btn-primary:disabled,
+  .btn-danger:disabled,
+  .btn-gold:disabled,
+  .btn-outline:disabled {
     @apply opacity-50 cursor-not-allowed;
   }
 
-  .btn:not(:disabled):active {
+  .btn:not(:disabled):active,
+  .btn-primary:not(:disabled):active,
+  .btn-danger:not(:disabled):active,
+  .btn-gold:not(:disabled):active,
+  .btn-outline:not(:disabled):active {
     transform: scale(0.97);
   }
 
   .btn-primary {
-    @apply btn text-white;
+    @apply text-white;
     background: linear-gradient(135deg, #00d26a 0%, #00b894 100%);
     box-shadow: 0 4px 14px rgba(0, 210, 106, 0.25);
   }
 
   .btn-danger {
-    @apply btn text-white;
+    @apply text-white;
     background: linear-gradient(135deg, #ff4757 0%, #c0392b 100%);
   }
 
   .btn-gold {
-    @apply btn text-black;
+    @apply text-black;
     background: linear-gradient(135deg, #ffd700 0%, #e6a800 100%);
   }
 
   .btn-outline {
-    @apply btn bg-transparent text-white;
+    @apply bg-transparent text-white;
     border: 1px solid #2a2a4a;
   }
 
