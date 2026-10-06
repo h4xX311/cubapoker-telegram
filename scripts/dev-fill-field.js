@@ -60,8 +60,41 @@ const PLAYERS = opcion('players', null);
 const DESDE = Number(opcion('from', 600000010));
 const BALANCE = Number(opcion('balance', 5_000_000));
 
+// ------------------------------------------------------------------
+// LA BASE DE DATOS TIENE QUE SER LA MISMA QUE USA EL SERVIDOR
+//
+// Si no, los jugadores falsos se registran en una base y el servidor, que esta leyendo
+// otra, no los ve nunca. El campo no se llena y el error que sale es desconcertante:
+// "No se pudo cobrar el buy-in", cuando el problema no es el buy-in sino que los dos
+// procesos estan mirando bases distintas.
+//
+// Y asi fue: el servidor lee el `.env` (Atlas) y este script, con su valor por defecto,
+// apuntaba a Mongo de WSL. Los 13 falsos estaban en una base que el servidor no abria
+// nunca.
+//
+// Por defecto se lee el `.env` del proyecto, que es lo que hace `npm run dev`. Si se pasa
+// `MONGODB_URI` en el entorno, manda ese: asi se puede probar contra otra base sin
+// tocar nada.
+// ------------------------------------------------------------------
+const leerDelEnv = () => {
+  try {
+    const fs = require('fs');
+    const ruta = require('path').join(__dirname, '..', '.env');
+    if (!fs.existsSync(ruta)) return null;
+    for (const linea of fs.readFileSync(ruta, 'utf8').split(/\r?\n/)) {
+      const m = linea.match(/^\s*MONGODB_URI\s*=\s*(.+?)\s*$/);
+      if (m && !linea.trim().startsWith('#')) return m[1].replace(/^["']|["']$/g, '');
+    }
+  } catch {
+    // si algo falla, se cae al valor de abajo
+  }
+  return null;
+};
+
 const MONGODB_URI =
-  process.env.MONGODB_URI || 'mongodb://127.0.0.1:37017/cubapoker';
+  process.env.MONGODB_URI ||
+  leerDelEnv() ||
+  'mongodb://127.0.0.1:37017/cubapoker';
 
 async function main() {
   console.log('\n\x1b[1mCubaPoker · Llenar un campo para probar el juego\x1b[0m');
