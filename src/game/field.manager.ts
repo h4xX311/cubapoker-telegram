@@ -1365,12 +1365,46 @@ export const fieldManager = {
     let swept = 0;
     for (const t of tables) {
       let tableSwept = 0;
+
+      // Lo que hay delante de cada asiento.
+      let enAsientos = 0;
+      let enBotesDeAsiento = 0;
       for (const seat of t.seats) {
-        tableSwept += Math.max(0, seat.chips) + Math.max(0, seat.bet);
+        enAsientos += Math.max(0, seat.chips);
+        enBotesDeAsiento += Math.max(0, seat.bet);
         seat.chips = 0;
         seat.bet = 0;
       }
-      if (tableSwept > 0) {
+
+      // ------------------------------------------------------------------
+      // EL BOTE DE LA MANO EN CURSO, Y POR QUE SE TOMA EL MAXIMO
+      //
+      // Antes se sumaba `seat.bet` y nada mas. Con la mano en curso, ese dinero se
+      // evaporaba: estaba en el bote y no se pagaba a nadie.
+      //
+      // Pero tampoco se puede sumar `seat.bet` Y `hand.pot` a la vez, y este es el
+      // detalle que hace que un arreglo rapido sea un bug peor que el original:
+      // `syncEngineToTable` escribe `seat.bet = player.bet` y `hand.pot = state.pot`,
+      // y el bote ES la suma de lo que puso cada uno. Son las mismas fichas.
+      // Sumarlas cuenta el bote dos veces y crea dinero de la nada.
+      //
+      // Ademas hay un momento en que las dos cosas no coinciden: `endGame` deja
+      // `state.pot` en 0 pero no toca `player.bet`, asi que entre que acaba la mano
+      // y que `finishHand` limpia, se da `hand.pot = 0` con `seat.bet` todavia
+      // entero. Ese dinero es real y hay que cobrarlo.
+      //
+      // El maximo cubre los tres estados y nunca cuenta el bote dos veces:
+      //
+      //   mano en curso    hand.pot == suma de seat.bet   -> se cuenta el bote
+      //   mano recien acabada  hand.pot == 0               -> se cuenta lo que apostaron
+      //   mesa en reposo    los dos a cero                -> no hay nada que cobrar
+      // ------------------------------------------------------------------
+      const enElBote = Math.max(Math.max(0, t.hand.pot || 0), enBotesDeAsiento);
+      t.hand.pot = 0;
+
+      tableSwept = enAsientos + enElBote;
+
+      if (tableSwept > 0 || enBotesDeAsiento > 0 || (t.hand.pot || 0) === 0) {
         swept += tableSwept;
         await t.save();
       }
@@ -1380,7 +1414,27 @@ export const fieldManager = {
     // mesas para liberar el sitio y metio aqui. Son tan del campo como las que
     // siguen en la mesa, y sin esta linea desaparecerian del reparto: el campo
     // devolveria menos de lo que cobro y el bote se perderia por el camino.
-    swept += Math.max(0, field.deadChips || 0);
+    const dead = Math.max(0, field.deadChips || 0);
+    swept += dead;
+
+    // Y SE PONEN A CERO, porque se pagan.
+    //
+    // Esto no es cosmetico. `deadChips` son fichas que ya seenni entregar a los
+    // jugadores dentro de `swept`, asi que si el documento del campo las sigue
+    // declarando, cualquier lectura posterior las cuenta por segunda vez: el campo
+    // queda diciendo que debe dinero que ya entrego.
+    //
+    // Se vio en el test de integracion: al cerrar el campo, `deadChips` valia 5 842 y
+    // las fichas se pagaron a los jugadores. La cuenta dio +6 687 de golpe, y el
+    // reparto habia sido correcto. No habia ningun bug en el reparto: habia dos
+    // veces la misma dinero en el papel.
+    //
+    // Se pone a cero ANTES del cierre atomico de mas abajo, que se hace con
+    // `findOneAndUpdate` sobre `status`, asi que un `$set` aparte no compite con el.
+    if (dead > 0) {
+      await Field.updateOne({ _id: field._id }, { $set: { deadChips: 0 } });
+      field.deadChips = 0;
+    }
 
 // ------------------------------------------------------------------
     // EL RAKE, Y CUANTO SE REPARTE
@@ -1423,13 +1477,41 @@ export const fieldManager = {
     // regalarla.
     const distributable = Math.min(swept, netPot);
     const withheld = swept - distributable;
+    const faltan = netPot - swept;
 
-    if (swept !== netPot) {
+    if (faltan > 0) {
+      // ------------------------------------------------------------------
+      // FALTAN FICHAS, Y ESO ES UN BUG, NO UN INGRESO
+      //
+      // Lo barrido es MENOR que lo que deberia haber. O sea: hay `faltan` unidades
+      // dentro del campo que no estan en ningun asiento, en ningun bote y en
+      // `deadChips`. Se han perdido por el camino.
+      //
+      // Antes se hacia `rake = buyInsCollected - repartido`, que en este caso
+      // significa apuntarse como ingreso justo lo que se ha perdido. En el test de
+      // integracion eso dio un rake de 7 417 sobre un bote de 14 000: un 53 %.
+      //
+      // Convertir una fuga en ingresos es lo peor que puede hacer la contabilidad,
+      // porque tapa el bug y ademas el mes sale bien. Aqui el rake se queda en el 5 %
+      // real y la diferencia se avisa como error, con las cifras, para que se vea.
+      // ------------------------------------------------------------------
+      logger.error(
+        `Campo ${field.fieldId}: FALTAN ${formatUnits(faltan)} UNIDADES. ` +
+        `Entraron ${formatUnits(grossPot)}, el rake del 5 % son ${formatUnits(rakeObjetivo)} ` +
+        `y se han repartido ${formatUnits(distributable)}, pero solo havia ` +
+        `${formatUnits(swept)} en las mesas y en deadChips. ` +
+        'El rake se queda en el 5 % real: la diferencia NO son ingresos de la ' +
+        'plataforma, es dinero que ha desaparecido y hay que buscar donde.',
+      );
+    } else if (withheld > 0) {
+      // Aqui la diferencia es en el otro sentido, y si es dinero real: hay mas
+      // fichas de las que el neto permite repartir. La diferencia se queda la
+      // plataforma, que es justo lo que hace falta para que nunca se devuelva el
+      // rake por accidente.
       logger.warn(
-        `Campo ${field.fieldId}: las fichas en las mesas (${formatUnits(swept)} USDT) ` +
-        `no cuadran con buyIns - rake (${formatUnits(netPot)} USDT). ` +
-        `Se reparten ${formatUnits(distributable)} y la plataforma retiene ` +
-        `${formatUnits(withheld)}.`,
+        `Campo ${field.fieldId}: sobran ${formatUnits(withheld)} unidades ` +
+        `(fichas ${formatUnits(swept)}, neto a repartir ${formatUnits(netPot)}). ` +
+        'La diferencia se queda la plataforma y no se reparte.',
       );
     }
 
@@ -1446,7 +1528,14 @@ export const fieldManager = {
     // dinero: si las dos cifras no coinciden, hay un bug, y el test de integracion
     // lo detecta comparando el rake registrado con el dinero que de verdad salio de
     // los saldos.
-    const rakeReal = Math.max(0, grossPot - distributable);
+    //
+    // Solo se admite la retencion EXTRA cuando hay fichas de sobra, que es dinero
+    // real que la plataforma se queda de verdad. Cuando lo que hay es MENOS, la
+    // retencion seria ficticia y `rakeCollected` dejaria de ser lo que salio de los
+    // jugadores. En ese caso el rake es el 5 % y la fuga queda a la vista.
+    const rakeReal = faltan > 0
+      ? rakeObjetivo
+      : Math.max(0, grossPot - distributable);
 
     // Se escribe SIEMPRE, no solo cuando cambia.
     //
