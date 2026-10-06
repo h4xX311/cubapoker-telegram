@@ -526,16 +526,63 @@ export const fieldManager = {
       alBote += Math.max(0, s.chips) + Math.max(0, s.bet);
     }
 
+    // ------------------------------------------------------------------
+    // LAS FICHAS PRIMERO, Y SOLO SI LA MESA ESTA EN REPOSO
+    //
+    // El orden importa: si la mesa ha entrado en una mano desde que la leimos, no se
+    // toca. Perder un asiento de sobra se arregla en el siguiente ciclo; soltar un
+    // asiento con la mano en curso descuadra los indices del motor.
+    // ------------------------------------------------------------------
     if (alBote > 0) {
       await Field.updateOne({ _id: field._id }, { $inc: { deadChips: alBote } });
+    }
+
+    // ------------------------------------------------------------------
+    // UN `$set` DIRIGIDO A `seats`, NUNCA UN `save()`
+    //
+    // `table.save()` escribiria el documento entero, y `hand` es de `TableManager`: su
+    // fase, el bote, las cartas y a quien le toca. La copia que tenemos aqui lleva la
+    // `hand` de cuando se leyo, asi que guardarla entera pisa la mano viva con una
+    // foto vieja.
+    //
+    // Se vio exactamente: un campo con 3 jugadores vivos y fichas se quedo congelado en
+    // `fase=idle` y SIN MOTOR EN MEMORIA. La mesa no arrancaba otra mano, nadie jugaba y
+    // el campo no terminaba nunca. Este aviso estaba ya escrito en el sitio original,
+    // describing un bug anterior. No volver a escribirlo aqui.
+    //
+    // El filtro de `hand.phase` en la consulta es la segunda mitad de la proteccion: si
+    // la mesa no esta en reposo, `modifiedCount` sera 0 y no habra pasado nada.
+    // ------------------------------------------------------------------
+    const resLiberar = await Table.updateOne(
+      {
+        _id: table._id,
+        'hand.phase': { $in: ['idle', 'idle-awaiting'] },
+      },
+      { $set: { seats: quedan } },
+    );
+
+    if (resLiberar.modifiedCount === 0) {
+      // La mesa esta jugando. Las fichas ya estan en `deadChips`, que es lo importante:
+      // el dinero esta a salvo aunque el asiento se quede una ronda mas.
+      logger.warn(
+        `Campo ${field.fieldId}: ${table.tableId} tiene ${liberados} asiento(s) ` +
+        `liquidados pero la mesa no esta en reposo, asi que no se sueltan todavia. ` +
+        `Sus ${formatUnits(alBote)} USDT ya estan en el bote del campo; el asiento se ` +
+        'suelta en el proximo ciclo. Se sueltan en cuanto la mano termina.',
+      );
+      return alBote;
+    }
+
+    // La copia en memoria se actualiza para que quien llame vea lo mismo que la base.
+    table.seats = quedan;
+
+    if (alBote > 0) {
       logger.info(
         `Campo ${field.fieldId}: ${table.tableId} suelta ${liberados} asiento(s) ` +
         `liquidados y ${formatUnits(alBote)} USDT de sus fichas pasan al bote del campo.`,
       );
     }
 
-    table.seats = quedan;
-    await table.save();
     return alBote;
   },
 
