@@ -343,6 +343,48 @@ export class TableManager {
   // Bucle principal
   // ======================================================================
 
+  // ------------------------------------------------------------------
+  // CERROJO DE ESCRITURA POR MESA
+  //
+  // Una promesa por mesa. Cada operacion espera a la anterior de ESA mesa, y no espera a
+  // las de las demas: un campo de 300 son 43 mesas y todas trabajan a la vez.
+  //
+  // Es lo que evita el `VersionError` que mataba la mesa al sentarse. Ver el comentario
+  // largo de este bloque: dos escrituras concurrentes sobre el mismo documento compiten
+  // por la version, y una de las dos revienta.
+  // ------------------------------------------------------------------
+  private tableLocks = new Map<string, Promise<unknown>>();
+
+  /**
+   * Cuantas veces ha pasado un conflicto de version.
+   *
+   * Esta para el log de arranque: si sale distinto de 0, hay una via de escritura que no
+   * pasa por el cerrojo, y las mesas que han muerto asi no se recuperan solas.
+   */
+  private versionConflicts = 0;
+
+  private async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
+    const anterior = this.tableLocks.get(tableId) ?? Promise.resolve();
+
+    // La cola avanza aunque esta operacion falle: si no, un error deja el cerrojo
+    // envenenado y las siguientes operaciones de esa mesa cuelgan para siempre.
+    const siguiente = anterior.then(fn, fn);
+
+    this.tableLocks.set(
+      tableId,
+      siguiente.catch(() => undefined),
+    );
+
+    try {
+      return await siguiente;
+    } finally {
+      // Si esta era la ultima, se borra la entrada y no crece el mapa para siempre.
+      if (this.tableLocks.get(tableId) === siguiente) {
+        this.tableLocks.delete(tableId);
+      }
+    }
+  }
+
   private async tick(): Promise<void> {
     const tables = await Table.find({
       status: { $in: ['waiting', 'running'] },
@@ -350,10 +392,36 @@ export class TableManager {
     }).limit(50);
 
     for (const table of tables) {
+      // Con cerrojo: si el bot esta guardando esta mesa, el ciclo espera en vez de
+      // competir por la version.
       try {
-        await this.processTable(table);
+        await this.withTableLock(table.tableId, () => this.processTable(table));
       } catch (error) {
-        logger.error(`Error procesando mesa ${table.tableId}:`, error);
+        // ------------------------------------------------------------------
+        // UN VersionError NO ES UN ERROR CUALQUIERA
+        //
+        // Significa que dos escrituras compitieron por la version del documento. Con el
+        // cerrojo no deberia pasar, y si pasa es que se ha colado una cuarta via de
+        // escritura que no esta cerrada.
+        //
+        // Antes se registraba igual que cualquier otro error y se pasaba al siguiente. Eso
+        // hacia que la mesa quedara MUERTA en silencio: el error estaba en el log, pero
+        // nadie miraba, y el usuario se encontraba con su buy-in cobrado y una mesa que no
+        // se movia.
+        //
+        // Ahora se cuenta y se dice cuantas mesas han muerto por esto. Si el numero sube,
+        // hay una via de escritura sin cerrar.
+        // ------------------------------------------------------------------
+        if ((error as any)?.name === 'VersionError') {
+          this.versionConflicts += 1;
+          logger.error(
+            `CONFLICTO DE VERSION en ${table.tableId} (ejemplo #${this.versionConflicts}). ` +
+            'Dos escrituras compitieron por el documento. La mesa se queda parada. ' +
+            'Si esto se repite, hay una via de escritura sin pasar por el cerrojo.',
+          );
+        } else {
+          logger.error(`Error procesando mesa ${table.tableId}:`, error);
+        }
       }
     }
 
@@ -806,8 +874,21 @@ export class TableManager {
         BOT_CONFIG.minThinkMs +
         Math.random() * (BOT_CONFIG.maxThinkMs - BOT_CONFIG.minThinkMs);
 
+      // ------------------------------------------------------------------
+      // EL TURNO DEL BOT TAMBIEN VA CON CERROJO
+      //
+      // Este es el otro lado del VersionError: este \`setTimeout\` dispara por su cuenta,
+      // sin mirar lo que este haciendo el ciclo del gestor. Sin cerrarlo, el bot guarda la
+      // mesa mientras \`processTable\` la guarda tambien, y uno de los dos revienta.
+      //
+      // Se envuelve la LLAMADA, no el metodo, para que el cerrojo cubra tambien el tiempo
+      // que el bot tarda en decidir. Decidir fuera del cerrojo dejaria una ventana entre
+      // "ha decidido" y "va a guardar" por la que se cuela el ciclo.
+      // ------------------------------------------------------------------
       const timer = setTimeout(() => {
-        this.playBotTurn(table).catch((e) => logger.error('Error bot turn:', e));
+        this.withTableLock(table.tableId, () => this.playBotTurn(table)).catch((e) =>
+          logger.error('Error bot turn:', e),
+        );
       }, delay);
       timer.unref?.();
       this.turnTimers.set(table.tableId, timer);
@@ -1397,13 +1478,17 @@ if (this.isFieldTable(table)) {
    * persistir y programar el siguiente turno.
    */
   async applyHumanAction(
-    table: ITable,
+    mesa: ITable,
     seatIndex: number,
     action: 'fold' | 'check' | 'call' | 'raise' | 'all_in',
     amount?: number,
   ): Promise<boolean> {
-    const entry = this.engines.get(table.tableId);
-    if (!entry) return false;
+    // Tercer punto de entrada, y el que mas duele cuando falla: es la accion del jugador
+    // de verdad, y si se pierde, el usuario ve que no le pasa nada y no sabe por que.
+    return this.withTableLock(mesa.tableId, async () => {
+      const table = mesa;
+      const entry = this.engines.get(table.tableId);
+      if (!entry) return false;
 
     const { engine } = entry;
 
@@ -1416,13 +1501,14 @@ if (this.isFieldTable(table)) {
 
     // Si la mano termino, liquidar
     const state = engine.getState();
-    if (state.phase === 'finished' || state.phase === 'showdown') {
-      await this.finishHand(table, engine);
-    } else {
-      this.scheduleTurn(table);
-    }
+      if (state.phase === 'finished' || state.phase === 'showdown') {
+        await this.finishHand(table, engine);
+      } else {
+        this.scheduleTurn(table);
+      }
 
-    return true;
+      return true;
+    });
   }
 
   // ======================================================================
