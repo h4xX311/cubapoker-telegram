@@ -119,6 +119,29 @@ export interface IField extends Document {
   /** Rake acumulado del campo entero. */
   rakeCollected: number;
 
+  /**
+   * Fichas de jugadores ya eliminados que ya no estan en ninguna mesa.
+   *
+   * ------------------------------------------------------------------
+   * POR QUE HACE FALTA
+   *
+   * Cuando un jugador se elimina, sus fichas siguen siendo del campo: no vuelven
+   * a su cartera (ver `collectEliminations`). Para que el asiento se libere y las
+   * mesas puedan fusionarse, el asiento se borra de la mesa. Pero si las fichas se
+   * borran con el, el dinero desaparece del libro de cuentas y la invariante de
+   * conservacion falla.
+   *
+   * Asi que las fichas se salen de la mesa y entran aqui. `settleField` barre esta
+   * cifra ademas de las mesas, y el total repartido sale de las dos.
+   *
+   * Sin esto, los asientos de los eliminados ocupaban plaza para siempre,
+   * `seatsFree` daba 0 y ninguna mesa podia fusionarse: el campo se quedaba con
+   * variosockets de jugadores vivos y no llegaba nunca a la mesa final. Lo
+   * encontrado jugando un campo entero con el motor de verdad
+   * (`scripts/test-e2e-engine.js`).
+   */
+  deadChips: number;
+
   /** Buy-ins cobrados, para cuadrar contra el rake. */
   buyInsCollected: number;
 
@@ -215,6 +238,7 @@ const fieldSchema = new Schema<IField>(
     paidPositionsLeft: { type: Number, default: 0 },
 
     rakeCollected: { type: Number, default: 0 },
+    deadChips: { type: Number, default: 0 },
     buyInsCollected: { type: Number, default: 0 },
 
     tables: { type: [fieldTableSchema], default: [] },

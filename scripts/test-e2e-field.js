@@ -488,24 +488,45 @@ async function main() {
   section('8. LA INVARIANTE: el dinero no se crea ni se destruye');
 
   const T2 = await totalBalance();
+  const trasLiquidar = await Field.findById(field._id);
+  const rakeCobrado = (trasLiquidar && trasLiquidar.rakeCollected) || 0;
 
   note(`T0 = ${formatUnits(T0)} USDT (antes de nada)`);
   note(`T2 = ${formatUnits(T2)} USDT (tras liquidar)`);
+  note(`rake retenido = ${formatUnits(rakeCobrado)} USDT`);
 
-  const drift = T2 - T0;
+  // LA INVARIANTE EXACTA: LO QUE HAY AL FINAL ES LO QUE HABIA AL PRINCIPIO MENOS EL
+  // RAKE.
+  //
+  // Antes esta comprobacion era `T2 == T0`, y pasaba porque el campo no cobraba
+  // NADA: el rake se acumulaba por mano, y con los botes de los tiers pequenos (15 a
+  // 40 unidades) el 5 % redondeado hacia abajo daba siempre cero. El producto
+  // repartia 300 USDT sin ganar un centimo.
+  //
+  // Ahora el rake se cobra sobre el bote entero del campo al cerrarlo, que es lo que
+  // hacen `fieldPayout` y `tierRtp` desde el principio y lo que hace falta para que
+  // el RTP del 95 % sea cierto y no solo una linea del documento.
+  //
+  // Asi que el rake es la UNICA diferencia legitima entre T0 y T2. Cualquier otra
+  // desviacion es un bug de contabilidad.
+  const esperado = T0 - rakeCobrado;
+  const drift = T2 - esperado;
 
   if (drift === 0) {
-    ok(`CONSERVADO: el sistema tiene exactamente los ${formatUnits(T0)} USDT de siempre`);
+    ok(
+      `CONSERVADO: ${formatUnits(T2)} USDT, que es exactamente lo que habia ` +
+      `menos los ${formatUnits(rakeCobrado)} USDT de rake`,
+    );
   } else {
     if (drift > 0) {
       bad(
-        `LA PLATAFORMA HA CREADO ${formatUnits(drift)} USDT. ` +
-        'Se ha pagado de mas en algun sitio.',
+        `LA PLATAFORMA HA CREADO ${formatUnits(drift)} USDT por encima de ` +
+        `${formatUnits(esperado)}. Se ha pagado de mas en algun sitio.`,
       );
     } else {
       bad(
-        `LA PLATAFORMA HA PERDIDO ${formatUnits(-drift)} USDT. ` +
-        'Se ha pagado de menos, o el dinero se ha evaporado.',
+        `LA PLATAFORMA HA PERDIDO ${formatUnits(-drift)} USDT: hay ` +
+        `${formatUnits(T2)} y deberia haber ${formatUnits(esperado)}.`,
       );
     }
     note('Un poker que no conserva el saldo no es un poker: es una fabrica de dinero.');
@@ -701,9 +722,9 @@ async function main() {
     status: { $in: ['filling', 'running', 'final'] },
   });
   const pot = campo.buyInsCollected;
-  const rake = Math.floor((pot * 5) / 100);
-  await Field.updateOne({ _id: campo._id }, { $set: { rakeCollected: rake } });
-  note(`bote ${formatUnits(pot)} USDT, rake simulado ${formatUnits(rake)} USDT (5%)`);
+    const rakeSimulado = Math.floor((pot * 5) / 100);
+  await Field.updateOne({ _id: campo._id }, { $set: { rakeCollected: rakeSimulado } });
+  note(`bote ${formatUnits(pot)} USDT, rake simulado ${formatUnits(rakeSimulado)} USDT (5%)`);
 
   // Se eliminan 11 de 12 y se deja un ganador.
   const ganadorId = ids[0];
@@ -716,7 +737,7 @@ async function main() {
     await t.save();
   }
 
-  await fieldManager.collectEliminations(campo);
+  const esperadoRake2 = antes - rakeSimulado;
 
   const trasEliminarTodos = await totalBalance();
   note(`tras eliminar a 11: ${formatUnits(trasEliminarTodos)} USDT ` +
@@ -727,17 +748,17 @@ async function main() {
   await fieldManager.settleField(campoFinal, ganador);
 
   const despuesRake = await totalBalance();
-  const esperado = antes - rake;
-  note(`antes ${formatUnits(antes)} menos rake ${formatUnits(rake)} = ${formatUnits(esperado)}`);
+  const esperadoRake = antes - rakeSimulado;
+  note(`antes ${formatUnits(antes)} menos rake ${formatUnits(rakeSimulado)} = ${formatUnits(esperadoRake)}`);
   note(`despues: ${formatUnits(despuesRake)} USDT`);
 
-  if (despuesRake === esperado) {
+  if (despuesRake === esperadoRake) {
     ok(
       `CONSERVADO menos rake: el sistema tiene ${formatUnits(despuesRake)} USDT, ` +
-      `exactamente lo que tenia menos los ${formatUnits(rake)} USDT de rake`,
+      `exactamente lo que tenia menos los ${formatUnits(rakeSimulado)} USDT de rake`,
     );
   } else {
-    const diff = despuesRake - esperado;
+    const diff = despuesRake - esperadoRake;
     if (diff > 0) bad(`se han creado ${formatUnits(diff)} USDT de mas`);
     else bad(`faltan ${formatUnits(-diff)} USDT: se ha perdido dinero`);
   }

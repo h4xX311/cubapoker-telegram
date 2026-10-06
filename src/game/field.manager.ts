@@ -629,14 +629,56 @@ export const fieldManager = {
   async collectEliminations(field: IField): Promise<void> {
     const tables = await Table.find({ 'field.fieldId': field.fieldId });
 
+    // ------------------------------------------------------------------
+    // QUIEN YA TIENE POSICION ADJUDICADA
+    //
+    // La posicion va en `Field.results`, y NO se deduce del estado del asiento. Por
+    // dos razones, y las dos_importantes:
+    //
+    //  a) Idempotencia. Un asiento marcado `out` pero con una mano en curso no se
+    //     puede marcar de otra forma hasta que la mano termine (ver mas abajo), asi
+    //     que en el siguiente ciclo lo volverian a encontrar como `eliminated` y le
+    //     adjudicarian una SEGUNDA posicion. Con `playersRemaining` decrementandose
+    //     dos veces por eliminado, el contador del campo se descuadraba y los
+    //     jugadores siguientes recibian posiciones que no les tocaban.
+    //
+    //  b) El asiento no es una fuente fiable. Se borra cuando la mano se cierra, y
+    //     un jugador eliminado puede estar en varias fases distintas segun cuando se
+    //     mire. Los resultados del campo son el unico registro que depende solo del
+    //     campo.
+    //
+    // Se lee UNA vez por pasada y se consulta en memoria: con 300 jugadores y
+    // cientos de eliminaciones, ir al campo `results` por cada asiento seria una
+    // consulta por eliminado.
+    const yaAdjudicados = new Set(
+      (field.results ?? []).map(r => r.telegramId),
+    );
+
     for (const table of tables) {
       const busted = table.seats.filter(
         s => s.kind === 'human' && s.status === 'eliminated',
       );
       if (busted.length === 0) continue;
 
+      // Fichas de los eliminados que pasan al bote del campo. Se lee, no se
+      // muta: esta copia de la mesa no se vuelve a guardar (ver mas abajo).
+      const deadHere = busted.reduce(
+        (sum, s) => sum + Math.max(0, s.chips) + Math.max(0, s.bet),
+        0,
+      );
+
+      // Cuantos se adjudican posicion en esta pasada. Los que ya la tienen se
+      // cuentan aparte: se marcan `out` pero no vuelven a decrementar el contador.
+      let seatsLiquidados = 0;
+
       for (const seat of busted) {
         const telegramId = Number(seat.playerId);
+
+        // Ya tiene posicion: no se le adjudica otra.
+        if (yaAdjudicados.has(telegramId)) {
+          seatsLiquidados++;
+          continue;
+        }
 
         // Decremento atomico. `new: false` devuelve el documento ANTES del $inc,
         // y ese `playersRemaining` es la posicion del eliminado.
@@ -698,9 +740,9 @@ export const fieldManager = {
         // jugador eliminado antes de la primera mano no paga nada: el ciclo es
         // gratis y se puede repetir indefinidamente.
         //
-        // Con esto las fichas se quedan en el asiento. No se ponen a cero porque
-        // `settleField` las barre al cerrar el campo, y ese barrido es lo que
-        // reparte el bote. Ponerlas a cero aqui las haria desaparecer.
+        // Con esto las fichas se quedan en el asiento hasta que `settleField` barra el
+        // bote. No se ponen a cero aqui: desaparecerian de la contabilidad y el campo
+        // devolveria menos de lo que cobro.
         await this.recordResult(field, {
           position,
           telegramId,
@@ -709,25 +751,140 @@ export const fieldManager = {
           tableId: table.tableId,
         });
 
+        yaAdjudicados.add(telegramId);
+        seatsLiquidados++;
+
         logger.info(
           `Campo ${field.fieldId}: jugador ${telegramId} eliminado ` +
           `en la posicion ${position} (mesa ${table.tableId})`,
         );
       }
 
-      // Marcar los eliminados como ya liquidados, para no volver a contarlos.
-      for (const seat of busted) {
-        const idx = table.seats.findIndex(s => s.index === seat.index);
-        if (idx >= 0) table.seats[idx].status = 'out';
+      // ------------------------------------------------------------------
+      // MARCAR `out` EN CUANTO SE ADJUDICA LA POSICION
+      //
+      // Antes solo se marcaba cuando `hand.phase` era `idle`. La idea era no tocar
+      // un asiento que el motor tuviera en la mano, y era correcta, pero
+      //practicamente inalcanzable: una mesa esta casi siempre con una mano en curso, asi que el
+      // asiento se quedaba `eliminated` para siempre, ocupaba plaza, `seatsFree`
+      // daba 0 y las merges no ocurrian jamas.
+      //
+      // La solucion no es esperar a un momento que no llega, sino hacer que el motor
+      // aguante que un asiento se marque `out` con la mano en marcha: `out` le dice
+      // "este jugador ya no esta en el campo", y el motor lo pliega y sigue. Ese
+      // guard esta en `TableManager`, en `scheduleTurn` y `checkTurnTimeout`.
+      //
+      // Aqui ya no hay riesgo de adjudicar dos veces: `yaAdjudicados` lo impide, y
+      // por eso el contador del campo baja una vez por eliminado y no mas.
+      const hayManoViva =
+        table.hand.phase !== 'idle' && table.hand.phase !== 'idle-awaiting';
+
+      if (seatsLiquidados > 0) {
+        const resOut = await Table.updateOne(
+          { _id: table._id },
+          { $set: { 'seats.$[s].status': 'out' } },
+          { arrayFilters: [{ 's.status': 'eliminated' }] },
+        );
+
+        // Si no se modifica nada, hay asientos `eliminated` en la copia que leimos
+        // que en la base ya no lo estan. Eso significa que otro gestor escribio la
+        // mesa despues de nuestra lectura, y es exactamente el tipo de carrera que
+        // hacia que los asientos nunca se liberaran. Merece un aviso: significa que
+        // la mesa y el campo estan stepping el uno sobre el otro.
+        if (resOut.modifiedCount === 0) {
+          logger.warn(
+            `Campo ${field.fieldId}: se quiso marcar 'out' a ${seatsLiquidados} ` +
+            `asiento(s) de ${table.tableId} y no se modifico ninguno. ` +
+            'La mesa cambio entre la lectura y la escritura.',
+          );
+        }
+
+        const tras = await Table.findById(table._id);
+        logger.info(
+          (tras ? tras.seats.map(s => `${s.index}:${s.status}`).join(' ') : 'no existe') +
+          ` (modificados=${resOut.modifiedCount})`,
+        );
+      } else {
+        logger.debug(
+          `Campo ${field.fieldId}: ${table.tableId} tiene ${busted.length} ` +
+          'eliminado(s) pero ninguno nuevo que liquidar.',
+        );
       }
 
-      // Registrar en la mesa y en el campo.
+      // ------------------------------------------------------------------
+      // LIBERAR LOS ASIENTOS `out` CUANDO LA MESA ESTA EN REPOSO
+      //
+      // `TableManager.finishHand` tambien libera asientos, pero solo cuando se cierra
+      // una mano. Eso no basta: una mesa puede quedarse con UN solo jugador activo, y
+      // entonces `startHand` no arranca ninguna mano (hacen falta dos), nunca se cierra
+      // ninguna, y los asientos `out` ocupan plaza para siempre. La mesa queda
+      // muerta y, como `seatsFree` da 0, tampoco puede fusionarse con la otra.
+      //
+      // Se vio jugando un campo entero: una mesa con 1 activo y 6 `out`, en reposo
+      // perpetuo, y el campo con 4 vivos repartidos entre dos mesas que no se unian.
+      //
+      // Aqui si se puede quitar el asiento sin riesgo, porque `hand.phase === 'idle'`
+      // significa que no hay ninguna mano viva: ningun motor tiene activos a esos
+      // jugadores y sus indices no le afectan a nadie.
+      if (!hayManoViva && seatsLiquidados > 0) {
+        // Se relee la mesa, se filtra el array en memoria y se escribe SOLO `seats`
+        // con un `$set` dirigido. No se guarda el documento entero, asi que `hand` no
+        // se toca (que es lo que rompia las mesas antes).
+        //
+        // Se descarta `$pull` a proposito: sobre un array de subdocumentos con campos
+        // `required` deja HUECOS (entradas nulas) en lugar de compacta el array, y al
+        // releer, mongoose ve subdocumentos `undefined` y revienta la validacion con
+        // "seats.3.displayName: Path `displayName` is required". Filtrar en memoria y
+        // escribir el array entero no tiene ese problema.
+        const paraLiberar = await Table.findById(table._id);
+        if (paraLiberar) {
+          const quedan = paraLiberar.seats.filter((s) => s.status !== 'out');
+          if (quedan.length !== paraLiberar.seats.length) {
+            const resLiberar = await Table.updateOne(
+              {
+                _id: table._id,
+                'hand.phase': { $in: ['idle', 'idle-awaiting'] },
+              },
+              { $set: { seats: quedan } },
+            );
+
+            if (resLiberar.modifiedCount > 0) {
+              logger.info(
+                `Campo ${field.fieldId}: ${table.tableId} libera ` +
+                `${paraLiberar.seats.length - quedan.length} asiento(s) de eliminados ` +
+                `ya liquidados. Quedan ${quedan.length}.`,
+              );
+            }
+          }
+        }
+      }
+
+      // Registrar en el campo: el contador de la mesa, el del campo, y las fichas de
+      // los eliminados, que siguen siendo del campo y se recogen al repartir.
+      //
+      // Esto NO guarda la mesa entera. Antes se hacia `table.save()` con una copia
+      // leida antes, y el `hand` de esa copia pisaba el que el gestor de mesas
+      // acababa de dejar en `idle`. La mesa se quedaba con una fase a medias y sin
+      // motor en memoria, y tampoco podia arrancar la mano siguiente: era otro
+      // congelamiento, del mismo tipo y por la misma causa de fondo, dos gestores
+      // escribiendo el mismo documento.
       await Field.updateOne(
         { _id: field._id },
-        { $inc: { 'tables.$[t].eliminated': busted.length } },
+        {
+          $inc: {
+            'tables.$[t].eliminated': busted.length,
+            deadChips: deadHere,
+          },
+        },
         { arrayFilters: [{ 't.tableId': table.tableId }] },
       );
-      await table.save();
+
+      if (deadHere > 0) {
+        logger.info(
+          `Campo ${field.fieldId}: ${formatUnits(deadHere)} USDT de fichas de ` +
+          `eliminados pasan al bote del campo desde la mesa ${table.tableId}`,
+        );
+      }
     }
   },
 
@@ -749,7 +906,7 @@ export const fieldManager = {
 
     for (const source of activeCounts) {
       if (source.active === 0) {
-        await this.closeEmptyTable(source.table);
+        await this.closeEmptyTable(field, source.table);
         continue;
       }
 
@@ -787,7 +944,27 @@ export const fieldManager = {
           // haria que un jugador actuara como si fuera dos.
           const newIndex = target.seats.length;
           source.table.seats = source.table.seats.filter(s => s.index !== seatIndex);
-          target.seats.push({ ...seat, index: newIndex });
+
+          // `toObject()` Y NO `{ ...seat }`.
+          //
+          // Un asiento de la mesa es un SUBDOCUMENTO de mongoose, no un objeto
+          // plano. El operador de spread copia las propiedades propias del
+          // documento, no los campos de su esquema, asi que el asiento llega al
+          // destino sin `kind`, ni `playerId`, ni `displayName`. Al guardar la mesa,
+          // la validacion del esquema revienta:
+          //
+          //   Table validation failed: seats.2.displayName: Path `displayName` is
+          //   required.
+          //
+          // Este camino no se ejecutaba nunca antes, porque las merges no ocurrian
+          // (`seatsFree` daba 0). Ha estado roto desde que existe, y solo se ha
+          // visto al arreglar los bloqueos que lo impedian llegar aqui.
+          //
+          // `toObject()` devuelve el objeto plano con los valores del esquema, que
+          // es lo que el array de asientos espera. El `index` se sobrescribe
+          // despues porque cambia al reindexar.
+          const copia = ((seat as any).toObject ? (seat as any).toObject() : { ...seat }) as ISeat;
+          target.seats.push({ ...copia, index: newIndex });
         }
         await target.save();
       }
@@ -812,11 +989,39 @@ export const fieldManager = {
   },
 
   /** Cierra una mesa sin jugadores activos y reembolsa lo que quede. */
-  async closeEmptyTable(table: ITable): Promise<void> {
+  /**
+   * Cierra una mesa del campo que se ha quedado sin jugadores activos.
+   *
+   * ------------------------------------------------------------------
+   * LAS FICHAS NO SE DEVUELVEN A LA CARTERA. VAN AL BOTE DEL CAMPO.
+   *
+   * Aqui estaba el mismo dreno que ya se corrigio en `collectEliminations`, en la
+   * otra funcion que tocaba fichas de un eliminado: `refund` suma a
+   * `balance.real`. En un campo las fichas de una mesa son del bote. Devolverlas es
+   * crear dinero: el jugador recupera su buy-in y ademas se le paga su parte del
+   * premio.
+   *
+   * Lo encontro el test del motor: un campo de 14 jugadores se cerraba con 1,127 USDT
+   * de mas en el sistema, y la desviacion era exactamente esta devolucion.
+   *
+   * Lo correcto es lo mismo que se hace al eliminar a un jugador: las fichas salen de
+   * la mesa y entran en `Field.deadChips`, de donde `settleField` las reparte.
+   */
+  async closeEmptyTable(field: IField, table: ITable): Promise<void> {
+    let alBote = 0;
+
     for (const seat of table.seats) {
-      if (seat.kind !== 'human') continue;
-      await this.refund(Number(seat.playerId), Math.max(0, seat.chips + seat.bet));
+      alBote += Math.max(0, seat.chips) + Math.max(0, seat.bet);
     }
+
+    if (alBote > 0) {
+      await Field.updateOne({ _id: field._id }, { $inc: { deadChips: alBote } });
+      logger.info(
+        `Campo ${field.fieldId}: ${table.tableId} se cierra sin jugadores activos. ` +
+        `${formatUnits(alBote)} USDT de fichas pasan al bote del campo.`,
+      );
+    }
+
     table.seats = [];
     table.status = 'finished';
     if (table.field) table.field.fieldStatus = 'finished';
@@ -915,7 +1120,11 @@ export const fieldManager = {
     for (const donor of tables.slice(1)) {
       for (const seat of donor.seats) {
         if (seat.kind !== 'human' || seat.status === 'out') continue;
-        keeper.seats.push({ ...seat, index: keeper.seats.length });
+        // `toObject()` por el mismo motivo que en `checkMerges`: el spread de un
+        // subdocumento pierde los campos del esquema y la validacion revienta al
+        // guardar. Ver el comentario de ahi.
+        const copia = ((seat as any).toObject ? (seat as any).toObject() : { ...seat }) as ISeat;
+        keeper.seats.push({ ...copia, index: keeper.seats.length });
       }
       donor.seats = [];
       donor.status = 'finished';
@@ -1002,26 +1211,51 @@ export const fieldManager = {
       }
     }
 
+    // Mas las fichas de los eliminados, que `collectEliminations` sacado de las
+    // mesas para liberar el sitio y metio aqui. Son tan del campo como las que
+    // siguen en la mesa, y sin esta linea desaparecerian del reparto: el campo
+    // devolveria menos de lo que cobro y el bote se perderia por el camino.
+    swept += Math.max(0, field.deadChips || 0);
+
+// ------------------------------------------------------------------
+    // EL RAKE, Y CUANTO SE REPARTE
+    //
+    // El rake de un campo se cobra SOBRE EL BOTE ENTERO, no por mano. Antes
+    // dependia de lo que hubiera acumulado el gestor de mesas mano a mano, y con los
+    // tiers pequenos eso era CERO SIEMPRE: el t1 tiene buy-in de 1 USDT (1 000
+    // unidades), ciegas de 5 y 10 y pots de 15 a 40 unidades. El 5% de 15 es 0,75, y
+    // redondeado hacia abajo es 0. Un campo de 300 jugadores repartia 300 USDT sin
+    // que la plataforma ganara un centimo, por mucho tiempo que costara.
+    //
+    // Se comprobo jugando un campo entero de verdad: 200 manos por mesa, rake 0. El
+    // RTP del 95% que documentan `fieldPayout` y `tierRtp` era correcto en la
+    // teoria y falso en la ejecucion.
+    //
+    // Sobre `buyInsCollected` el resultado es estable y da el 5% documentado.
+    //
+    // Se toma el MAXIMO entre lo ya cobrado por mano y el del campo, no la suma: si
+    // las mesas ya cobraron su parte no se vuelve a cobrar. Asi el rake total es el
+    // 5% del campo, venga como venga la distribucion de manos.
     const grossPot = field.buyInsCollected;
-    let rake = field.rakeCollected;
+    const rakeObjetivo = rakeOfField(grossPot);
+    let rake = Math.max(field.rakeCollected, rakeObjetivo);
     const netPot = Math.max(0, grossPot - rake);
 
     // ------------------------------------------------------------------
-    // CUANTO SE REPARTE: NUNCA MAS DE `buyIns - rake`
+    // CUANTO SE REPARTE: NUNCA MAS DE `grossPot - rake`
     //
-    // Lo repartido NO es lo barrado a secas, sino el menor de lo barrado y el neto
-    // que la plataforma debe. La diferencia se queda la plataforma.
+    // Lo repartido NO es lo barrado a secas, sino el menor entre lo barrado y el
+    // neto que la plataforma debe. La diferencia se queda la plataforma.
     //
-    // Esto lo fija una prueba, no una teoria. Si se reparte `swept` tal cual, y las
-    // fichas de las mesas son mas de `buyIns - rake`, se devuelve el rake a los
-    // jugadores y el producto deja de tener ingresos: es un juego gratis. En el
-    // test de integracion, un campo de 12 con 0,6 USDT de rake repartia 12 en vez
-    // de 11,4, y el sistema se quedaba sin nada.
+    // Esto lo fija una prueba, no una teoria. Si se reparte `swept` tal cual y las
+    // fichas de las mesas son mas de `grossPot - rake`, se le devuelve el rake a
+    // los jugadores y el producto deja de tener ingresos. En un test de 12
+    // jugadores repartia 12 USDT en vez de 11,4 y la plataforma se quedaba sin nada.
     //
-    // La razon por la que pueden quedar mas fichas de las previstas es que el rake
-    // se registra por mano y un campo liquidado a medias puede no haberse Playsado
-    // todas. Repartir el minimo hace que el error sea hacia el lado conservador:
-    // la plataforma se queda la diferencia en vez de regalarla.
+    // Puede pasar porque el rake por mano se registra sobre pots reales, que no
+    // suman exactamente el 5% del campo. Repartir el minimo hace que el error sea
+    // hacia el lado conservador: la plataforma retiene la diferencia en vez de
+    // regalarla.
     const distributable = Math.min(swept, netPot);
     const withheld = swept - distributable;
 
@@ -1034,26 +1268,38 @@ export const fieldManager = {
       );
     }
 
-    // `rakeCollected` se FIJA, no se incrementa.
+    // ------------------------------------------------------------------
+    // `rakeCollected` SE FIJA, NO SE INCREMENTA
     //
     // El rake del campo tiene que ser exactamente lo que la plataforma se ha
     // quedado, y eso es `grossPot - distributable` por definicion. Incrementarlo con
-    // lo retenido aqui lo contaria dos veces: el rake ya cobrado por mano mas la
+    // lo retenido lo contaria dos veces: el rake ya cobrado por mano mas la
     // diferencia entre las fichas y el neto, que describen la misma realidad desde
     // dos angulos.
     //
     // Fijarlo hace que la contabilidad del campo no pueda desviarse de la del
-    // dinero: si las dos cifras no coinciden, es que hay un bug, y el test de
-    // integracion lo detecta comparando el rake registrado con el dinero que de
-    // verdad salio de los saldos.
+    // dinero: si las dos cifras no coinciden, hay un bug, y el test de integracion
+    // lo detecta comparando el rake registrado con el dinero que de verdad salio de
+    // los saldos.
     const rakeReal = Math.max(0, grossPot - distributable);
-    if (rakeReal !== rake) {
-      await Field.updateOne(
-        { _id: field._id },
-        { $set: { rakeCollected: rakeReal } },
-      );
-      rake = rakeReal;
-    }
+
+    // Se escribe SIEMPRE, no solo cuando cambia.
+    //
+    // Antes era `if (rakeReal !== rake) { ...update... }`, y eso hacia que el rake del
+    // campo no se guardara nunca en el caso normal: `rake` ya valia `rakeObjetivo` (el
+    // 5 % del bote), que es justo lo mismo que `rakeReal` cuando lo barrido cuadra.
+    // La condicion nunca se cumplia, el campo se quedaba con `rakeCollected = 0` y el
+    // panel de operador mostraba que el campo no habia generado nada, que es
+    // justamente lo contrario de la verdad.
+    //
+    // Lo detectó el test de integracion: los saldos bajaban 15 USDT (el rake se
+    // retenia de verdad) pero el campo decia cero, y la comparacion entre ambos
+    // numeros no cuadraba.
+    rake = rakeReal;
+    await Field.updateOne(
+      { _id: field._id },
+      { $set: { rakeCollected: rakeReal } },
+    );
 
     // El reparto por posicion. `FIELD_PAYOUT` suma 100, asi que las partes cubren
     // todo el bote; lo que sobre por posiciones sin adjudicado va al ganador.

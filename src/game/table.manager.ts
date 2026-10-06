@@ -147,6 +147,47 @@ export class TableManager {
     this.tickHandle.unref?.();
   }
 
+  /**
+   * Quien tiene el turno, resuelto BIEN.
+   *
+   * ------------------------------------------------------------------
+   * EL BUG MAS SILENCIOSO DEL MOTOR
+   *
+   * `GameState.currentPlayerIndex` es un indice dentro de `state.players`, que es la
+   * lista de jugadores QUE ENTRAN EN ESTA MANO. NO es un indice de asiento de la mesa.
+   *
+   * `startHand` anade solo los asientos activos:
+   *
+   *   for (const seat of inHand) engine.addPlayer(seat.index.toString(), ...)
+   *
+   * Asi que si los asientos activos son el 0, 3, 4 y 5, la lista del motor queda
+   * [0, 3, 4, 5] y `currentPlayerIndex === 1` significa el asiento 3, no el asiento 1.
+   *
+   * El codigo hacia `table.seats.find(s => s.index === state.currentPlayerIndex)`, que
+   * confunde las dos cosas. Solo coincide cuando los asientos activos son contiguos
+   * desde el 0, o sea, al principio de la vida de una mesa. En cuanto alguien se
+   * elimina y deja un hueco, la resolucion empieza a dar jugadores equivocados.
+   *
+   * El sintoma era un congelamiento total del campo: el motor creia que le tocaba a
+   * un asiento `out` (ya liquidado) cuando en realidad le tocaba a uno activo, lo
+   * pliegaba, y se quedaba esperando a un jugador al que nadie iba a llamar. Mesas
+   * con `preflop` y `acting` apuntando a un asiento ya liquidado, sin error ni
+   * excepcion ni timeout. Se encontro jugando un campo entero de verdad con el motor
+   * (`scripts/test-e2e-engine.js`).
+   *
+   * Y peor que un bloqueo: un pliego equivocado hace perder fichas a un jugador que
+   * no habia plegado. No era solo un congelamiento, era tambien un robo de fichas.
+   *
+   * Este helper es el UNICO sitio donde se resuelve el asiento del turno. Si vuelve a
+   * aparecer un `seats.find(s => s.index === currentPlayerIndex)`, es un bug.
+   */
+  private resolveActingSeat(table: ITable, engine: PokerGame): ISeat | null {
+    const state = engine.getState();
+    const player = state.players[state.currentPlayerIndex];
+    if (!player) return null;
+    return table.seats.find(s => s.index === parseInt(player.id, 10)) ?? null;
+  }
+
 /** Detiene los timers. Sincrono: se llama en varios sitios, incluidos tests. */
   stop(): void {
     if (this.tickHandle) {
@@ -358,14 +399,38 @@ export class TableManager {
     const bots = table.seats.filter(s => s.kind === 'bot').length;
     const occupied = table.seats.length;
 
-    // Objetivo: mantener una proporcion de bots hasta un tope
+    // ------------------------------------------------------------------
+    // UNA MESA DE CAMPO YA ARRANCADA NO RECIBE MAS BOTS
+    //
+    // Antes no habia ninguna comprobacion, y el campo no terminaba nunca.
+    //
+    // Cuando un bot caia, `finishHand` lo quita de la mesa y en el siguiente ciclo
+    // `needBots` volvia a ser cierto, asi que entraba un bot NUEVO con las fichas
+    // enteras. Los humanos solo tenian que ganar contra un rival recien nacido, y
+    // como siempre ganaban, ninguno se eliminaba jams. El campo se quedava con
+    // once vivos para siempre y ningun campo podia terminar.
+    //
+    // Se comprobo jugando un campo entero: 4 000 rondas, once vivos constantes,
+    // tres eliminados y ni uno ms. Con 300 jugadores, 43 mesas, esto es un producto
+    // que no acaba nunca y bloquea el dinero de todos en el campo.
+    //
+    // El bots siguen rellenando huecos mientras el campo se ESTA LLENANDO, que es
+    // justo cuando hacen falta. Una vez que arranca, la plantilla esta cerrada:
+    // los que no entraron no entran, y los que entraron no se van hasta que ganan
+    // oUntil que se les elimina.
+    const esCampoArrancado =
+      this.isFieldTable(table) &&
+      (table.field?.fieldStatus === 'running' || table.field?.fieldStatus === 'final');
+
     const desiredBots = Math.min(
       BOT_CONFIG.maxBotsPerTable,
       Math.floor(humans * BOT_CONFIG.botRatio) + (humans === 0 ? 4 : 2),
     );
 
     const needBots =
-      occupied < maxSeats && bots < Math.min(desiredBots, maxSeats - occupied);
+      !esCampoArrancado &&
+      occupied < maxSeats &&
+      bots < Math.min(desiredBots, maxSeats - occupied);
 
     if (needBots) {
       const toAdd = Math.min(2, maxSeats - occupied); // gradual, no de golpe
@@ -445,13 +510,42 @@ export class TableManager {
     const activeSeats = table.seats.filter(s => s.status === 'active' && s.chips > 0);
     if (activeSeats.length < 2) return;
 
-    // Limpiar estado de la mano anterior
+    // ------------------------------------------------------------------
+    // `status` DE LOS ASIENTOS VUELVE A `active` ANTES DE ESTA COMPROBACION
+    //
+    // `finishHand` deja los asientos en el estado en que acabaron la mano:
+    // `folded`, `called`, `betting`... Que son estados TERMINALES de una mano, no
+    // del jugador. Sin volver a ponerlos en `active`, la comprobacion de
+    // `activeSeats` ve menos de dos jugadores activos y no arranca NUNCA una
+    // segunda mano.
+    //
+    // El efecto en el campo era que cada mesa jugaba exactamente una mano y se
+    // congelaba: nadie se eliminaba, nadie ganaba, el campo no terminaba nunca. Con
+    // 300 jugadores y 43 mesas el producto se quedaba colgado para siempre.
+    //
+    // No se puede ver leyendo: el motor funciona, el rake se cobra, las
+    // eliminaciones se adjudican. Solo falta el paso de una mano a la siguiente. Lo
+    // encontro el test end-to-end del motor (`scripts/test-e2e-engine.js`).
+    //
+    // El reset principal esta en `finishHand`, que es donde la mano se cierra y
+    // donde el estado tiene que quedar coherente para cualquier cosa que lea la
+    // mesa entre manos. Aqui se repite por si una mesa llegara aqui con estados
+    // sueltos (por ejemplo, tras un reinicio a medias).
+    //
+    // `eliminated` y `out` NO se tocan: son estados ya resueltos. El field manager
+    // depende de `eliminated` para adjudicar la posicion del jugador, y `out` es
+    // con el que se marca a los liquidados para no volver a contarlos.
     for (const seat of table.seats) {
       seat.bet = 0;
       seat.totalBet = 0;
       seat.lastAction = undefined;
+
+      // EL ORDEN IMPORTA: out SE RESPETA SIEMPRE.
+      if (seat.status === 'out') continue;
       if (seat.chips <= 0) seat.status = 'eliminated';
+      else if (seat.status !== 'eliminated') seat.status = 'active';
     }
+
 
     // Motor en memoria. `maxSeats` se pasa como tope del motor: sin el, el
     // motor limitaba a 6 jugadores y una mesa de 500 nunca arrancaba.
@@ -552,8 +646,36 @@ export class TableManager {
       const seatIndex = parseInt(player.id, 10);
       if (Number.isNaN(seatIndex)) continue;
 
-      const seat = table.seats[seatIndex];
+      // ------------------------------------------------------------------
+      // SE BUSCA POR `index`, NO POR POSICION EN EL ARRAY. ESTO NO ES UN DETALLE.
+      //
+      // Antes era `table.seats[seatIndex]`, o sea, "el asiento que ocupa la
+      // posicion `seatIndex` del array". Funciona SOLO mientras `seats[i].index === i`
+      // para todo `i`, es decir, mientras no se haya liberado ningun asiento.
+      //
+      // En cuanto `finishHand` quita un asiento `out`, el array se desplaza y
+      // `seats[3]` ya no es el asiento 3. Entonces el motor escribia las fichas y el
+      // estado de un jugador SOBRE OTRO, que es a la vez:
+      //
+      //   - Un robo de fichas: el jugador A perdia lo que tenia y se lo ponia a B.
+      //   - Una resurreccion de estados: `seat.status` se reescribia a
+      //     `active`/`folded` sobre asientos que estaban `eliminated` u `out`, asi
+      //     que los eliminados volvian a la mesa y sus puestos nunca se liberaban.
+      //
+      // El efecto observado era el campo entero atascado: mesas que no se terminaban
+      // nunca, con eliminados que reaparecian y los sitios ocupados.
+      //
+      // `find` sobre `index` es el unico acceso correcto. Con 7 asientos por mesa el
+      // coste es irrelevante, y con las mesas de un campo tampoco lo es.
+      const seat = table.seats.find(s => s.index === seatIndex);
       if (!seat) continue;
+
+      // Un asiento ya liquidado (`out`) no se resucita. Es terminal: el field manager
+      // ya le adjudico la posicion y cobro sus fichas del bote. Volverlo a poner en
+      // `active` lo devuelve a la mesa con cero fichas y hace que el motor espere un
+      // turno suyo para siempre.
+      if (seat.status === 'out') continue;
+
       seat.chips = player.chips;
       seat.bet = player.bet;
       seat.totalBet = player.totalBet;
@@ -598,10 +720,52 @@ export class TableManager {
     // mande un aviso de turno fantasma al humano del asiento 0.
     if (!ACTION_PHASES.has(state.phase)) return;
 
-    const actingIndex = state.currentPlayerIndex;
-    const seat = table.seats.find(s => s.index === actingIndex);
+    const seat = this.resolveActingSeat(table, engine);
 
     if (!seat) return;
+
+    // ------------------------------------------------------------------
+    // UN ASIENTO `out` NO JUEGA
+    //
+    // El field manager marca `out` al asiento de un jugador que ya tiene posicion
+    // adjudicada, y lo hace aunque la mano este en curso, porque esperar a que la
+    // mano terminase no sirve: una mesa esta casi siempre jugando, y el asiento
+    // ocupaba plaza para siempre, con lo que las merges no ocurrian nunca.
+    //
+    // El problema es que el motor ya tiene a ese jugador en la mano y le toca. Si no
+    // se hace nada, la mesa se queda esperando a alguien a quien nadie va a jugar:
+    // `currentPlayerIndex` apunta al asiento, `out` significa "ya liquidado", y no
+    // hay ninguna accion pendiente. La mesa espera para siempre, sin error en ningun
+    // log ni excepcion ni timeout.
+    //
+    // Se vio con dos mesas congeladas en `preflop` con `acting=3` y el asiento 3 en
+    // `out`.
+    //
+    // AQUI NO SE RESCHEDULEA, Y ES LO IMPORTANTE. Si tras plegar se volviera a llamar
+    // a `scheduleTurn`, y el asiento siguiente tambien estuviera `out`, se encadenan
+    // llamadas. Y si el `fold` lo rechaza (jugador ya folded, o con cero fichas), el
+    // `currentPlayerIndex` no cambia y la recursion no termina: `RangeError: Maximum
+    // call stack size exceeded`. Ya paso.
+    //
+    // Se pliega y se devuelve. El turno lo Scheride el siguiente ciclo, en
+    // `checkTurnTimeout`, que tiene el mismo guard y no se llama a si mismo. Asi el
+    // avance es por ticks y no por pila.
+    //
+    // Tampoco se guarda aqui, por el mismo motivo de antes: `save()` desde un
+    // `scheduleTurn` sincrono y encadenado dispara `ParallelSaveError`. El estado se
+    // persiste en `processTable` y en `checkTurnTimeout`.
+    // ------------------------------------------------------------------
+    if (seat.status === 'out') {
+      engine.performAction(seat.index.toString(), 'fold');
+      this.syncEngineToTable(table, engine);
+      table.hand.lastActionAt = new Date();
+
+      logger.info(
+        `Mesa ${table.tableId}: el asiento ${seat.index} ya estaba liquidado ` +
+        '(out). Se pliega para no bloquear la mano.',
+      );
+      return;
+    }
 
     if (seat.kind === 'bot') {
       const delay =
@@ -679,7 +843,7 @@ export class TableManager {
 
     const { engine } = entry;
     const state = engine.getState();
-    const seat = table.seats.find(s => s.index === state.currentPlayerIndex);
+    const seat = this.resolveActingSeat(table, engine);
 
     if (!seat || seat.kind !== 'bot') {
       this.scheduleTurn(table);
@@ -752,8 +916,31 @@ export class TableManager {
       : 0;
     const elapsed = Date.now() - lastAction;
 
-    const seat = table.seats.find(s => s.index === state.currentPlayerIndex);
-    if (!seat || seat.kind !== 'human') return;
+    const seat = this.resolveActingSeat(table, engine);
+    if (!seat) return;
+
+    // ------------------------------------------------------------------
+    // UN ASIENTO `out` SE PLIEGA AQUI, Y DA IGUAL QUE SEA HUMANO O BOT
+    //
+    // El chequeo va ANTES del de `kind` a proposito. `scheduleTurn` pliega el `out`
+    // pero no vuelve a encadenarse, asi que el turno se retoma en el siguiente ciclo,
+    // que es aqui. Si el chequeo de `out` estuviera despues del de `kind`, un bot
+    // liquidado se escaparia y la mesa volveria a quedarse esperando a un jugador que
+    // no va a jugar.
+    //
+    // Aqui si se guarda la mesa, porque este metodo es async y no se encadena a si
+    // mismo.
+    // ------------------------------------------------------------------
+    if (seat.status === 'out') {
+      engine.performAction(seat.index.toString(), 'fold');
+      this.syncEngineToTable(table, engine);
+      table.hand.lastActionAt = new Date();
+      await table.save();
+      this.scheduleTurn(table);
+      return;
+    }
+
+    if (seat.kind !== 'human') return;
 
     if (elapsed < TURN_TIMER.humanMs) return;
 
@@ -829,7 +1016,21 @@ export class TableManager {
     // Quitar jugadores que se quedaron sin fichas.
     // El buy-in ya se desconto del wallet al sentarse, asi que perderlo en la
     // mesa no requiere otro descuento: simplemente se marca eliminado.
+    //
+    // `out` SE RESPETA, Y AQUI ERA DONDE SE ROMPIA.
+    //
+    // Este bucle corre ANTES de la rama de campo, y no tenia en cuenta `out`. Un
+    // asiento marcado `out` por el field manager (posicion ya adjudicada) con cero
+    // fichas volvia a `eliminated` aqui. Inmediatamente despues, la rama de campo
+    // filtraba los `out` y no encontraba ninguno, porque todos llevaban ya el estado
+    // `eliminated`: el asiento no se liberaba nunca.
+    //
+    // El ciclo se veia en los logs, tick a tick: el campo marcaba `out`, la mano
+    // siguiente lo devolvia a `eliminated`, el campo lo volvia a marcar... para
+    // siempre. El asiento ocupaba plaza, `seatsFree` daba 0, las merges no ocurrian
+    // y el campo no llegaba nunca a la mesa final.
     for (const seat of table.seats) {
+      if (seat.status === 'out') continue;
       if (seat.chips <= 0 && seat.status !== 'eliminated') {
         seat.status = 'eliminated';
       }
@@ -846,6 +1047,38 @@ export class TableManager {
 
     // Barajar dealer
     this.rotateDealer(table);
+
+    // ------------------------------------------------------------------
+    // LOS ASIENTOS VUELVEN A `active`
+    //
+    // Este es EL sitio donde tiene que pasar, y antes no pasaba en ningun otro.
+    // `folded`, `called` y `betting` son estados TERMINALES de una mano, no del
+    // jugador: significan "lo que hizo en ESTA mano". Al cerrar la mano hay que
+    // devolverlos a `active` para que la siguiente pueda empezar.
+    //
+    // Sin esto, `startHand` ve menos de dos jugadores activos y no arranca nunca
+    // una segunda mano. Cada mesa jugaba exactamente una mano y se congelaba para
+    // siempre: nadie se eliminaba, nadie ganaba, el campo no terminaba. Es el bug
+    // mas grave que quedaba, y no se ve leyendo el codigo porque el motor, el rake
+    // y las posiciones funcionan bien por separado. Lo encontro el test
+    // end-to-end del motor (`scripts/test-e2e-engine.js`).
+    //
+    // Se hace aqui y no solo en `startHand` porque el estado de la mesa tiene que
+    // ser coherente tambien entre manos: el panel del operador y las rutas leen
+    // los asientos, y ver a un jugador con `folded` fuera de una mano lo hace
+    // parecer eliminado sin serlo.
+    //
+    // `eliminated` y `out` se respetan: son estados resueltos. El field manager
+    // necesita `eliminated` para adjudicar la posicion, y `out` marca a los ya
+    // liquidados para no contarlos dos veces.
+    for (const seat of table.seats) {
+      seat.bet = 0;
+      if (seat.chips <= 0) {
+        seat.status = 'eliminated';
+      } else if (seat.status !== 'eliminated' && seat.status !== 'out') {
+        seat.status = 'active';
+      }
+    }
 
     // ------------------------------------------------------------------
     // CAMPO vs MESA CASH
@@ -866,18 +1099,69 @@ export class TableManager {
     // conoce las posiciones. Aqui solo se marca al jugador como eliminado y se
     // le deja el resto de fichas para que el campo lo liquide.
 
-    if (this.isFieldTable(table)) {
-      // Los bots eliminados se van. Los humanos se quedan con su estado para
-      // que el field manager recoja la eliminacion y le asigne posicion.
+if (this.isFieldTable(table)) {
+      // ------------------------------------------------------------------
+      // ORDEN: PRIMERO SE LIBERAN LOS `out`, DESPUES SE MARCA `eliminated`
+      //
+      // Este orden estaba invertido y hacia que NUNCA se liberara un asiento. El
+      // bucle que marca `eliminated` a los que se quedan sin fichas (que es lo
+      // correcto para un humano que acaba de perder) incluía tambien a los que ya
+      // estaban `out`, y los convertia de nuevo en `eliminated`. Inmediatamente
+      // despues, el filtro que quita los `out` no encontraba ninguno: todos llevaban
+      // ya el estado `eliminated`.
+      //
+      // Resultado: los asientos de los eliminados ocupaban plaza para siempre,
+      // `checkMerges` calculaba `seatsFree = maxSeats - seats.length` con esas plazas
+      // ocupadas, daba 0, ninguna mesa se fusionaba con otra y el campo no llegaba
+      // nunca a la mesa final. Con 300 jugadores, el producto no terminaba un solo
+      // campo.
+      //
+      // Se vio jugando un campo entero de verdad: 6 vivos, 8 eliminados, 4 000 manos
+      // por mesa y dos mesas que no se juntaban nunca.
+      // ------------------------------------------------------------------
+      const antesOut = table.seats.length;
+      logger.info(
+        table.seats.map(s => `${s.index}:${s.status}`).join(' '),
+      );
+      table.seats = table.seats.filter(s => s.status !== 'out');
+      const liberados = antesOut - table.seats.length;
+
+      // Bots eliminados fuera. Los humanos se quedan con su estado para que el field
+      // manager recoja la eliminacion y le asigne posicion.
       table.seats = table.seats.filter(
         s => s.status !== 'eliminated' || s.kind === 'human',
       );
 
-      // Un humano sin fichas queda `eliminated`: es una posicion en el campo.
+      // Un humano sin fichas queda `eliminated`: es una posicion en el campo. Aqui ya
+      // no puede aparecer un `out`, se acaba de filtrar, asi que no hay riesgo de
+      // resucitar a un jugador ya liquidado.
       for (const seat of table.seats) {
         if (seat.kind === 'human' && seat.chips <= 0 && seat.status !== 'eliminated') {
           seat.status = 'eliminated';
         }
+      }
+
+      // ------------------------------------------------------------------
+      // POR QUE SE LIBERA AQUI Y NO EN EL FIELD MANAGER
+      //
+      // Porque este es el unico sitio donde no hay ninguna mano en curso, y por dos
+      // razones mas:
+      //
+      //   - Quitar asientos con el motor en memoria descuadra los indices. El motor
+      //     identifica a los jugadores por indice de asiento; si el asiento 3
+      //     desaparece, el que era el 4 pasa a ser el 3.
+      //   - Guardar la mesa entera desde el field manager pisaba `hand`, que es de
+      //     este gestor. Ver el comentario del mismo asunto en `collectEliminations`.
+      //
+      // Las fichas de estos asientos ya son cero y su valor esta en
+      // `Field.deadChips`, que el field manager anoto al marcar `out`. Aqui no se toca
+      // el dinero: solo se libera el sitio.
+      // ------------------------------------------------------------------
+      if (liberados > 0) {
+        logger.info(
+          `Mesa ${table.tableId}: ${liberados} asiento(s) liberados de eliminados ` +
+          `ya liquidados. Quedan ${table.seats.length} de ${table.maxSeats}.`,
+        );
       }
 
       await table.save();
