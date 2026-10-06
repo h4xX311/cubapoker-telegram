@@ -482,6 +482,79 @@ export const fieldManager = {
   },
 
   /** Construye el asiento de un humano. */
+  /**
+   * El primer indice de asiento que NO esta ocupado.
+   *
+   * ------------------------------------------------------------------
+   * POR QUE NO VALE `seats.length`
+   *
+   * Porque los indices de una mesa de campo tienen huecos. Cuando un eliminado pasa a
+   * `out`, `finishHand` lo quita del array, y los demas conservan el indice que
+   * tenían. Una mesa de 7 sin el asiento 2 queda con los indices [0, 1, 3, 4, 5, 6]:
+   * `seats.length` dice 6, pero el 6 ya está ocupado. Si el siguiente jugador recibe
+   * ese indice, se queda con dos asientos en el mismo sitio.
+   *
+   * Y el indice de asiento es el IDENTIFICADOR DEL JUGADOR dentro del motor: se pasa
+   * como id en `performAction` y se busca por el en `resolveActingSeat` y en
+   * `syncEngineToTable`. Con dos asientos en el mismo indice:
+   *
+   *   - el motor registra DOS jugadores con el mismo id, y `performAction` actua
+   *     siempre sobre el primero, asi que el segundo no juega nunca;
+   *   - `syncEngineToTable` escribe las fichas sobre el primero, y las del segundo
+   *     asiento no se escriben jamas.
+   *
+   * Ese asiento queda huerfano: `isSeated` lo ve ocupado porque mira por `playerId`,
+   * asi que nadie lo vuelve a sentar, pero el motor no lo juega, no se elimina y no
+   * cobra posicion. El campo se queda con un jugador invisible.
+   *
+   * ------------------------------------------------------------------
+   * POR QUE NO SE RENUMERA LA MESA ENTERA
+   *
+   * Porque los indices ya escritos `no se pueden cambiar`: `field.results` guarda la
+   * mesa y el indice de cada eliminado, y un resultado que apunta al asiento 3 cuando
+   * ese 3 era otro jugador es peor que un hueco. Un hueco no molesta: al motor los
+   * indices le son opacos, y solo importa que no se repitan.
+   *
+   * La unica regla es la de no repetir. Este metodo la cumple siempre.
+   */
+  primerIndiceLibre(seats: Array<{ index?: number }>): number {
+    const ocupados = new Set<number>();
+    for (const s of seats) {
+      const i = Number(s.index);
+      if (Number.isInteger(i) && i >= 0) ocupados.add(i);
+    }
+    let candidato = 0;
+    while (ocupados.has(candidato)) candidato++;
+    return candidato;
+  },
+
+  /**
+   * Reparte los indices de una mesa y avisa si alguno se repite.
+   *
+   * No repara: avisar es lo que hace falta, porque un indice repetido significa que
+   * hay dos jugadores con la misma identidad en el motor y hay que saber por que ha
+   * pasado. Reparar en silencio dejaria al campo descuadrado sin que nadie se entere.
+   */
+  assertIndicesUnicos(tableId: string, seats: Array<{ index?: number }>): void {
+    const vistos = new Map<number, number>();
+    for (const s of seats) {
+      const i = Number(s.index);
+      if (!Number.isInteger(i)) continue;
+      vistos.set(i, (vistos.get(i) ?? 0) + 1);
+    }
+    const repetidos = [...vistos.entries()].filter(([, n]) => n > 1);
+    if (repetidos.length === 0) return;
+    const detalle = repetidos
+      .map(([i, n]) => i + ' (' + n + ' veces)')
+      .join(', ');
+    logger.error(
+      'Mesa ' + tableId + ': ' + repetidos.length +
+      ' indice(s) de asiento repetido(s): ' + detalle +
+      '. Dos jugadores con el mismo indice son el mismo jugador para el motor: uno ' +
+      'de ellos no juega nunca y sus fichas no se escriben. Hay que revisarlo a mano.',
+    );
+  },
+
   buildSeat(
     table: ITable,
     telegramId: number,
@@ -489,7 +562,7 @@ export const fieldManager = {
     username?: string,
   ): ISeat {
     return {
-      index: table.seats.length,
+      index: this.primerIndiceLibre(table.seats),
       kind: 'human',
       playerId: String(telegramId),
       displayName: username || `Jugador ${telegramId}`,
@@ -1107,7 +1180,10 @@ export const fieldManager = {
           // Reindizar: el destino puede tener menos jugadores, y el motor usa
           // el indice de asiento como id del jugador. Un indice duplicado
           // haria que un jugador actuara como si fuera dos.
-          const newIndex = target.seats.length;
+          // El indice libre, no `target.seats.length`. Ver `primerIndiceLibre`: los
+          // indices tienen huecos en cuanto se libera un asiento, y repetir uno mete a
+          // dos jugadores en la misma identidad dentro del motor.
+          const newIndex = this.primerIndiceLibre(target.seats);
           source.table.seats = source.table.seats.filter(s => s.index !== seatIndex);
 
           // `toObject()` Y NO `{ ...seat }`.
@@ -1131,6 +1207,7 @@ export const fieldManager = {
           const copia = ((seat as any).toObject ? (seat as any).toObject() : { ...seat }) as ISeat;
           target.seats.push({ ...copia, index: newIndex });
         }
+        this.assertIndicesUnicos(target.tableId, target.seats);
         await target.save();
       }
 
@@ -1289,7 +1366,7 @@ export const fieldManager = {
         // subdocumento pierde los campos del esquema y la validacion revienta al
         // guardar. Ver el comentario de ahi.
         const copia = ((seat as any).toObject ? (seat as any).toObject() : { ...seat }) as ISeat;
-        keeper.seats.push({ ...copia, index: keeper.seats.length });
+        keeper.seats.push({ ...copia, index: this.primerIndiceLibre(keeper.seats) });
       }
       donor.seats = [];
       donor.status = 'finished';
@@ -1297,6 +1374,8 @@ export const fieldManager = {
       await donor.save();
       await this.retireTable(field, donor);
     }
+
+    this.assertIndicesUnicos(keeper.tableId, keeper.seats);
 
     field.status = fieldStatus;
     await field.save();
