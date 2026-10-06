@@ -105,3 +105,60 @@ grep -c x-dev-auth mini-app/dist/assets/*.js   # debe ser 0
 
 Si sale algo, `import.meta.env.DEV` ha llegado al build de producción, y eso hay que
 pararlo antes de desplegar.
+
+## Probar el juego: por qué no basta con registrarte
+
+Un campo Sit'n'Go arranca cuando **se llena**, no cuando alguien entra. Y `targetField`
+viene de `fieldSize`, que en la fabrica `tier()` esta puesto a **300 para todos los
+tiers**.
+
+O sea: para jugar de verdad habria que registrar 300 jugadores, y cada uno necesita saldo
+para su buy-in. No es un problema del entorno de desarrollo: es el producto. Un campo es de
+300 por diseño.
+
+Para eso esta `scripts/dev-fill-field.js`, que registra la gente con **el mismo codigo de
+produccion** (`fieldManager.register`), no con un atajo. Si el campo no llena con este
+script, es que no llenaria de verdad.
+
+### El camino corto: campo de 14
+
+Con el servidor arrancado en una terminal, y en otra:
+
+```bash
+node scripts/dev-fill-field.js --target 14
+```
+
+Registra 13 falsos. Tu entras en `localhost:5173`, te apuntas al campo, y **el campo se
+llena y arranca**. La IA de los falsos se encarga de jugar; tu juegas en la misma mesa
+que ellos.
+
+Opciones:
+
+| Opción | Qué hace |
+|---|---|
+| `--target N` | Recorta el campo a N participantes. Para arrancar en segundos |
+| `--tier t1` | Tier del campo (por defecto `t1`, 1 USDT) |
+| `--players N` | Registra exactamente N, en vez de "los que falten" |
+| `--from 600000010` | Desde que id se registran los falsos. El `600000001` eres tu |
+| `--balance N` | Saldo inicial de cada falso (1 USDT = 1000 unidades) |
+
+### Probar el campo REAL de 300
+
+```bash
+node scripts/dev-fill-field.js --players 299
+```
+
+Tarda, y no va a ser aggradable: son 300 personas esperando a que se llene el campo. Pero
+es el campo de verdad, con sus 43 mesas, y sirve para ver si el producto aguanta el
+volumen.
+
+### Orden
+
+1. `npm run dev` (servidor, puerto 3000) **arrancado primero**
+2. `cd mini-app && npm run dev` (interfaz, puerto 5173)
+3. `node scripts/dev-fill-field.js --target 14`
+4. Abre `localhost:5173`, registrate en el campo
+5. A jugar
+
+Si el paso 3 va antes que el 1, los falsos se registran pero los bots no juegan: las mesas
+se quedan quietas y no se ve nada.
