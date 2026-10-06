@@ -316,7 +316,23 @@ async function main() {
   // `setInterval`; aqui se llama a mano para no depender del reloj.
   tableManager.setFieldCoordinator(() => fieldManager.tick());
 
-  const MAX_RONDAS = 4000;
+  // ------------------------------------------------------------------
+  // POR QUE 4 000 NO ALCANZABA, Y CUANTAS HACE FALTA
+  //
+  // Una mesa 7-max tarda del orden de 3 700 manos en dejar a UN jugador, medido con el
+  // motor y la IA de produccion en scripts/test-bot-pace.js. No porque las manos sean
+  // de ciegas (6,9 acciones de media, llegan al showdown), sino porque con 1 000 fichas
+  // y ciegas de 5/10 hay que ganar muchisimas manos para quedarse sin nada.
+  //
+  // O sea: 4 000 rondas no eran un limite arbitrario, estaban justo por debajo del
+  // tiempo real que tarda una mesa en resolverse. El campo de 14 jugadores repartido en
+  // 2 mesas necesita del orden de 5 000 rondas, no 4 000.
+  //
+  // Subido a 12 000 para que el margen sea amplio y el test no dependa de una medicion
+  // que ya se sabe que es de alta varianza: la misma mesa ha terminado en 39 manos en
+  // una corrida y en 3 713 en otra, segun como caigan las cartas.
+  // ------------------------------------------------------------------
+  const MAX_RONDAS = 12000;
   let rondas = 0;
   let terminado = false;
   let manosJugadas = 0;

@@ -453,14 +453,48 @@ export class TableManager {
     }
 
     // --- Avanzar el juego ---
+    //
+    // ------------------------------------------------------------------
+    // CUANDO HAY CON QUE JUGAR Y LA MANO NO ARRANCA
+    //
+    // Es el fallo silencioso de este proyecto. Todo lo demas funciona: el motor esta
+    // bien, el rake se cobra, las posiciones se adjudican. Y aun asi la mesa se queda
+    // sin jugar, con los jugadores sentados y sus fichas quietas, sin que nada en el log
+    // lo senale.
+    //
+    // Se vio con 3 jugadores vivos y 11 921 fichas en la mesa final de un campo, tres
+    // mil rondas sin que se moviera una sola ficha. El test lo decia ("motor=NO") pero
+    // el log de produccion no decia nada, y sin este aviso no habria forma de saber
+    // por donde mirar.
+    //
+    // El aviso lleva los tres numeros que Contestan la pregunta: si es la fase, no hay
+    // por que mirar; si son los jugadores, no hay con que jugar.
+    // ------------------------------------------------------------------
     if (table.hand.phase === 'idle' || table.hand.phase === 'idle-awaiting') {
       // Solo arranca una mano si hay al menos un humano y 2 jugadores
       const activeHumans = table.seats.filter(
         s => s.kind === 'human' && s.status === 'active' && s.chips > 0,
       ).length;
+      const activeTotal = table.seats.filter(
+        s => s.status === 'active' && s.chips > 0,
+      ).length;
 
-      if (activeHumans >= 1 && table.seats.filter(s => s.status === 'active' && s.chips > 0).length >= 2) {
+      if (activeHumans >= 1 && activeTotal >= 2) {
         await this.startHand(table);
+
+        // Se comprueba DESPUES de intentarlo, porque `startHand` puede volver sin hacer
+        // nada: si el motor no arranca, tira el motor que acaba de crear y no lanza
+        // nada. Es exactamente el caso que hay que ver, asi que se pregunta a la mesa
+        // y no a una excepcion.
+        if (!this.engines.has(table.tableId)) {
+          logger.error(
+            `Mesa ${table.tableId}: NO ARRANCA LA MANO con ${activeTotal} jugadores ` +
+            `activos (${activeHumans} humanos) y ${table.maxSeats} asientos. ` +
+            `Fase "${table.hand.phase}", estado "${table.status}". ` +
+            'Los jugadores siguen sentados y el campo no avanza. Hay que mirar ' +
+            'startHand: si startGame devuelve false, el motor se crea y se tira.',
+          );
+        }
       }
     }
 
@@ -886,7 +920,72 @@ export class TableManager {
       playersLeft: activePlayers,
     });
 
-    engine.performAction(seat.index.toString(), decision.action, decision.amount);
+    // ------------------------------------------------------------------
+    // SI EL MOTOR RECHAZA LA ACCION, HAY QUE RECUPERAR LA MANO
+    //
+    // Antes se llamaba a `performAction` y se ignoraba lo que devolviera. Y el motor
+    // puede rechazar: si la IA decide subir y no hay subida legal (porque el minimo del
+    // motor es mayor que las fichas del bot, o porque la subida ya no cubre el minimo de
+    // re-subida), `performAction` devuelve false, el bot NO actúa, y `scheduleTurn` le
+    // vuelve a programar con el turno sigue siendo suyo.
+    //
+    // El bot vuelve a decidir lo mismo, el motor vuelve a rechazar, y la mesa se queda
+    // congelada CON LA MANO EN CURSO. Sin error, sin aviso, sin nada en el log. Y como
+    // `checkTurnTimeout` sale temprano para los que no son humanos, no hay ni un
+    // temporizador que la saque de ahi.
+    //
+    // Se ha visto: una mano que se paraba en la mano 19, con un bot de 51 fichas
+    //经典的 `accion rechazada: raise` que la IA proposed y el motor no acepto.
+    //
+    // Por eso no basta con mirar el resultado: si ninguna accion legal funciona, hay
+    // que decirlo con nivel ERROR y planes para que la mesa no se quede colgada.
+    // ------------------------------------------------------------------
+    const aplicadas = engine.performAction(
+      seat.index.toString(),
+      decision.action,
+      decision.amount,
+    );
+
+    if (!aplicadas) {
+      // Se prueban las alternativas de mayor a menor. Todas son legales siempre:
+      // `all_in` no tiene limite, `check` cuando no hay que igualar, `fold` siempre.
+      // Con esto el bot juega SIEMPRE, y la diferencia entre "ha jugado como el quiere"
+      // y "ha jugado por no quedarse parado" esSecondary, no es un problema.
+      const alternativas: Array<['all_in' | 'call' | 'check' | 'fold', number | undefined]> = [
+        ['all_in', undefined],
+        ['check', undefined],
+        ['call', undefined],
+        ['fold', undefined],
+      ];
+
+      let recuperada = false;
+      for (const [accion, importe] of alternativas) {
+        if (engine.performAction(seat.index.toString(), accion, importe)) {
+          logger.warn(
+            `Mesa ${table.tableId}: el bot del asiento ${seat.index} decidio ` +
+            `${decision.action}${decision.amount ? ' de ' + decision.amount : ''} y el ` +
+            `motor la rechazo. Ha jugado ${accion} en su lugar.`,
+          );
+          recuperada = true;
+          break;
+        }
+      }
+
+      if (!recuperada) {
+        // No hay ninguna accion que el motor acepte. La mesa no puede seguir con este
+        // bot dentro, asi que se cierra la mano: el bote lo reparte el motor y el
+        // asiento vuelve a la reserva en el siguiente ciclo.
+        logger.error(
+          `Mesa ${table.tableId}: el bot del asiento ${seat.index} no puede jugar de ` +
+          'ninguna manera (fichas ' + botPlayer.chips + ', deber ' +
+          `${state.currentBet}, pot ${state.pot}). Se cierra la mano para no dejar la ` +
+          'mesa colgada con un turno que no avanza.',
+        );
+        this.syncEngineToTable(table, engine);
+        await this.finishHand(table, engine);
+        return;
+      }
+    }
 
     this.syncEngineToTable(table, engine);
     table.hand.lastActionAt = new Date();
