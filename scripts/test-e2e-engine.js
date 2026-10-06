@@ -200,11 +200,42 @@ async function main() {
   const minThinkOriginal = BOT_CONFIG.minThinkMs;
   const maxThinkOriginal = BOT_CONFIG.maxThinkMs;
 
-  TURN_TIMER.humanMs = 0;
+  // ------------------------------------------------------------------
+  // EL RELOJ DE LOS HUMANOS NO SE PUEDE PONER A CERO
+  //
+  // Estaba a 0 "para que no se esperara a nadie", y al mismo tiempo el test conducia a
+  // los humanos con `applyHumanAction` y la IA de produccion. Los dos caminos no se
+  // turnan: compiten, y en `processTable` el timeout corre justo despues de
+  // `startHand`, en el mismo ciclo.
+  //
+  //   if (fase === 'idle')  await this.startHand(table)      // pone la fase 'preflop'
+  //   if (fase !== 'idle')  await this.checkTurnTimeout(table)  // seguido
+  //
+  // Con el reloj a 0, `checkTurnTimeout` actua por el humano ese mismo ciclo, antes de
+  // que el test pueda jugar su decision. Y lo que hace ese camino no es jugar: es
+  // `check` si no hay que igualar y `fold` si hay.
+  //
+  // O sea que los humanos NO jugaban. Todos pasaban, la mesa iba al showdown y las
+  // ciegas volvian intactas. Nadie apostaba, nadie perdia, y las fichas se quedaban
+  // donde estaban: un equilibrio exacto en el que el campo no puede terminar.
+  //
+  // Asi se vieron 12 000 rondas con 6 jugadores y 13 472 fichas congeladas. Y por eso la
+  // misma IA en `scripts/test-bot-pace.js` SI elimina a la gente: alli no hay reloj que
+  // le robe el turno a nadie.
+  //
+  // Con 3 600 s el camino de timeout no puede dispararse durante el test, y el unico
+  // camino que juega un humano es el que el test conduce a mano. Que es lo que hay que
+  // probar, y ademas es lo que pasa en produccion.
+  // ------------------------------------------------------------------
+  const HUMAN_MS_ALT0 = 3_600_000;
+  TURN_TIMER.humanMs = HUMAN_MS_ALT0;
   BOT_CONFIG.minThinkMs = 0;
   BOT_CONFIG.maxThinkMs = 0;
 
-  ok(`TURN_TIMER.humanMs: ${humanMsOriginal} -> 0 (el humano pierde el turno en el acto)`);
+  ok(
+    `TURN_TIMER.humanMs: ${humanMsOriginal} -> ${HUMAN_MS_ALT0} ` +
+    '(el timeout NO juega por el humano; lo juega el test con la IA de produccion)',
+  );
   ok(`BOT_CONFIG.minThinkMs: ${minThinkOriginal} -> 0 (el bot juega en el acto)`);
 
   if (typeof tableManager.playBotTurn === 'function') {

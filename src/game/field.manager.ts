@@ -860,7 +860,22 @@ export const fieldManager = {
     for (const t of tables) {
       for (const seat of t.seats) {
         if (seat.kind !== 'human') continue;
-        if (seat.status === 'out') continue;
+        // NO SE CUENTA UN ASIENTO ELIMINADO COMO VIVO.
+        //
+        // Antes solo se saltaba 'out'. Un asiento marcado 'eliminated' con cero fichas no
+        // esta vivo: esta muerto y esperando a que collectEliminations le adjudique la
+        // posicion. Contarlo como vivo hacia que este reconciliador, que deberia ser la
+        // red de seguridad, le pelease el contador al gestor de campos y le devolviera el
+        // eliminado.
+        //
+        // El efecto era que el campo no llegaba nunca de 2 a 1: el contador se quedaba en
+        // 3, checkCompletion no disparaba, y el campo con dos jugadores sentados y con
+        // fichas se quedaba esperando para siempre. 12 000 rondas, 12 de 13 posiciones
+        // adjudicadas y ni la ultima.
+        //
+        // 'eliminated' y 'out' son estados resueltos: los dos significan que ese jugador
+        // ya no esta jugando. Los dos se saltan.
+        if (seat.status === 'out' || seat.status === 'eliminated') continue;
 
         const id = Number(seat.playerId);
         if (Number.isNaN(id)) continue;
