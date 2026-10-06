@@ -225,8 +225,11 @@ router.post('/withdrawals/:orderId/approve', async (req: Request, res: Response)
   try {
     const { orderId } = req.params;
     const txHash = req.body?.txHash;
+    // El servicio exige esta confirmacion ADEMAS del flag de entorno para liquidar un
+    // retiro en simulacion. Ver `settleWithdrawal`.
+    const confirmarSimulado = req.body?.confirmarSimulado === true;
 
-    await paymentService.settleWithdrawal(orderId, txHash);
+    await paymentService.settleWithdrawal(orderId, txHash, { confirmarSimulado });
 
     const order = await PaymentOrder.findOne({ orderId });
 
@@ -235,14 +238,27 @@ router.post('/withdrawals/:orderId/approve', async (req: Request, res: Response)
       `(${order.provider}${order.chain ? '/' + order.chain : ''}) por el operador`,
     );
 
+    // El mensaje tiene que decir la verdad: este endpoint NO ha pagado nada. Solo ha
+    // marcado la orden y ha descontado el saldo.
+    //
+    // La version anterior decia "Retiro liquidado y saldo descontado" con un aviso
+    // encima, y asi se leia igual: el operador veia un "aprobado" y entendia que el
+    // sistema habia pagado. En modo simulacion, eso son USDT reales de su bolsillo
+    // contra una orden de mentira.
+    const simulado = order.simulated === true;
     res.json({
       success: true,
-      message:
-        'Retiro liquidado y saldo descontado. ' +
-        'Recuerda comprobar que el pago se ha realizado de verdad antes de usar este endpoint.',
+      message: simulado
+        ? 'Orden de SIMULACION marcada como pagada y saldo descontado. ' +
+          'NO se ha movido dinero: no se ha enviado nada a ninguna wallet. ' +
+          'Si has pagado esto de verdad, responde por ello.'
+        : 'Orden marcada como pagada y saldo descontado. ' +
+          'Este endpoint NO ha enviado el dinero: el envio lo haces tu por fuera. ' +
+          'Comprueba que el pago se ha realizado de verdad.',
       orderId,
       txHash: order.txHash,
       amountUsdt: unitsToUsdt(order.amount),
+      simulado,
     });
   } catch (error) {
     if (error instanceof MoneyError) {

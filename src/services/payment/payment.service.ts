@@ -7,10 +7,25 @@ import {
   fakeTxHash,
   type PaymentProvider,
 } from './gateway';
-import { formatUnits } from '../../config/units';
+import { formatUnits, unitsToUsdt } from '../../config/units';
+import { logger } from '../../utils/logger';
 import { checkWithdrawal } from './withdrawal.rules';
 import { calculateCommission } from '../../config/monetization';
 import { validateAddress, CHAINS, isValidChain, type ChainId } from '../../config/chains';
+
+/**
+ * Permite liquidar retiros mientras el sistema esta en modo simulacion.
+ *
+ * En OFF (lo normal), `settleWithdrawal` RECHAZA liquidar un retiro: marcar una orden
+ * simulada como pagada hace que el operador entienda que el sistema ha procesado un
+ * pago que no ha procesado nadie, y pague USDT real a cambio de nada.
+ *
+ * Ponerlo a ON es una decision deliberada y por peticion, no un efecto secundario de
+ * arrancar el sistema. Aun asi, por si sola no basta: tambien hay que mandar
+ * `confirmarSimulado: true` en la peticion.
+ */
+const ALLOW_SIMULATED_WITHDRAWALS =
+  process.env.ALLOW_SIMULATED_WITHDRAWALS === 'true';
 
 export class MoneyError extends Error {
   status: number;
@@ -345,10 +360,47 @@ export class PaymentService {
    * quedar mal. En el filtro, Mongo lo evalua y lo aplica sobre el documento en
    * una sola operacion, asi que solo una de las dos resta.
    */
-  async settleWithdrawal(orderId: string, txHash?: string): Promise<void> {
+  async settleWithdrawal(
+    orderId: string,
+    txHash?: string,
+    opciones: { confirmarSimulado?: boolean } = {},
+  ): Promise<void> {
     const order = await PaymentOrder.findOne({ orderId });
     if (!order) {
       throw new MoneyError('Orden no encontrada.', 404);
+    }
+
+    // ------------------------------------------------------------------
+    // EN SIMULACION, ESTE RETIRO NO SE PUEDE MARCAR COMO PAGADO
+    //
+    // Este endpoint no mueve dinero: solo marca la orden y descuenta el saldo, porque
+    // el envio lo hace el operador por fuera. En simulacion no hay envio que hacer, y
+    // marcar la orden como pagada deja el panel diciendo que el sistema ha procesado un
+    // pago. El operador, que ve "aprobado", manda el USDT de verdad.
+    //
+    // O sea: la combinacion de "dinero de prueba" y "pago real fuera del sistema" es
+    // la unica forma de perder dinero aqui, y es la que el endpoint dejaba abierta.
+    //
+    // Por eso hacen falta DOS cosas para pasar: el flag de entorno, que es
+    // deliberado, y la confirmacion en la peticion, que es por peticion. Con una sola,
+    // un clic de mas en el panel bastaria para pagarlo todo.
+    // ------------------------------------------------------------------
+    if (SIMULATION_ENABLED && !(ALLOW_SIMULATED_WITHDRAWALS && opciones.confirmarSimulado)) {
+      const falta = [];
+      if (!ALLOW_SIMULATED_WITHDRAWALS) {
+        falta.push('ALLOW_SIMULATED_WITHDRAWALS=true en el entorno');
+      }
+      if (!opciones.confirmarSimulado) {
+        falta.push('confirmarSimulado: true en la peticion');
+      }
+
+      throw new MoneyError(
+        'El sistema esta en MODO SIMULACION y este retiro no se puede liquidar. ' +
+        'Marcarlo como pagado haria que el panel dijera que el sistema ha procesado un ' +
+        'pago, y ese dinero no sale de ningun sitio: el operador lo pagaria de su ' +
+        'bolsillo. Faltaria: ' + falta.join(' y ') + '.',
+        409,
+      );
     }
     if (order.status === 'paid') {
       throw new MoneyError('El retiro ya fue liquidado.');
@@ -383,6 +435,18 @@ export class PaymentService {
         'liquida el saldo a mano. Si no se ha pagado todavia, cancela el retiro, ' +
         'que devuelve el dinero al usuario.',
         409,
+      );
+    }
+
+    if (SIMULATION_ENABLED) {
+      // Aviso aparte y con nivel error a proposito: si alguna vez se liquida un retiro
+      // en simulacion, tiene que saltar en el log del operador aunque todo lo demas
+      // parezca correcto.
+      logger.error(
+        'RETIRO LIQUIDADO EN MODO SIMULACION: ' +
+          `${unitsToUsdt(order.amount)} USDT del usuario ${order.telegramId} ` +
+          `(${order.provider}${order.chain ? '/' + order.chain : ''}). ` +
+          'Si has pagado esto de verdad, hay que responder por ello.',
       );
     }
 
