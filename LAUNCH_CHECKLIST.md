@@ -480,6 +480,122 @@ Tres drenos y un fallo de infraestructura, con sus pruebas:
 
 ---
 
+## 3-bis-bis. Sesion del 6 de octubre: botes laterales y la liquidacion
+
+Cuatro cosas. Las dos primeras son bugs de dinero ya cerrados con pruebas. Las
+dos ultimas son hallazgos que quedan abiertos y que hay que decidir antes de
+abrir al publico.
+
+### 1. EL MOTOR REPARTIA EL BOTE ENTERO. Sin botes laterales. CERRADO
+
+El motor dividia el bote a partes iguales entre los ganadores de la mejor mano,
+sin mirar cuanto habia puesto cada uno. Eso es robar fichas en cuanto dos
+jugadores stack distinto:
+
+    A se all-in por 100    B se all-in por 500    C tiene 5 000 e iguala 500
+
+    bote principal   100 x 3 =   300   elegibles A, B, C
+    bote lateral     400 x 2 =   800   elegibles B, C
+
+Si ganaba A se llevaba los 1 100 enteros, cuando solo puede tocar los 300. Un
+all-in minimo se llevaba el bote de dos stacks cinco veces mayores.
+
+En un campo esto no es una excepcion: los eliminados se all-in por fichas
+pequenas y los que sobreviven acumulan stacks enormes. Medido en el test de
+integracion, stacks de 5 630 contra eliminados con 11. **Cada eliminacion del
+producto era un all-in minimo compitiendo por un bote enorme.**
+
+Ahora `src/game/sidepots.ts` parte el bote en tramos segun lo aportado y cada
+tramo lleva la lista de quien puede ganarlo. 27 pruebas, con 52 480 repartos
+comprobados. Suite unitaria: 422.
+
+Detalle que salio mal y quedo documentado: primero se sacaba al ganador de un
+bote de los botes siguientes. Es intuitivo y es un error doble: da el lateral al
+que no le toca, y deja el ultimo tramo sin dueño, con lo que esas fichas se
+evaporan. La elegibilidad por tramo ya impide el robo sin necesidad de expulsar
+a nadie.
+
+### 2. LA LIQUIDACION NO BARRABA TODO EL DINERO, Y DISIMULABA LO QUE FALTABA. CERRADO
+
+Cuatro fallos en `settleField`, del mismo tipo: se mira una parte del dinero y
+se olvida de otra, y luego la diferencia se convierte en ingresos.
+
+| # | Fallo | Como se manifestaba |
+|---|---|---|
+| 1 | `hand.pot` no se barreaba | El bote de una mano en curso no se pagaba ni se ponia a cero. Las fichas desaparecian. |
+| 2 | `seat.bet` y `hand.pot` son las mismas fichas | Sumarlos contaba el bote dos veces. Creaba dinero. |
+| 3 | `deadChips` no se ponia a cero | Se pagaba a los jugadores y el campo seguia diciendo que lo tenia dentro. Contaba dos veces. |
+| 4 | `rake = bote - repartido` | Con fichas perdidas, la fuga se apuntaba como ingreso. |
+
+El 4 es el que hacia parecer que el producto funcionaba. En el test de
+integracion dio **un rake de 7 417 sobre un bote de 14 000: un 53 % en vez del 5 %
+documentado**. El mes salia bien porque se estaba cobrando como rentabilidad una
+fuga de dinero.
+
+Convertir un bug en ingresos es lo peor que puede hacer la contabilidad: tapa el
+problema y encima el numero mejora. Ahora el rake se queda en el 5 % real y la
+falta se avisa como ERROR con las cifras.
+
+El 2 tiene un detalle que hace que el arreglo rapido sea peor que el bug: no vale
+anadir `hand.pot` al `seat.bet` de siempre, porque `syncEngineToTable` escribe
+`seat.bet = player.bet` y `hand.pot = state.pot`, y el bote **es** la suma de lo
+que puso cada uno. Hay que quedarse con el mayor de los dos, que es lo unico que
+funciona en los tres estados posibles: mano en curso, mano recien terminada
+(`endGame` vacia el bote pero `player.bet` sigue entero) y mesa en reposo.
+
+`scripts/test-settle.js` monta este caso con las cifras exactas y lo liquida en
+**30 segundos**, en vez de jugar un campo entero de 20 minutos para averiguar por
+que no cuadraba. 18 comprobaciones, incluido el caso de fichas ausentes.
+
+### 3. LAS MESAS CASH NO COBRAN RAKE. ABIERTO, HAY QUE DECIDIR
+
+`finishHand` calcula el rake por mano desde `state.pot`, pero `endGame` ya lo
+ha puesto a 0 antes de que se llame. Los dos caminos que ponen la fase en
+`showdown` pasan por `endGame`. O sea que ese bloque **no se ejecuta nunca**:
+`table.stats.rakeCollected` se queda en 0 y el panel de operador no muestra rake
+de las mesas cash.
+
+**Pero no es un bug de una linea**, y por dos motivos:
+
+1. El motor reparte el bote **antes** de que la mesa pueda cobrar su parte. Para
+   que el rake sea real hay que tomarlo dentro del motor, antes de formar los
+   botes laterales. Si se toma despues, los botes laterales se forman sobre un
+   bote que ya incluye el rake y el reparto sale mal.
+2. `table.kind === 'cash'` en un campo significa "campo de pago", no "mesa de
+   dinero". Es decir: ese bloque, si llegara a ejecutarse, cobraria rake por mano
+   **y despues** `rakeOfField` cobraria el 5 % del campo entero. **Doble rake.**
+   Por eso el codigo usa `max(collected, objetivo)` y no la suma.
+
+O sea: el bloque muerto es lo que evita hoy un doble cobro, y una mesa cash
+suelta no tiene ninguna via alternativa que cobre el rake. Hay que decidir el
+modelo antes de tocarlo. **No se arregla sin decidir.**
+
+### 4. SE PIERDEN JUGADORES DE LAS MESAS. ABIERTO
+
+El bug mas grave que queda abierto, y el que mas afecta a un jugador de verdad:
+**4 de los 14 jugadores de un campo desaparecen de las mesas sin que nadie los
+recoja.** No tienen posicion adjudicada y no estan en ninguna mesa. Sus fichas
+se van con ellos.
+
+Lo que se sabe:
+
+- No es al eliminar: los que desaparecen no tienen posicion adjudicada.
+- Es al sentar, o justo despues.
+- El reconciliador (`reconcileAliveCount`) lo detecta y avisa con los
+  identificadores, pero **corrige el contador, no recupera al jugador**: el
+  dinero sigue perdiendose.
+
+En el ultimo test: 14 registrados, `vivos` decia 14 y habia 12 en las mesas; al
+terminar, de 14 solo 10 accounted. El desfase de la contabilidad era de 6 577
+unidades, y el bug 3 de la liquidacion lo disfrazaba de rake del 53 %.
+
+**Es el siguiente paso.** Es tambien justo el problema para el que serviria leer
+el modulo MTT de `masterai-top/TexasHoldem-Poker-Complete-Solution` como
+referencia: ahi el conteo de vivos y la fusion de mesas estan hechos de otra
+forma, y comparar las dos implementaciones diria cual de las dos se equivoca.
+
+---
+
 ## 5. Cómo probar el flujo ahora
 
 ```bash
