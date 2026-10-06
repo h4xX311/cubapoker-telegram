@@ -483,6 +483,63 @@ export const fieldManager = {
 
   /** Construye el asiento de un humano. */
   /**
+   * Suelta los asientos ya liquidados y mete SUS FICHAS en el bote del campo.
+   *
+   * ------------------------------------------------------------------
+   * POR QUE NO SE PUEDE SOLTAR UN ASIENTO SIN HACER ESTO
+   *
+   * `collectEliminations` deja a proposito las fichas del eliminado en su asiento, con
+   * un comentario que lo explica: si las pone a cero alli, desaparecen de la
+   * contabilidad y el campo devuelve menos de lo que cobro.
+   *
+   * El problema es que luego el asiento se marca `out` y se suelta del array, y las
+   * fichas se van con el. Para cuando le toca a `settleField` de barrer el bote, ya no
+   * estan en ningun sitio.
+   *
+   * Sevio jugando un campo entero: 2 155 unidades de 14 000, el 15 % del bote. Ocho
+   * eliminados, unos 270 cada uno. El campo se liquidaba igual y los premios se pagaban,
+   * asi que nadie se enteraba: el dinero se perdia sin dejar rastro.
+   *
+   * ------------------------------------------------------------------
+   * POR QUE `deadChips`
+   *
+   * Porque es el bote del campo, y ya hay un sitio que lo recoge: `settleField`. Las
+   * fichas de un eliminado son tan del campo como las que hay en la mesa, y aqui solo
+   * hay que moverlas de sitio: del asiento al bote.
+   *
+   * Es el mismo patron que ya usa `closeEmptyTable`, y ademas las dos cosas van en la
+   * misma operacion logica, asi que no puede quedar una sin la otra.
+   *
+   * @param table  la mesa, YA RELEIDA de la base. Se usa su array tal cual esta.
+   * @returns  cuantas fichas han pasado al bote
+   */
+  async liberarAsientosLiquidados(field: IField, table: ITable): Promise<number> {
+    const quedan = table.seats.filter((s) => s.status !== 'out');
+    const liberados = table.seats.length - quedan.length;
+    if (liberados === 0) return 0;
+
+    // Lo que hay en los asientos que se van. Tambien `bet`, por el mismo motivo que
+    // `closeEmptyTable`: son fichas en la mesa, no en la cartera de nadie.
+    let alBote = 0;
+    for (const s of table.seats) {
+      if (s.status !== 'out') continue;
+      alBote += Math.max(0, s.chips) + Math.max(0, s.bet);
+    }
+
+    if (alBote > 0) {
+      await Field.updateOne({ _id: field._id }, { $inc: { deadChips: alBote } });
+      logger.info(
+        `Campo ${field.fieldId}: ${table.tableId} suelta ${liberados} asiento(s) ` +
+        `liquidados y ${formatUnits(alBote)} USDT de sus fichas pasan al bote del campo.`,
+      );
+    }
+
+    table.seats = quedan;
+    await table.save();
+    return alBote;
+  },
+
+  /**
    * El primer indice de asiento que NO esta ocupado.
    *
    * ------------------------------------------------------------------
@@ -1049,25 +1106,24 @@ export const fieldManager = {
         // releer, mongoose ve subdocumentos `undefined` y revienta la validacion con
         // "seats.3.displayName: Path `displayName` is required". Filtrar en memoria y
         // escribir el array entero no tiene ese problema.
+        //
+        // Y ANTES de soltarlos, SUS FICHAS PASAN AL BOTE DEL CAMPO.
+        //
+        // Esto no es un extra: es lo que faltaba. `collectEliminations` deja las fichas
+        // del eliminado en su asiento a proposito, y quitar el asiento sin pasarlas a
+        // `deadChips` las borra. Ver `liberarAsientosLiquidados`: 15 % del bote
+        // evaporado en un campo entero.
         const paraLiberar = await Table.findById(table._id);
         if (paraLiberar) {
-          const quedan = paraLiberar.seats.filter((s) => s.status !== 'out');
-          if (quedan.length !== paraLiberar.seats.length) {
-            const resLiberar = await Table.updateOne(
-              {
-                _id: table._id,
-                'hand.phase': { $in: ['idle', 'idle-awaiting'] },
-              },
-              { $set: { seats: quedan } },
-            );
+          const sinLiberar = paraLiberar.seats.length -
+            paraLiberar.seats.filter((s) => s.status !== 'out').length;
 
-            if (resLiberar.modifiedCount > 0) {
-              logger.info(
-                `Campo ${field.fieldId}: ${table.tableId} libera ` +
-                `${paraLiberar.seats.length - quedan.length} asiento(s) de eliminados ` +
-                `ya liquidados. Quedan ${quedan.length}.`,
-              );
-            }
+          if (sinLiberar > 0) {
+            await this.liberarAsientosLiquidados(field, paraLiberar);
+            logger.info(
+              `Campo ${field.fieldId}: ${table.tableId} libera ${sinLiberar} ` +
+              `asiento(s) de eliminados ya liquidados.`,
+            );
           }
         }
       }

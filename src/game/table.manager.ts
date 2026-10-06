@@ -1,6 +1,6 @@
 import { Table, ITable, ISeat, toPublicTable } from '../models/Table';
 import { Field } from '../models/Field';
-import { unitsToUsdt } from '../config/units';
+import { unitsToUsdt, formatUnits } from '../config/units';
 import { User } from '../models/User';
 import { PokerGame } from './game.state';
 import { botFactory, BotProfile, decideAction, mulberry32 } from './bot.engine';
@@ -1120,9 +1120,35 @@ if (this.isFieldTable(table)) {
       // por mesa y dos mesas que no se juntaban nunca.
       // ------------------------------------------------------------------
       const antesOut = table.seats.length;
-      logger.info(
-        table.seats.map(s => `${s.index}:${s.status}`).join(' '),
-      );
+
+      // ------------------------------------------------------------------
+      // SUS FICHAS VAN AL BOTE DEL CAMPO, NO CON EL ASIENTO
+      //
+      // `collectEliminations` deja a proposito las fichas del eliminado en el asiento
+      // (su comentario lo dice: si las pone a cero alli, desaparecen de la contabilidad y
+      // el campo devuelve menos de lo que cobro). Quitar el asiento sin pasarlas antes a
+      // `deadChips` las borra.
+      //
+      // Medido jugando un campo entero: 2 155 unidades de 14 000, el 15 % del bote. El
+      // campo se liquidaba igual, los premios se pagaban y nadie se enteraba de nada.
+      //
+      // El campo manager tiene el mismo caso en `liberarAsientosLiquidados`. Los dos
+      // sitios sueltan asientos, y los dos tienen que hacer esto: si uno se olvida, las
+      // fichas se pierden igual.
+      // ------------------------------------------------------------------
+      let fichasAlBote = 0;
+      for (const seat of table.seats) {
+        if (seat.status !== 'out') continue;
+        fichasAlBote += Math.max(0, seat.chips) + Math.max(0, seat.bet);
+      }
+
+      if (fichasAlBote > 0 && table.field?.fieldId) {
+        await Field.updateOne(
+          { fieldId: table.field.fieldId },
+          { $inc: { deadChips: fichasAlBote } },
+        );
+      }
+
       table.seats = table.seats.filter(s => s.status !== 'out');
       const liberados = antesOut - table.seats.length;
 
@@ -1160,7 +1186,9 @@ if (this.isFieldTable(table)) {
       if (liberados > 0) {
         logger.info(
           `Mesa ${table.tableId}: ${liberados} asiento(s) liberados de eliminados ` +
-          `ya liquidados. Quedan ${table.seats.length} de ${table.maxSeats}.`,
+          `ya liquidados${fichasAlBote > 0
+            ? `, y sus ${formatUnits(fichasAlBote)} USDT de fichas al bote del campo`
+            : ''}. Quedan ${table.seats.length} de ${table.maxSeats}.`,
         );
       }
 
