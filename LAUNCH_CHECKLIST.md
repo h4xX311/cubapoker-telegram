@@ -596,6 +596,102 @@ forma, y comparar las dos implementaciones diria cual de las dos se equivoca.
 
 ---
 
+## 3-bis-tercis. Tarde del 6 de octubre: el dinero ya no se pierde
+
+Tres bugs mas, los tres de dinero, y los tres encontrados por pruebas que corren en
+menos de un minuto en vez de por el test de integracion de veinte minutos.
+
+### 5. DOS JUGADORES CON EL MISMO INDICE DE ASIENTO. CERRADO
+
+Tres sitios asignaban el indice de un asiento como `seats.length`: `buildSeat`,
+`checkMerges` y `forceMergeIntoOne`. Eso solo vale si los indices son 0, 1, 2, 3...
+sin huecos, y en un campo dejan de serlo en cuanto se libera un asiento: el eliminado
+se marca `out`, `finishHand` lo quita del array, y los demas conservan su indice. Una
+mesa de 7 sin el asiento 2 queda con [0, 1, 3, 4, 5, 6]: `seats.length` dice 6, pero
+el 6 ya esta ocupado.
+
+El indice de asiento es la IDENTIDAD del jugador dentro del motor. Con dos asientos en
+el mismo indice, el motor registra dos jugadores con el mismo id, `performAction`
+actua siempre sobre el primero (el segundo no juega nunca) y `syncEngineToTable`
+escribe las fichas sobre el primero (las del segundo no se escriben). Ese asiento queda
+huerfano: `isSeated` lo ve ocupado, nadie lo vuelve a sentar, y el campo se queda con
+un jugador invisible y fichas quietas.
+
+Visto jugando: la mesa final con los indices [1, 2, 3, 3, 4] y 12,98 USDT congelados
+durante 2 500 rondas.
+
+Arreglado con un unico sitio que decide el indice (`primerIndiceLibre`) y un aviso
+con nivel ERROR si alguna vez se repite uno. No se renumera la mesa entera a proposito:
+`field.results` guarda el indice de cada eliminado, y un resultado que apunta al
+asiento 3 cuando ese 3 era otro jugador es peor que un hueco.
+
+### 6. LAS FICHAS DE UN ELIMINADO SE BORRAN AL SOLTAR SU ASIENTO. CERRADO
+
+El mas grave de los tres, y el mas dificil de ver.
+
+`collectEliminations` deja **a proposito** las fichas del eliminado en su asiento. El
+comentario del propio codigo lo dice: *"No se ponen a cero aqui: desaparecerian de la
+contabilidad y el campo devolveria menos de lo que cobro."* La idea era que las
+recogiera `settleField` al final.
+
+Pero entre una cosa y otra el asiento se marca `out` y se suelta del array, y las
+fichas se van con el. Para cuando le toca a `settleField` de barrer el bote, ya no
+estan en ningun sitio.
+
+**2 155 unidades de 14 000: el 15 % del bote se evaporaba.** Ocho eliminados, unos 270
+cada uno. El campo se liquidaba igual y los premios se pagaban, asi que nadie se
+enteraba: el dinero se perdia sin dejar rastro.
+
+Que no lo detectaran los tests anteriores tiene una razon concreta: el fallo del rake
+(que convertia la fuga en ingresos) tapaba exactamente esta parte. Arreglado uno, el
+otro se ve.
+
+Habia **dos** sitios que destruian fichas al soltar un asiento `out` (el del field
+manager cuando la mesa esta en reposo, y el de `finishHand` al acabar la mano). Los
+dos hacen ahora lo mismo: `liberarAsientosLiquidados` pasa las fichas a
+`Field.deadChips` antes de quitar el asiento. Es lo que hace falta para que las fichas
+del eliminado SEAN del bote, que es lo que decia el comentario original y nunca
+ocurrio.
+
+### 7. EN SIMULACION SE PODIA APROBAR UN RETIRO Y PAGARLO DE VERDAD. CERRADO
+
+Este lo ha pedido el modo de lanzamiento elegido, y es el mas caro de los tres si se
+produce.
+
+`POST /api/admin/withdrawals/:orderId/approve` **no mueve dinero**: marca la orden
+como pagada y descuenta el saldo, porque el envio lo hace el operador por fuera. En
+simulacion no habia ninguna proteccion, y una orden simulada en el panel es
+**indistinguible** de una de verdad. El operador veia "liquidado" y mandaba USDT.
+
+Eso no es un descuadre contable: es dinero real pagado a cambio de nada.
+
+El freno va en `settleWithdrawal` para que cubra cualquier llamante, y hacen falta
+**dos** condiciones: `ALLOW_SIMULATED_WITHDRAWALS=true` en el entorno (deliberado, no
+un efecto secundario de arrancar el sistema) y `confirmarSimulado: true` en cada
+peticion. Con una sola, la otra se cumple sola.
+
+Los depositos **no** llevan freno: acreditar saldo de prueba es justo lo que se quiere
+en simulacion y no mueve nada.
+
+---
+
+### Donde estamos con el dinero
+
+| Prueba | Que cubre | Tiempo |
+|---|---|---|
+| `scripts/run-tests.js` | 395 unitarias de aritmetica pura | 20 s |
+| `scripts/test-sidepots.js` | 52 480 repartos de botes laterales | 5 s |
+| `scripts/test-settle.js` | la liquidacion del campo | 30 s |
+| `scripts/test-seat-index.js` | indices de asiento y fusiones | 30 s |
+| `scripts/test-eliminado.js` | las fichas de un eliminado | 30 s |
+| `scripts/test-sim-guard.js` | el freno de simulacion en retiros | 30 s |
+| `scripts/test-e2e-field.js` | 26 comprobaciones contra Mongo | 2 min |
+| `scripts/test-e2e-engine.js` | un campo entero jugado por bots | 20 min |
+
+Los seis primeros tardan menos de un minuto cada uno. Los tres ultimos necesitan
+MongoDB de verdad. La regla que se ha seguido: **si un fallo se puede montar con
+cifras exactas, se prueba con cifras exactas, no jugando el campo entero.**
+
 ## 5. Cómo probar el flujo ahora
 
 ```bash
@@ -621,3 +717,4 @@ saldo acreditado en `real`.
 El flujo completo de pagos está escrito (`test-payment-flow.js`) pero **no se ha
 ejecutado**: no hay MongoDB ni Docker en esta máquina. Debe correr en un entorno
 con base de datos antes de confiar en él.
+cifras exactas, se prueba con cifras exactas, no jugando el campo entero.**
