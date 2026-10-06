@@ -51,7 +51,23 @@ export default function App() {
 
     // Sin initData no hay forma de validar identidad: fuera de Telegram
     // no se puede usar la app (ni debe permitirse).
-    if (!tg?.initData) {
+    // ------------------------------------------------------------------
+    // FUERA DE TELEGRAM, SOLO EN DESARROLLO
+    //
+    // Sin `initData` no hay forma de validar quien es el usuario, y sin esa
+    // validacion cualquiera podria suplantar cualquier cuenta. En produccion esta
+    // pantalla tiene que negarse a mostrarse, y se niega.
+    //
+    // Para developing, `import.meta.env.DEV` es `true` solo en el servidor de Vite y
+    // va incrustado como `false` al compilar: esta rama desaparece del build de
+    // produccion. El backend tampoco aceptaria nada, porque exige `NODE_ENV` distinto
+    // de `production` para el bypass.
+    //
+    // Aun asi, que se note en la pantalla cuando se esta viendo una sesion falsa: si no,
+    // un cambio puede parecer correcto sobre un usuario de pruebas y fallar con uno
+    // de verdad.
+    // ------------------------------------------------------------------
+    if (!tg?.initData && !import.meta.env.DEV) {
       setStatus('unauthorized');
       setErrorMessage('Esta aplicacion solo funciona dentro de Telegram.');
       return;

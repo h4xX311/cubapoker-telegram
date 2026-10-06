@@ -13,6 +13,30 @@ export class ApiError extends Error {
 
 const getInitData = (): string => window.Telegram?.WebApp?.initData || '';
 
+
+/**
+ * Si estamos en desarrollo y SIN Telegram, con que identificador se habla con la API.
+ *
+ * El backend decide: `telegramAuth.ts` acepta `x-dev-auth` solo si `NODE_ENV` no es
+ * `production` y `DEV_AUTH_BYPASS` es `true`. En Render hay `production`, asi que ahi
+ * no se puede activar ni por error.
+ *
+ * Aqui solo se pone el `DEV` de Vite, que va incrustado como `false` al compilar: en
+ * el build de produccion esta rama no existe. La decision la toma el SERVIDOR.
+ *
+ * Para cambiar de usuario en local: `?devUser=600000001` en la URL.
+ */
+const DEV_MODE = import.meta.env.DEV && !window.Telegram?.WebApp?.initData;
+
+const devUserId = (): number => {
+  const deLaUrl = new URLSearchParams(window.location.search).get('devUser');
+  if (deLaUrl) {
+    const n = Number(deLaUrl);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return 600000001;
+};
+
 async function request<T = any>(endpoint: string, options: { method?: string; body?: any } = {}): Promise<T> {
   const { method = 'GET', body } = options;
 
@@ -23,6 +47,7 @@ async function request<T = any>(endpoint: string, options: { method?: string; bo
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     const initData = getInitData();
     if (initData) headers['X-Telegram-Init-Data'] = initData;
+    else if (DEV_MODE) headers['x-dev-auth'] = String(devUserId());
 
     const response = await fetch(`/api${endpoint}`, {
       method,
