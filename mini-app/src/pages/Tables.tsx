@@ -138,6 +138,35 @@ export function Tables({
     }
   };
 
+  /**
+   * Sentarse ahora mismo en una mesa cash suelta, contra bots.
+   *
+   * Es la via que faltaba: la unica que no depende de que 300 personas se apunten. Se Cobra
+   * el buy-in, los bots rellenan y se juega.
+   *
+   * Las fichas que se ganan aqui son DE LA MESA, no del jugador: en una mesa cash suelta
+   * no hay bote ni posiciones, y al levantarse el saldo se devuelve. Eso se dice en la
+   * pantalla, antes de comprar la entrada, y no escondido en una nota al pie.
+   */
+  const jugarAhora = async (tierId: string) => {
+    setBusy('sit');
+    setError('');
+    try {
+      const res = await api.sit({ tierId });
+      await onBalanceChange?.();
+      if (res?.tableId) {
+        onPlay(res.tableId);
+        return;
+      }
+      setError('Te has sentado. Vuelve a entrar para ver tu mesa.');
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'No se pudo sentar en la mesa.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const balance = user?.balance?.total ?? 0;
 
   return (
@@ -178,6 +207,60 @@ export function Tables({
           Con el, sabe cuanto falta, por que no arranca, y puede salir con el buy-in
           entero. Que es lo que hace cualquiera antes de que haya liquidez.
       ------------------------------------------------------------------ */}
+      {/* ------------------------------------------------------------------
+          JUGAR AHORA, CONTRA BOTS
+
+          Esta es la via rapida, y no sustituye al campo: es otro producto. El campo es de
+          300 personas con un bote y un ganador, y es de donde sale el rake. Esto es una
+          mesa suelta para jugar sin esperar a que se llene nada, que es lo que mantiene a
+          alguien abierto en un producto que empieza.
+
+          Y sin esto, la aplicacion no tenia NINGUNA forma de jugar: todo pasaba por campos
+          que necesitan 300 registros.
+      ------------------------------------------------------------------ */}
+      {!miCampo && tiers.length > 0 && (
+        <div
+          className="rounded-2xl p-4 mb-5"
+          style={{ background: '#16213e', border: '1px solid #00d26a' }}
+        >
+          <div className="flex items-start gap-3">
+            <div className="text-2xl">🃏</div>
+            <div className="flex-1 min-w-0">
+              <p className="font-bold text-white text-sm">Jugar ahora, contra bots</p>
+              <p className="text-xs text-[#a0a0b0] mt-1">
+                Entra en una mesa ahora mismo. No hace falta esperar a que se llene nada.
+              </p>
+              <p className="text-[11px] text-[#6c6c80] mt-1.5">
+                Las fichas de esta mesa son de la mesa: al levantarte se te devuelve el
+                saldo, pero no te llevas nada. Para ganar de verdad, usa los campos de
+                abajo, que reparten bote y posiciones.
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 mt-3">
+            {tiers.slice(0, 2).map((tier) => (
+              <button
+                key={tier.id}
+                onClick={() => jugarAhora(tier.id)}
+                disabled={busy === 'sit' || balance < tier.buyIn}
+                className="btn btn-primary py-2.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {busy === 'sit'
+                  ? 'Sentando…'
+                  : balance < tier.buyIn
+                  ? `Necesitas ${tier.buyIn} USDT`
+                  : `${tier.buyIn} USDT`}
+              </button>
+            ))}
+          </div>
+
+          <p className="text-[10px] text-[#6c6c80] mt-2 text-center">
+            Las manos van lentas: una mesa tarda un buen rato en terminar.
+          </p>
+        </div>
+      )}
+
       {miCampo && (
         <div
           className="rounded-2xl p-4 mb-5"
