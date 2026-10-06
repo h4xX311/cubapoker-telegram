@@ -601,11 +601,91 @@ export const fieldManager = {
 
         await this.collectEliminations(field);
         await this.checkMerges(field);
+        await this.reconcileAliveCount(field);
         await this.checkCompletion(field);
       } catch (error) {
         logger.error(`Error en tick del campo ${field.fieldId}:`, error);
       }
     }
+  },
+
+  /**
+   * Reconcile el contador de vivos con la realidad.
+   *
+   * ------------------------------------------------------------------
+   * POR QUE HACE FALTA, Y POR QUE NO ES UNA TRAMPA
+   *
+   * `playersRemaining` decide la POSICION de cada eliminado: la posicion es el valor
+   * del contador ANTES de decrementarlo. Si el contador miente, todos los que vengan
+   * despues reciben una posicion desplazada y el reparto del bote es incorrecto.
+   *
+   * El contador se mantenia con `$inc`, uno por cada eliminacion que se recoge. Ese
+   * estilo es fragil por naturaleza: basta con que un jugador desaparezca de una mesa
+   * por una via que no sea la eliminacion para que el contador se quede alto para
+   * siempre, y no hay ninguna forma de que se note salvo mirando el numero.
+   *
+   * Esto no es contabilidad por duplicado: es una COMPROBACION. Si el numero no cuadra
+   * con los asientos reales, se corrige y se avisa. El contador deja de ser la fuente
+   * de la verdad y pasa a ser una cache que se revalida contra ella.
+   *
+   * QUE CUENTA COMO VIVO
+   *
+   * Un asiento humano en una mesa viva del campo que NO este `out`. Es decir:
+   *
+   *   - `active`: jugando. Vivo.
+   *   - `eliminated`: sin fichas, pero SIN posicion adjudicada todavia. Se cuenta
+   *     como vivo porque el contador baja cuando se adjudica, no cuando pierde.
+   *   - `out`: ya adjudicado y liquidado. NO cuenta.
+   *
+   * ASI QUE NO HAY DIFERENCIAS LEGITIMAS ENTRE EL CONTADOR Y ESTE RECUENTO, y por eso
+   * la correccion se puede hacer sin esperar: no hay estado transitorio que
+   * justifique la diferencia. Los eliminados a medio adjudicar ya estan contados como
+   * vivos en los dos sitios.
+   */
+  async reconcileAliveCount(field: IField): Promise<void> {
+    const tables = await Table.find({
+      'field.fieldId': field.fieldId,
+      status: { $in: ['waiting', 'running'] },
+    });
+
+    // Un jugador solo puede estar en una mesa, asi que se cuentan los asientos
+    // humanos distintos. Si apareciera el mismo `playerId` en dos mesas, es un bug
+    // de fusion y se avisa: la invariante "nadie esta en dos mesas" tambien importa: un jugador en dos mesas
+    // cobraria dos veces.
+    const vistos = new Set<number>();
+    let vivos = 0;
+
+    for (const t of tables) {
+      for (const seat of t.seats) {
+        if (seat.kind !== 'human') continue;
+        if (seat.status === 'out') continue;
+
+        const id = Number(seat.playerId);
+        if (Number.isNaN(id)) continue;
+
+        if (vistos.has(id)) {
+          logger.error(
+            `Campo ${field.fieldId}: el jugador ${id} esta en dos mesas a la vez ` +
+            `(${t.tableId} y otra). Es un bug de fusion.`,
+          );
+          continue;
+        }
+
+        vistos.add(id);
+        vivos++;
+      }
+    }
+
+    if (vivos === field.playersRemaining) return;
+
+    logger.warn(
+      `Campo ${field.fieldId}: el contador de vivos decia ` +
+      `${field.playersRemaining} y hay ${vivos} jugadores reales en las mesas. ` +
+      'Se corrige al valor real.',
+    );
+
+    await Field.updateOne({ _id: field._id }, { $set: { playersRemaining: vivos } });
+    field.playersRemaining = vivos;
   },
 
   /** Arranca el campo si se lleno, sin esperar al siguiente registro. */
@@ -937,7 +1017,32 @@ export const fieldManager = {
         const target = tables.find(t => t.tableId === move.tableId)!;
         for (const seatIndex of move.seatIndexes) {
           const seat = source.table.seats.find(s => s.index === seatIndex);
-          if (!seat) continue;
+          if (!seat) {
+            // ------------------------------------------------------------------
+            // NO SE PIERDE UN JUGADOR EN UNA FUSION. NUNCA.
+            //
+            // Antes habia un `continue` aqui, y era una bomba de reloj. Si el plan de
+            // fusion mencionaba un asiento que ya no estaba en la mesa, el jugador
+            // desaparecia del campo sin adjudicarse posicion: sus fichas y su
+            // buy-in se perdian, y el contador `playersRemaining` se quedaba un punto
+            // por encima, con lo que todos los siguientes recibian una posicion
+            // desplazada.
+            //
+            // Un jugador que desaparece del campo sin adjudicarse es exactamente el
+            // bug que quedaba abierto: el contador decia 6 vivos con 3 asientos
+            // reales. Si aqui se pierde uno, el contador vuelve a mentir.
+            //
+            // Lo que se hace es no tocar la mesa origen (el jugador se queda donde
+            // esta, vivo y cobrado) y avisar. Perder un jugador es malo; perderlo en
+            // silencio, sin registro, es peor.
+            // ------------------------------------------------------------------
+            logger.error(
+              `Campo ${field.fieldId}: la fusion de ${source.table.tableId} menciona` +
+              `el asiento ${seatIndex}, que no esta en la mesa. El jugador NO se ` +
+              'mueve y se queda en la mesa origen. Hay que revisarlo a mano.',
+            );
+            continue;
+          }
 
           // Reindizar: el destino puede tener menos jugadores, y el motor usa
           // el indice de asiento como id del jugador. Un indice duplicado
