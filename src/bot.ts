@@ -5,6 +5,7 @@ import dotenv from 'dotenv';
 import cors from 'cors';
 import path from 'path';
 import healthRouter from './health';
+import userRoutes from './routes/user.routes';
 import tableRoutes from './routes/table.routes';
 import monetizationRoutes from './routes/monetization.routes';
 import paymentRoutes from './routes/payment.routes';
@@ -195,6 +196,22 @@ if (USE_WEBHOOK) {
 
 // Game Routes (mesas cash, freerolls, acciones)
 app.use('/api/game', tableRoutes);
+
+// ------------------------------------------------------------------
+// SESION DEL JUGADOR
+//
+// Se monta ANTES que cualquier otra cosa de `/api`, y por dos razones.
+//
+// La primera es que la Mini App lo pide desde el arranque: sin el, la aplicacion no sabe
+// quien es el jugador ni cuanto tiene, y con el saldo a cero todos los botones de compra
+// salen deshabilitados sin explicar por que.
+//
+// La segunda es la que de verdad importa: **las rutas que faltan no dan 404**, caen en el
+// `catch-all` que sirve la SPA y devuelven su HTML con HTTP 200. Un 404 se ve enseguida;
+// un 200 con una pagina HTML dentro parece que todo va bien mientras el cliente revienta al
+// hacer `JSON.parse`. Por eso este router tiene que existir de verdad, no "de momento".
+// ------------------------------------------------------------------
+app.use('/api', userRoutes);
 
 // Monetization Routes
 app.use('/api/monetization', monetizationRoutes);

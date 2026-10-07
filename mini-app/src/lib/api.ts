@@ -65,6 +65,33 @@ async function request<T = any>(endpoint: string, options: { method?: string; bo
     }
 
     if (!response.ok) {
+      // ------------------------------------------------------------------
+      // EL 500 QUE NO ERA UN 500
+      //
+      // En desarrollo la web habla con el backend a traves del proxy de vite. Si el backend
+      // no esta arrancado, el proxy responde 502/500 EL, sin cuerpo y sin decir por que. Y
+      // eso es indistinguible de un fallo real del servidor: mismo numero, mismo aspecto,
+      // cero informacion.
+      //
+      // El caso real: el backend estaba caido por un `EADDRINUSE` y la aplicacion
+      // mostraba "Error 500" como si el fallo fuera del codigo. Se perduieron veinte
+      // minutos buscando un bug que no existia.
+      //
+      // Asi que se distingue por lo unico que no miente: si la respuesta NO es JSON, no la
+      // ha producido el backend. Y si además estamos en desarrollo, el mensaje dice
+      // exactamente lo que hay que hacer, que es arrancar el otro proceso.
+      // ------------------------------------------------------------------
+      const pareceDelBackend = typeof data?.error === 'string' && !data._crudoHtml;
+
+      if (!pareceDelBackend && import.meta.env.DEV) {
+        throw new ApiError(
+          'No hay servidor de juego. Abre otra terminal en la carpeta del bot y ejecuta ' +
+            'npm run dev (deja el puerto 3000 libre).',
+          response.status,
+          'BACKEND_CAIDO',
+        );
+      }
+
       throw new ApiError(data?.error || `Error ${response.status}`, response.status, data?.code);
     }
     return data as T;

@@ -265,13 +265,72 @@ export class TableManager {
    * anterior dejo a medias. Los jugadores deben recuperar su dinero.
    */
   private async recoverInterruptedHands(): Promise<number> {
+    // ------------------------------------------------------------------
+    // QUE CONSIDERA "MANO A MEDIAS"
+    //
+    // Lo que decide es si la MESA TIENE UNA MANO EN CURSO, no el estado de la mesa. Son
+    // dos cosas distintas y confundirlas deja mesas congeladas para siempre.
+    //
+    // Antes solo se buscaban las mesas en `running`. Pero una mesa puede tener
+    // `status: 'waiting'` y `hand.phase: 'preflop'` a la vez: que se quedara en `waiting`
+    // con la mano a medias pasa cuando el proceso se reinicia con la mano empezada, o
+    // cuando `finishHand` devuelve el estado a `waiting` sin limpiar la fase.
+    //
+    // Y esa combinacion era un callejon sin salida: `recoverInterruptedHands` no la
+    // miraba (buscaba `running`), y el tick tampoco, porque solo procesa mesas que tienen
+    // motor. El resultado era una mesa CONGELADA: `hand.phase` clavado, bote sin repartir,
+    // sin cartas para nadie y sin turno para el humano. Si te sentabas ahi, no podias
+    // jugar nunca. No habia forma de desbloquearla desde el juego: ni aksiu, ni esperar.
+    //
+    // Lo que se busca ahora es exactamente lo que rompe: una mano viva sin motor que la
+    // conduzca. Que la mesa diga `waiting`, `running` o `paused` da igual, porque la
+    // verdad es la fase de la mano.
+    // ------------------------------------------------------------------
+    const EN_REPOSO = ['idle', 'idle-awaiting'];
+
     const stale = await Table.find({
-      status: 'running',
-      tableId: { $nin: Array.from(this.engines.keys()) },
+      $and: [
+        { 'hand.phase': { $nin: EN_REPOSO } },
+        { tableId: { $nin: Array.from(this.engines.keys()) } },
+      ],
     });
 
     for (const table of stale) {
+      logger.warn(
+        `Mesa ${table.tableId} con mano a medias sin motor ` +
+          `(status=${table.status}, fase=${table.hand.phase}, bote=${table.hand.pot}). ` +
+          'Se recupera al arrancar.',
+      );
       await this.refundTable(table);
+    }
+
+    // ------------------------------------------------------------------
+    // Y AL REVES: MESAS CON MOTOR PERO EN REPOSO
+    //
+    // El caso simetrico. Si una mesa dice `waiting` pero su `hand.phase` sigue siendo
+    // `preflop`, el documento y la realidad no coinciden. Sin limpiarlo, `startHand` ve una
+    // mesa "en reposo" y la relanza, pero el `pot` y las apuestas del documento viejo se
+    // quedan mezclados con la mano nueva.
+    // ------------------------------------------------------------------
+    const sucias = await Table.find({
+      status: 'waiting',
+      'hand.phase': { $in: EN_REPOSO },
+    });
+
+    for (const mesa of sucias) {
+      // Solo si ademas no hay nadie con fichas pendientes en la mano.
+      const apostado = (mesa.seats ?? []).some(
+        (s) => (s.bet ?? 0) > 0 || (s.chips ?? 0) < 0,
+      );
+      if (apostado) continue;
+
+      mesa.hand.phase = 'idle';
+      mesa.hand.pot = 0;
+      mesa.hand.currentBet = 0;
+      await mesa.save();
+      logger.info(
+        `Mesa ${mesa.tableId}: fase ${'resetada'} a idle por estar en reposo sin motor.`,
+      );
     }
 
     return stale.length;
