@@ -323,12 +323,16 @@ export const fieldManager = {
         { _id: field._id },
         { $inc: { waiting: -1, buyInsCollected: -field.buyInUnits } },
       );
+      field.waiting = Math.max(0, field.waiting - 1);
     } else {
       await Field.updateOne(
         { _id: field._id },
         { $inc: { seated: -1, playersRemaining: -1, buyInsCollected: -field.buyInUnits } },
       );
+      field.seated = Math.max(0, field.seated - 1);
+      field.playersRemaining = Math.max(0, field.playersRemaining - 1);
     }
+    field.buyInsCollected = Math.max(0, field.buyInsCollected - field.buyInUnits);
 
     // Lo que no llego a jugar esta integro: se devuelve entero.
     await this.refund(telegramId, field.buyInUnits);
@@ -463,6 +467,19 @@ export const fieldManager = {
           { $inc: { waiting: -1, seated: 1, playersRemaining: 1 } },
         );
 
+        // ------------------------------------------------------------------
+        // EL OBJETO EN MEMORIA SE ACTUALIZA TAMBIEN
+        //
+        // Un `$inc` de Mongo escribe en la base de datos y no toca el objeto que lo
+        // tiene en memoria. Y ese objeto es el que lee `countSeated`, que es justo lo que
+        // decide si el campo arranca. Sin esta linea, `field.seated` se quedaba en 0 para
+        // siempre, `countSeated` devolvia 0, y un campo con 8 de 8 sentados no arrancaba
+        // nunca. Verificado: 260 vueltas y seguia en "filling".
+        // ------------------------------------------------------------------
+        field.waiting = Math.max(0, field.waiting - 1);
+        field.seated += 1;
+        field.playersRemaining += 1;
+
         // Y la entrada de la mesa en field.tables solo se anade si no estaba.
         //
         // Antes se hacia $push en CADA asiento y luego dedupeFieldTables lo
@@ -594,6 +611,9 @@ export const fieldManager = {
     // ------------------------------------------------------------------
     if (alBote > 0) {
       await Field.updateOne({ _id: field._id }, { $inc: { deadChips: alBote } });
+      // El objeto en memoria tambien, o el campo sigue diciendo que no tiene esas
+      // fichas y las cuenta otra vez cuando se lee su estado.
+      field.deadChips = (field.deadChips || 0) + alBote;
     }
 
     // ------------------------------------------------------------------
@@ -1088,6 +1108,16 @@ export const fieldManager = {
           { new: false },
         );
 
+        // El objeto en memoria, por lo mismo que en `trySeat`. `new: false` devuelve el
+        // documento ANTES del cambio, asi que `updated` ya lleva los valores nuevos.
+        //
+        // Sin esto, las decisiones que leen estos numeros (que el campo ha terminado,
+        // cuantos vivos quedan, que posicion le toca al eliminado) van con un valor viejo.
+        if (updated) {
+          field.playersRemaining = updated.playersRemaining;
+          field.eliminated = updated.eliminated;
+        }
+
         if (!updated) {
           // El campo ya no tiene jugadores vivos: nada mas que adjudicar.
           logger.warn(
@@ -1435,6 +1465,7 @@ export const fieldManager = {
 
     if (alBote > 0) {
       await Field.updateOne({ _id: field._id }, { $inc: { deadChips: alBote } });
+      field.deadChips = (field.deadChips || 0) + alBote;
       logger.info(
         `Campo ${field.fieldId}: ${table.tableId} se cierra sin jugadores activos. ` +
         `${formatUnits(alBote)} USDT de fichas pasan al bote del campo.`,
