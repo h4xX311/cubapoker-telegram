@@ -194,7 +194,39 @@ if (USE_WEBHOOK) {
       await bot.setWebHook(url, {
         secret_token: process.env.TELEGRAM_WEBHOOK_SECRET || undefined,
       });
-      res.json({ success: true, webhook: url });
+
+      // ------------------------------------------------------------------
+      // QUE BOT ES, Y POR QUE SE DICE
+      //
+      // El fallo mas caro de diagnosticar en un Mini App es "firma invalida": la Mini App
+      // abre bien, Telegram manda su `initData` correctamente, y el servidor lo rechaza. La
+      // causa casi siempre es que `TELEGRAM_BOT_TOKEN` NO es el token del bot que esta
+      // abriendo la app, y no hay forma de saberlo: el mensaje de error no lo dice y el token
+      // es un secreto que no se puede comparar a ojo.
+      //
+      // Aqui se responde con el bot al que pertenece ESE token. Es publico (el username del
+      // bot lo ve cualquiera que abra el chat) y convierte el diagnostico en un `curl`.
+      //
+      // Si aqui dice un bot distinto del que tienes en BotFather, el token de Render es de
+      // otro bot, y por eso la firma no cuadra nunca.
+      // ------------------------------------------------------------------
+      let botInfo: { username?: string; id?: number } = {};
+      try {
+        const me = await bot.getMe();
+        botInfo = { username: me.username, id: me.id };
+      } catch {
+        botInfo = {};
+      }
+
+      res.json({
+        success: true,
+        webhook: url,
+        bot: botInfo.username ?? '(no se pudo leer)',
+        botId: botInfo.id ?? null,
+        pista:
+          'Si el @username no es el bot que abre la Mini App, TELEGRAM_BOT_TOKEN en Render ' +
+          'es de otro bot y por eso la firma no valida.',
+      });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }

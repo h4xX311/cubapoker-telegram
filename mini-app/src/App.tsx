@@ -85,6 +85,36 @@ export default function App() {
             ? 'Abre CubaPoker desde el chat del bot. Esta pantalla solo funciona dentro de Telegram.'
             : 'Tu sesión expiró. Reabre la aplicación desde el bot.',
         );
+
+        // ------------------------------------------------------------------
+        // EL MOTIVO REAL, NO UN MENSAJE GENERICO
+        //
+        // Hay dos fallos muy distintos bajo este mismo texto y no se distinguen:
+        //
+        //  - `initData` VACIO: se abrio con un enlace, no con el boton del bot.
+        //  - `initData` INVALIDO: llega, pero la firma no cuadra.
+        //
+        // El segundo es casi siempre el TOKEN: el de Render no es el del bot que configuraste
+        // en BotFather, o el bot se regenero. La firma se valida con el token del servidor, y
+        // si no es el del bot que abre la app, no cuadra jamas.
+        //
+        // Decir "tu sesion expiro" cuando lo que pasa es que el token no coincide lleva a
+        // reiniciar la app veinte veces sin arreglar nada. El motivo del servidor va a la
+        // consola, que es donde se diagnostica esto.
+        // ------------------------------------------------------------------
+        console.error(
+          '[cubapoker] el servidor rechazo la sesion:',
+          {
+            code: error.code,
+            status: error.status,
+            detalle: (error as any).detail ?? '(sin detalle)',
+            pista:
+              error.code === 'AUTH_REQUIRED'
+                ? 'initData llego pero no valida. Comprueba que TELEGRAM_BOT_TOKEN en Render ' +
+                  'sea el del bot que abre la app (@CubaPoker_Bot), no el de otro.'
+                : 'initData vacio: se abrio con un enlace en vez del boton del bot.',
+          },
+        );
       } else {
         setStatus('error');
         setErrorMessage(
