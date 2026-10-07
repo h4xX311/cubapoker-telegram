@@ -597,6 +597,41 @@ export class TableManager {
     // El aviso lleva los tres numeros que Contestan la pregunta: si es la fase, no hay
     // por que mirar; si son los jugadores, no hay con que jugar.
     // ------------------------------------------------------------------
+    // UNA MANO A MEDIAS SIN NADIE QUE LA JUEGUE: SE ABANDONA
+    //
+    // El caso real: el ultimo humano se levanta en mitad de una mano. Su asiento queda
+    // `out`, la mesa se queda con 4 bots y `phase: 'preflop'` con el bote dentro.
+    //
+    // Y ahi se queda PARA SIEMPRE, porque las dos condiciones que mueven la mesa son
+    // incompatibles: `startHand` solo arranca con un humano (no hay), y una mano en curso no
+    // se cierra sola si no queda nadie a quien tocar el turno. O sea: ni reparten ni recogen.
+    // 35 unidades de bote y las apuestas de los bots, bloqueadas, indefinidamente.
+    //
+    // Es la version en mesa cash del campo que nunca terminaba, y tiene el mismofinal: dinero
+    // que no se mueve. Un jugador que levanta la cabeza ve una mesa parada y no tiene por que
+    // saber que sus fichas (las de la mesa, no las suyas) estan ahi dentro.
+    //
+    // Que se abandone es lo unico razonable: sin humano no hay partida, asi que las apuestas
+    // se devuelven a sus asientos y la mano se cierra sin ganador. El bote se recoge entero.
+    // ------------------------------------------------------------------------
+    if (table.hand.phase !== 'idle' && table.hand.phase !== 'idle-awaiting') {
+      const humanosVivos = table.seats.filter(
+        (s) => s.kind === 'human' && s.status !== 'out',
+      ).length;
+
+      // Las mesas de campo NO se abandonan: alli el dinero es del campo y las posiciones las
+      // decide el gestor de campos. Se pausa, que es otra cosa (ver `refundTable`).
+      const esDeCampo = this.isFieldTable(table);
+
+      if (humanosVivos === 0 && !esDeCampo) {
+        logger.warn(
+          `Mesa ${table.tableId}: mano a medias (${table.hand.phase}) sin ningun humano ` +
+          `sentado. Se abandona y el bote (${table.hand.pot}) se devuelve a los bots.`,
+        );
+        await this.abandonHand(table);
+      }
+    }
+
     if (table.hand.phase === 'idle' || table.hand.phase === 'idle-awaiting') {
       // ------------------------------------------------------------------
       // UN HUMANO SIN FICHAS NO DEBE QUEDARSE SENTADO
@@ -665,6 +700,43 @@ export class TableManager {
     if (table.hand.phase !== 'idle') {
       await this.checkTurnTimeout(table);
     }
+  }
+
+  /**
+   * Abandona una mano en la que no queda ningun humano: devuelve cada apuesta a su asiento y
+   * cierra la mano sin ganador.
+   *
+   * Sin humano no hay partida, asi que no hay showdown posible. Las apuestas vuelven
+   * enteras a los bots (nadie gana ni pierde) y el bote se recoge. La mesa vuelve a `idle`
+   * y puede seguir jugando cuando vuelva a haber alguien.
+   *
+   * Las fichas de un BOT no salen de ningun sitio: las creo los bots al entrar. Devolverlas
+   * es lo correcto y es lo que mantiene el total de la mesa constante.
+   */
+  private async abandonHand(table: ITable): Promise<void> {
+    // El motor de la mano se tira: sin humanos no hay mano que terminar, y dejarlo puesto
+    // haria que la siguiente� Starts Hand se encontrara un motor con estado viejo.
+    this.engines.delete(table.tableId);
+
+    let devuelto = 0;
+    for (const seat of table.seats) {
+      if (seat.bet > 0) {
+        seat.chips += seat.bet;
+        devuelto += seat.bet;
+        seat.bet = 0;
+      }
+      seat.totalBet = 0;
+    }
+
+    table.hand.phase = 'idle';
+    table.hand.pot = 0;
+    table.hand.currentBet = 0;
+    table.hand.lastActionAt = null;
+    await table.save();
+
+    logger.info(
+      `Mesa ${table.tableId}: mano abandonada, ${devuelto} unidades devueltas a los bots.`,
+    );
   }
 
   /**
