@@ -827,11 +827,36 @@ export const fieldManager = {
       await t.save();
     }
 
-    // Las mesas que no llegaron a 2 jugadores se vacian con reembolso.
+    // ------------------------------------------------------------------
+    // UNA MESA CON UN SOLO JUGADOR NO SE VACIA, SE ESPERA
+    //
+    // Antes se hacia `refundTable` en toda mesa con menos de 2 activos. Y eso hacia dos
+    // cosas, las dos graves:
+    //
+    //  1. Con 8 jugadores y mesas de 7 el reparto es 7 + 1, y el jugador de la mesa con
+    //     uno se quedaba sin asiento, sin posicion y sin buy-in. Su turno se quedaba
+    //     pendiente en el motor, la mano no avanzaba, y el campo entero se congelaba.
+    //     Para un Sit'n'Go de 8 jugadores eso no es un caso raro: es el reparto normal.
+    //
+    //  2. Devolver esas fichas es CREAR DINERO: el buy-in ya se cobro al registrarse y
+    //     esta en `Field.buyInsCollected`. Es el mismo dreno que ya se corrigio en
+    //     `collectEliminations` y en `closeEmptyTable`, en un tercer sitio.
+    //
+    // Lo que se hace en un campo de verdad es ESPERAR. El jugador se queda sentado, con
+    // sus fichas, hasta que le toque. Y si hay sitio en otra mesa, `checkMerges` lo mueve,
+    // que para eso esta.
+    //
+    // Lo que no se hace nunca, en ningun caso, es devolverle el buy-in: en un campo las
+    // fichas son del bote, no suyas.
+    //
+    // Y una mesa totalmente vacia no necesita hacer nada: no tiene nada que devolver ni
+    // alguien a quien esperar.
+    // ------------------------------------------------------------------
     for (const t of tables) {
-      const active = t.seats.filter(s => s.status === 'active' && s.chips > 0).length;
-      if (active < 2) {
-        await this.refundTable(t);
+      if (t.seats.length === 0 && t.status !== 'finished') {
+        t.status = 'finished';
+        if (t.field) t.field.fieldStatus = 'finished';
+        await t.save();
       }
     }
 

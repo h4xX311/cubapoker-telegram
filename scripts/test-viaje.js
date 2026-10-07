@@ -81,6 +81,7 @@ async function main() {
   const { fieldManager } = require('../dist/game/field.manager');
   const { tableManager } = require('../dist/game/table.manager');
   const { getTier, TABLE_TIER_LIST } = require('../dist/config/product');
+  const { decideAction, botFactory } = require('../dist/game/bot.engine');
   const { formatUnits } = require('../dist/config/units');
   const { TURN_TIMER, BOT_CONFIG } = require('../dist/config/product');
 
@@ -250,11 +251,62 @@ async function main() {
   titulo('Que el campo reparta el PREMIO');
 
   // A aqui es donde se pierde. El campo tiene que llegar a un ganador y pagarle.
-  nota('dejando correr el campo hasta que termine o se atasque...');
+  // ------------------------------------------------------------------
+  // JUGAR POR LOS HUMANOS DEL CAMPO
+  //
+  // En un campo no hay bots: todos los asientos son `human`, y `checkTurnTimeout` sale
+  // temprano para los que no lo son. O sea que el campo lo juegan personas de verdad, y si
+  // nadie pulsa, la mano se queda esperando para siempre.
+  //
+  // Aqui se pulsa con la misma IA que usan los bots (`decideAction`) y por la misma ruta que
+  // la interfaz (`applyHumanAction`). No es un doble: es el codigo de produccion de las dos
+  // partes, decidir y aplicar. Lo unico que cambia es quien pulsa.
+  // ------------------------------------------------------------------
+  const perfiles = new Map();
+  const jugarTurnos = async () => {
+    const mesas = await Table.find({ 'field.fieldId': primero.fieldId });
+    for (const mesa of mesas) {
+      const entry = tableManager.engines.get(mesa.tableId);
+      if (!entry) continue;
+
+      const est = entry.engine.getState();
+      if (est.phase !== 'preflop' && est.phase !== 'flop' &&
+          est.phase !== 'turn' && est.phase !== 'river') continue;
+
+      const jugador = est.players[est.currentPlayerIndex];
+      if (!jugador) continue;
+
+      const asiento = mesa.seats.find((s) => s.index === parseInt(jugador.id, 10));
+      if (!asiento) continue;
+
+      if (!perfiles.has(asiento.index)) {
+        perfiles.set(asiento.index, botFactory.create(asiento.index));
+      }
+
+      const toCall = Math.max(0, est.currentBet - (jugador.bet || 0));
+      const conFichas = est.players.filter((p) => p.chips > 0).length;
+
+      const d = decideAction({
+        hand: jugador.cards,
+        community: est.communityCards,
+        potSize: est.pot,
+        toCall,
+        chips: jugador.chips,
+        profile: perfiles.get(asiento.index),
+        position: asiento.index,
+        playersLeft: conFichas,
+      });
+
+      await tableManager.applyHumanAction(mesa, asiento.index, d.action, d.amount);
+    }
+  };
+
+  nota('jugando por los jugadores del campo, con la IA de produccion...');
 
   let termino = false;
-  for (let vuelta = 0; vuelta < 260 && !termino; vuelta++) {
-    await darVueltas(1, 12);
+  for (let vuelta = 0; vuelta < 600 && !termino; vuelta++) {
+    await darVueltas(1, 8);
+    await jugarTurnos().catch(() => {});
     const c = await Field.findOne({ fieldId: primero.fieldId });
     if (c.status === 'finished') termino = true;
     if (vuelta % 40 === 0) {
