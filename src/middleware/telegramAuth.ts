@@ -1,7 +1,27 @@
 import crypto from 'crypto';
+import { logger } from '../utils/logger';
 import { Request, Response, NextFunction } from 'express';
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+// ------------------------------------------------------------------
+// EL TOKEN, LEIDO CUANDO SE USA Y NO AL CARGAR EL MODULO
+//
+// Antes:
+//
+//     const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+//
+// Eso se evaluaba al IMPORTAR este fichero. Y en ES los imports se ejecutan ANTES de
+// cualquier linea del modulo que importa: `bot.ts` hace `import ... from './middleware/
+// telegramAuth'` y despues `dotenv.config()`. O sea que aqui se leia el token ANTES de que
+// dotenv cargase el `.env`, y se quedaba con `''`.
+//
+// En Render no se ve, porque ahi Render inyecta las variables de entorno en el proceso antes
+// de arrancar Node. Pero en local (`.env`) el bypass de desarrollo lo tapa y el modulo
+// valida contra una cadena vacia, que no es el token de nadie. Es exactamente el tipo de
+// fallo que aparece en una maquina y no en otra, y que nadie sabe mirar.
+//
+// Leyendolo en cada llamada desaparece la dependencia del orden de carga: si el token esta,
+// esta.
+const botToken = (): string => process.env.TELEGRAM_BOT_TOKEN || '';
 const MAX_AGE_SECONDS = 60 * 60; // 1 hora
 
 /**
@@ -45,7 +65,7 @@ function validateInitData(initData: string): { valid: boolean; user?: any; error
     .join('\n');
 
   // 3. Derivar secret_key = HMAC_SHA256(key: "WebAppData", msg: bot_token)
-  const secretKey = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
+  const secretKey = crypto.createHmac('sha256', 'WebAppData').update(botToken()).digest();
 
   // 4. Calcular hash esperado
   const computedHash = crypto
@@ -109,6 +129,25 @@ export const requireTelegramAuth = (req: Request, res: Response, next: NextFunct
     //  - sin initData: abrio la URL en un navegador en vez de dentro de Telegram
     //  - firma invalida: la sesion expiro o el bot token no coincide
     const outsideTelegram = !initData;
+
+    // ------------------------------------------------------------------
+    // EL MOTIVO, EN EL LOG. SIEMPRE.
+    //
+    // Hay SEIS motivos distintos de rechazo (`validateInitData` los distingue uno a uno:
+    // 'initData ausente', 'hash ausente', 'initData expirado', 'firma invalida', 'usuario
+    // ausente', 'usuario mal formado') y el cliente los ve TODOS igual: "tu sesion expiro".
+    //
+    // Eso convierte un fallo de un segundo en una adivinanza de media hora. Se diagnostico
+    // entero un despliegue por un 401 cuyo motivo real era 'initData expirado', mientras
+    // se sospechaba del token del bot. El token era correcto.
+    //
+    // El motivo se devuelve en la respuesta (`detail`) y ademas se deja escrito en el log,
+    // que es donde se mira cuando algo falla en produccion y no hay cliente delante.
+    // ------------------------------------------------------------------
+    logger.warn(
+      `Sesion rechazada (${outsideTelegram ? 'fuera de Telegram' : 'dentro de Telegram'}): ` +
+      `${result.error}. initData: ${initData ? `si, ${initData.length} caracteres` : 'vacio'}.`,
+    );
 
     res.status(401).json({
       error: outsideTelegram
