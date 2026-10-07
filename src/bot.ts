@@ -22,6 +22,7 @@ import { fieldManager } from './game/field.manager';
 import { SUIT_SYMBOL } from './game/card.utils';
 import { seatingService } from './game/seating.service';
 import { logger } from './utils/logger';
+import { formatUnits } from './config/units';
 
 // ------------------------------------------------------------------
 // QUE HACE ESTA LINEA, Y POR QUE IMPORTA MAS DE LO QUE PARECE
@@ -365,8 +366,8 @@ bot.onText(/\/play/, async (msg) => {
       chatId,
       '❌ Necesitas al menos 200 CUP para jugar.\n\n' +
       'Tu saldo:\n' +
-      `• Real (retirable): ${dbUser.balance.real} CUP\n` +
-      `• Promoción: ${dbUser.balance.play} CUP\n\n` +
+      `• Real (retirable): ${formatUnits(dbUser.balance.real)} USDT\n` +
+      `• Promoción: ${formatUnits(dbUser.balance.play)} USDT\n\n` +
       'Deposita con /deposit o entra a un freeroll gratis con /freeroll.',
     );
     return;
@@ -382,9 +383,9 @@ bot.onText(/\/play/, async (msg) => {
   bot.sendMessage(
     chatId,
     `🎮 *Mesas de Poker*\n\n` +
-      `Saldo total: ${total} CUP\n` +
-      `• Real: ${dbUser.balance.real} CUP\n` +
-      `• Promoción: ${dbUser.balance.play} CUP\n\n` +
+      `Saldo total: ${formatUnits(total)} USDT\n` +
+      `• Real: ${formatUnits(dbUser.balance.real)} USDT\n` +
+      `• Promoción: ${formatUnits(dbUser.balance.play)} USDT\n\n` +
       'Mesas de 50 a 500 jugadores con premio garantizado.',
     {
       parse_mode: 'Markdown',
@@ -591,9 +592,9 @@ bot.onText(/\/balance/, async (msg) => {
   const balanceMessage = `
 💰 *Tu Balance*
 
-• *Real (retirable):* ${dbUser.balance.real} CUP
-• *Promoción (solo jugar):* ${dbUser.balance.play} CUP
-• *Total:* ${dbUser.balance.real + dbUser.balance.play} CUP
+• *Real (retirable):* ${formatUnits(dbUser.balance.real)} USDT
+• *Promoción (solo jugar):* ${formatUnits(dbUser.balance.play)} USDT
+• *Total:* ${formatUnits(dbUser.balance.real + dbUser.balance.play)} USDT
 
 👑 *VIP:* ${vipLevel ? VIP_CONFIG[vipLevel].name : 'No VIP'}
 🔥 *Racha:* ${streak.current} días
