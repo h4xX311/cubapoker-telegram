@@ -45,8 +45,44 @@ app.use('/health', healthRouter);
 // Telegram pueda llamar.
 const USE_WEBHOOK = process.env.NODE_ENV === 'production';
 
-const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN!, {
-  polling: !USE_WEBHOOK,
+// ------------------------------------------------------------------
+// EL TOKEN, Y POR QUE EN DESARROLLO PUEDE FALTAR
+//
+// `new TelegramBot()` lanza `EFATAL` si no hay token, y el proceso se muere. Sin proceso no
+// hay API, ni mesas, ni bots, ni interfaz: el unico sintoma es que la web "no hace nada",
+// sin decir por que. Y es un fallo solido al desarrollo: en produccion el token siempre
+// esta.
+//
+// En desarrollo se puede arrancar SIN token, con el bot mudo: mismo objeto, sin polling y sin
+// webhook. Todo lo demas (API, gestor de mesas, bots de poker, pagos) funciona igual, asi que
+// se desarrolla y se prueba el juego entero sin tener un bot.
+//
+// En produccion sigue siendo obligatorio, y si falta se para. Un bot sin token no puede
+// hablar con Telegram, y fingir que arranca solo produce un fallo mas tarde y mas dificil de
+// ver.
+// ------------------------------------------------------------------
+const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim();
+const SIN_TOKEN = !TELEGRAM_TOKEN;
+
+if (SIN_TOKEN) {
+  if (USE_WEBHOOK) {
+    // Produccion sin token: no hay nada que arreglar aqui, se para y se dice por que.
+    logger.error(
+      'Falta TELEGRAM_BOT_TOKEN y NODE_ENV es production. ' +
+        'Sin token el bot no puede hablar con Telegram. No se arranca.',
+    );
+    process.exit(1);
+  }
+
+  logger.warn(
+    'SIN TELEGRAM_BOT_TOKEN: el juego, la API y los bots funcionan, pero el bot no ' +
+      'habla con Telegram (nada de comandos, nada de teclado de respuesta). ' +
+      'Para probar eso hace falta un token de @BotFather en el .env.',
+  );
+}
+
+const bot = new TelegramBot(TELEGRAM_TOKEN || '0:dry-run-sin-token', {
+  polling: !USE_WEBHOOK && !SIN_TOKEN,
 });
 
 /**
