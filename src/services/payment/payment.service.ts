@@ -7,7 +7,7 @@ import {
   fakeTxHash,
   type PaymentProvider,
 } from './gateway';
-import { formatUnits, unitsToUsdt } from '../../config/units';
+import { formatUnits, unitsToUsdt, usdtToUnits, UNITS_PER_USDT } from '../../config/units';
 import { logger } from '../../utils/logger';
 import { checkWithdrawal } from './withdrawal.rules';
 import { calculateCommission } from '../../config/monetization';
@@ -129,12 +129,43 @@ export class PaymentService {
       throw new MoneyError('La orden expiro. Genera una nueva.');
     }
 
-    const commission = calculateCommission(
-      order.amount,
-      'deposit',
-      order.provider,
-    );
-    const credited = order.amount - commission;
+    // ------------------------------------------------------------------
+    // LA CONVERSION, UNA SOLA VEZ Y EN UN SOLO SITIO
+    //
+    // `order.amount` es lo que el jugador pidio, en USDT (5 significa 5 USDT, porque es lo
+    // que vino del cuerpo de la peticion y lo que el panel de retiros muestra).
+    //
+    // `balance.real` esta en UNIDADES INTERNAS, donde 1 USDT = 1000. Antes el_importe en
+    // USDT se sumaba tal cual a un saldo en unidades: un deposito de 5 USDT anadia 5
+    // unidades, o sea 0,005 USDT. Mil veces menos de lo debido.
+    //
+    // Y la comision se calculaba sobre el importe en USDT con topes en unidades, lo que la
+    // llegaba a superar al propio deposito y dejaba el saldo en negativo (medido: -5).
+    //
+    // Aqui se convierte UNA vez, y todo lo de abajo (comision, acreditado, `$inc`, libro de
+    // movimientos) trabaja en la misma unidad. Convertir en la frontera y no en cada
+    // operacion es lo que evita que vuelvan a mezclarse: no hay dos sitios donde decidir.
+    // ------------------------------------------------------------------
+    const orderUnits = usdtToUnits(order.amount);
+
+    if (orderUnits <= 0) {
+      throw new MoneyError('El importe del deposito no es valido.');
+    }
+
+    const commission = calculateCommission(orderUnits, 'deposit', order.provider);
+
+    // Nunca mas que el deposito: si la comision igualara o superara el importe, el
+    // acreditado seria <= 0 y el jugador perderia dinero por depositar. Con los topes en
+    // unidades ya no ocurre, pero la garantia se escribe: el dinero del jugador no puede
+    // bajar por depositar.
+    const credited = orderUnits - commission;
+
+    if (credited <= 0) {
+      throw new MoneyError(
+        'El deposito es demasiado pequeno: la comision se comería todo. Minimo ' +
+          `${formatUnits(orderUnits)} USDT.`,
+      );
+    }
 
     await User.findOneAndUpdate(
       { telegramId: order.telegramId },
@@ -142,6 +173,9 @@ export class PaymentService {
     );
 
     order.status = 'paid';
+    // `creditedAmount` y `commission` van en UNIDADES, no en USDT como `amount`. Es el
+    // unico campo de la orden que no comparte unidad con `amount`, y por eso queda dicho
+    // aqui: leerlo como USDT es el error que se acaba de corregir, en otra forma.
     order.creditedAmount = credited;
     order.commission = commission;
     order.txHash = txHash ?? fakeTxHash(order.chain || 'TRC20');
@@ -151,13 +185,23 @@ export class PaymentService {
       telegramId: order.telegramId,
       type: 'deposit',
       paymentMethod: order.provider,
+      // En unidades, como el saldo al que se suma. El libro de movimientos tiene que
+      // sumar con la misma aritmetica que el saldo.
       amount: credited,
       currency: order.currency,
       status: 'completed',
       commission,
-      commissionRate: commission / order.amount,
+      commissionRate: orderUnits > 0 ? commission / orderUnits : 0,
       externalId: order.orderId,
-      metadata: { simulated: order.simulated, chain: order.chain, txHash: order.txHash },
+      metadata: {
+        simulated: order.simulated,
+        chain: order.chain,
+        txHash: order.txHash,
+        // Lo pedido por el jugador, en USDT, junto alcredited en unidades. Los dos, para
+        // que el panel pueda mostrar ambos sin tener que adivinar la escala.
+        requestedUsdt: order.amount,
+        creditedUnits: credited,
+      },
     });
 
     return { credited, commission, alreadyCredited: false };
@@ -188,6 +232,38 @@ export class PaymentService {
       throw new MoneyError('Usuario no encontrado.', 404);
     }
 
+    // ------------------------------------------------------------------
+    // LA MISMA CONVERSION, Y AQUI EL ERROR ERA MUCHO PEOR
+    //
+    // `amount` es lo que el jugador pidio, en USDT. El saldo esta en unidades internas.
+    // Antes se comparaban sin convertir:
+    //
+    //     if (user.balance.real < amount)   // 5000 unidades contra 100 USDT
+    //
+    // Con 5 USDT (5000 unidades) se podia pedir 100 USDT, porque `5000 < 100` es falso: la
+    // comprobacion pasaba. Y luego se descontaban 100 unidades, dejando 4900 (= 4,9 USDT)
+    // tras haber pedido 100 USDT. O sea, **se podia retirar mil veces el saldo propio** y
+    // vaciar la plataforma.
+    //
+    // Y el mismo `amount` se comparaba contra dos escalas en el mismo bloque:
+    //
+    //     if (amount < 10)         'El minimo de retiro es 10 USDT'
+    //     else if (amount < 1000)  'El minimo por este metodo es 1000 CUP'
+    //
+    // Un numero, dos unidades, dos mensajes. El minimo de CUP salia 1000 veces mas alto que
+    // el de USDT, porque 1000 CUP no son 1000 USDT.
+    //
+    // Los minimos por via NO se comprueban aqui a proposito: los comprueba
+    // `checkWithdrawal`, que ya los tiene en unidades (`LIMITS.minUsdt`,
+    // `LIMITS.minCupUnits`) y que es la unica funcion del proyecto con contrato de unidades
+    // escrito. Este codigo los duplicaba, en otra escala, con otros mensajes.
+    // ------------------------------------------------------------------
+    const amountUnits = usdtToUnits(amount);
+
+    if (amountUnits <= 0) {
+      throw new MoneyError('El monto debe ser mayor que cero.');
+    }
+
     if (provider === 'usdt') {
       if (!isValidChain(chain)) {
         throw new MoneyError('Red no soportada.');
@@ -198,20 +274,19 @@ export class PaymentService {
           `Direccion invalida para ${CHAINS[chainId].name}. ${CHAINS[chainId].addressExample}`,
         );
       }
-      if (amount < 10) {
-        throw new MoneyError('El minimo de retiro es 10 USDT.');
-      }
-    } else if (amount < 1000) {
-      throw new MoneyError('El minimo de retiro por este metodo es 1000 CUP.');
     }
 
     // REGLA CRITICA: el saldo de promocion (`play`) NO es retirable.
     // Un retiro solo puede consumir `balance.real`. Si se permitiera usar `play`,
     // el usuario vaciaria la plataforma sin haber depositado nunca.
-    if (user.balance.real < amount) {
+    //
+    // Los dos lados en la MISMA unidad. Y se comprueba antes de nada, para que un retiro
+    // imposible no llegue ni a tocar el saldo.
+    if (user.balance.real < amountUnits) {
       throw new MoneyError(
-        `Solo puedes retirar saldo real. Tienes ${user.balance.real} CUP retirables ` +
-        `(tu saldo de promocion de ${user.balance.play} CUP no es retirable).`,
+        `Solo puedes retirar saldo real. Tienes ${formatUnits(user.balance.real)} USDT ` +
+        `retirables (tu saldo de promocion de ${formatUnits(user.balance.play)} USDT no ` +
+        'es retirable).',
       );
     }
 
@@ -224,6 +299,25 @@ export class PaymentService {
     monthStart.setDate(1);
     monthStart.setHours(0, 0, 0, 0);
 
+    // ------------------------------------------------------------------
+    // ESTOS DOS AGREGADOS TAMBIEN NECESITAN LA CONVERSION
+    //
+    // `order.amount` esta en USDT (es lo que el jugador pidio, y lo que ve el panel). Se
+    // suman y se comparan contra `user.balance` y contra los topes, que estan en unidades.
+    //
+    // Antes se comparaban sin convertir, que es el mismo error del exploit: los topes de
+    // transaccion y el tope mensual (que estan en unidades y son de 10.000 y 25.000.000)
+    // se comparaban contra sumas en USDT, o sea mil veces mas pequenas de lo que el
+    // jugador realmente tiene. El tope mensual no limitaba nada.
+    //
+    // Se convierte en la propia consulta con `$floor`, que es lo mismo que hace
+    // `usdtToUnits`: truncar, no redondear. Redondear aqui y truncar alla haria que las
+    // cifras no cuadraran ni entre si.
+    // ------------------------------------------------------------------
+    const EN_UNIDADES = [
+      { $group: { _id: null, total: { $sum: { $floor: { $multiply: ['$amount', UNITS_PER_USDT] } } } } },
+    ];
+
     const [pending, paidThisMonthAgg] = await Promise.all([
       PaymentOrder.aggregate([
         {
@@ -233,7 +327,7 @@ export class PaymentService {
             status: 'pending',
           },
         },
-        { $group: { _id: null, total: { $sum: '$amount' } } },
+        ...EN_UNIDADES,
       ]),
       PaymentOrder.aggregate([
         {
@@ -244,7 +338,7 @@ export class PaymentService {
             createdAt: { $gte: monthStart },
           },
         },
-        { $group: { _id: null, total: { $sum: '$amount' } } },
+        ...EN_UNIDADES,
       ]),
     ]);
 
@@ -258,24 +352,24 @@ export class PaymentService {
     // El saldo de lo ya retirado este mes se calcula con el aggregate de abajo:
     // es lo que hace que el tope mensual no sea solo decorativo.
     //
-    // Los limites por via (minimo USDT vs minimo CUP) ya se comprueban arriba con
-    // mensajes propios, asi que se llama con `skipMinimum: true` para no
-    // duplicar esa comprobacion.
+    // Los limites por via (minimo USDT vs minimo CUP) los comprueba esta misma funcion, que
+    // los tiene en unidades y con los mensajes correctos. Antes se comprobaban aqui otra
+    // vez, en USDT, y con un minimo de CUP mil veces mayor del que debia; ahora solo se
+    // comprueban en un sitio.
     const check = checkWithdrawal(
-      amount,
+      amountUnits,
       user.balance,
       pendingTotal,
       provider === 'usdt' ? 'usdt' : 'cup',
       paidThisMonth,
-      { skipMinimum: true },
     );
 
     if (!check.ok) {
       throw new MoneyError(check.message!, 400);
     }
 
-    const commission = calculateCommission(amount, 'withdrawal', provider);
-    const net = amount - commission;
+    const commission = calculateCommission(amountUnits, 'withdrawal', provider);
+    const net = amountUnits - commission;
 
     const gateway = gateways[provider];
     const order = await gateway.createOrder({
@@ -290,12 +384,18 @@ export class PaymentService {
       provider,
       telegramId,
       type: 'withdrawal',
+      // `amount` es lo que el jugador PIDIO, en USDT. Se deja en USDT a proposito: es lo
+      // que ve el panel del operador y lo que el jugador reconoce como su operacion.
       amount,
       currency: provider === 'usdt' ? 'USDT' : 'CUP',
       chain: order.chain,
       status: 'pending',
       simulated: SIMULATION_ENABLED,
       walletAddress,
+      // En UNIDADES, como el saldo. Antes se guardaba el neto en el campo `amount`, que es
+      // USDT, asi que una sola orden mezclaba las dos escalas y la aprobacion posterior
+      // descontaba un numero en unidades de un campo que se leia como USDT.
+      creditedAmount: net,
       commission,
       instructions: order.instructions,
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
@@ -305,12 +405,21 @@ export class PaymentService {
       telegramId,
       type: 'withdrawal',
       paymentMethod: provider,
+      // El neto que SALE del saldo, en unidades, como `balance.real`.
       amount: net,
       currency: provider === 'usdt' ? 'USDT' : 'CUP',
       status: 'pending',
       commission,
       externalId: saved.orderId,
-      metadata: { walletAddress, chain: order.chain, simulated: order.simulated },
+      metadata: {
+        walletAddress,
+        chain: order.chain,
+        simulated: order.simulated,
+        // Lo pedido, en USDT, junto al neto en unidades. Los dos, para no tener que
+        // adivinar la escala al leer el movimiento.
+        requestedUsdt: amount,
+        netUnits: net,
+      },
     });
 
     return {
@@ -411,15 +520,42 @@ export class PaymentService {
       );
     }
 
+    // ------------------------------------------------------------------
+    // LO QUE SE DESCUENTA
+    //
+    // Se descuenta `creditedAmount` (el neto, en UNIDADES), no `amount` (lo pedido, en
+    // USDT).
+    //
+    // Antes se descontaba `order.amount`, que es USDT, de un saldo en unidades: liquidar un
+    // retiro de 100 USDT cobraba 100 unidades, o sea 0,1 USDT. Y el filtro `>=` comparaba
+    // 5000 unidades contra 100, que pasaba siempre. Con la orden creada ahora, `amount` en
+    // USDT, el descuento habria sido mil veces menor de lo debido.
+    //
+    // Se usa `creditedAmount`, que es el neto en unidades, con un respaldo a `amount`
+    // convertido para las ordenes antiguas creadas antes de esta correccion. Sin el
+    // respaldo, liquidar una orden vieja descontaria `undefined` y dejaria el saldo entero.
+    // ------------------------------------------------------------------
+    const debitUnits = Number.isFinite(order.creditedAmount) && order.creditedAmount > 0
+      ? order.creditedAmount
+      : usdtToUnits(order.amount);
+
+    if (!Number.isFinite(debitUnits) || debitUnits <= 0) {
+      throw new MoneyError(
+        'El retiro no se puede liquidar: el importe de la orden no es valido. ' +
+          'Revisala a mano antes de aprobarla.',
+        409,
+      );
+    }
+
     // El filtro es la proteccion: `balance.real >= importe`. Ademas evita el
     // doble cobro, porque el estado de la orden tambien se exige `pending` y solo
     // una de las dos aprobaciones concurrentes lo cumple.
     const debited = await User.findOneAndUpdate(
       {
         telegramId: order.telegramId,
-        'balance.real': { $gte: order.amount },
+        'balance.real': { $gte: debitUnits },
       },
-      { $inc: { 'balance.real': -order.amount } },
+      { $inc: { 'balance.real': -debitUnits } },
       { new: false },
     );
 
@@ -429,7 +565,7 @@ export class PaymentService {
 
       throw new MoneyError(
         'El retiro no se puede liquidar: el usuario ya no tiene saldo retirable ' +
-        `suficiente (necesita ${formatUnits(order.amount)} USDT, ` +
+        `suficiente (necesita ${formatUnits(debitUnits)} USDT, ` +
         `tiene ${formatUnits(available)}). ` +
         'Si el pago ya salio de la plataforma, esto es un incidente: anotalo y ' +
         'liquida el saldo a mano. Si no se ha pagado todavia, cancela el retiro, ' +

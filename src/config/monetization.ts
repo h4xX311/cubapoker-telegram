@@ -17,20 +17,38 @@ export const monetizationConfig = {
   },
 
   // === COMISIONES ===
+  //
+  // UNIDADES, Y AQUI ESTA LA TRAMPA
+  //
+  // Los porcentajes son unitless, pero `min` y `max` estan en UNIDADES INTERNAS, no en CUP
+  // ni en USDT. La convencion del proyecto es que todo importe que toca un saldo va en
+  // unidades internas (1 USDT = 1000 unidades, ver `config/units.ts`), que es la misma que
+  // documenta `withdrawal.rules.ts`.
+  //
+  //   min 10 unidades  = 0,01 USDT  <- minimo razonable
+  //   min 10 CUP       = 0,083 USDT <- un 8 % de comision: absurdo
+  //   min 10 USDT      = imposible  <- mas que un deposito pequeno
+  //
+  // El comentario de antes decia "CUP" y no lo era. Con esa etiqueta, un deposito de 5 USDT
+  // daba: comision = floor(5 * 0,5 / 100) = 0, el minimo la subia a 10, y el acreditado era
+  // 5 - 10 = **-5**: saldo negativo. Medido.
+  //
+  // Si alguna vez se cambian estas cifras, que sea en la MISMA unidad y con un comentario que
+  // lo diga. Es exactamente lo que faltó aquí.
   commissions: {
     deposit: {
-      enzona: 1.5,           // 1.5%
-      qvapay: 1.5,           // 1.5%
-      usdt: 0.5,             // 0.5%
-      min: 10,               // Mínimo 10 CUP
-      max: 500,              // Máximo 500 CUP
+      enzona: 1.5, // 1.5%
+      qvapay: 1.5, // 1.5%
+      usdt: 0.5, // 0.5%
+      min: 10, // 10 unidades = 0,01 USDT
+      max: 500, // 500 unidades = 0,5 USDT
     },
     withdrawal: {
-      enzona: 3,             // 3%
-      qvapay: 3,             // 3%
-      usdt: 1,               // 1%
-      min: 20,               // Mínimo 20 CUP
-      max: 1000,             // Máximo 1000 CUP
+      enzona: 3, // 3%
+      qvapay: 3, // 3%
+      usdt: 1, // 1%
+      min: 20, // 20 unidades = 0,02 USDT
+      max: 1000, // 1000 unidades = 1 USDT
     },
   },
 
@@ -187,16 +205,52 @@ export const calculateRake = (pot: number, vipLevel?: 'basic' | 'premium' | 'eli
   return Math.min(rake, maxRake);
 };
 
-// Función para calcular comisión
+/**
+ * Comisión de un movimiento, EN UNIDADES INTERNAS.
+ *
+ * ------------------------------------------------------------------
+ * EN QUE UNIDAD TRABAJA
+ *
+ * Recibe y devuelve **unidades internas** (1 USDT = 1000). Es la unidad del saldo, de las
+ * fichas y de los topes de `monetizationConfig.commissions`, y la misma que documenta
+ * `withdrawal.rules.ts`.
+ *
+ * Antes la tomaba en USDT (lo que llegaba del-body) y la devolvia en USDT, mientras sus
+ * topes `min`/`max` estaban en unidades. Dos escalas en una linea:
+ *
+ *     const commission = Math.floor((amount * rate) / 100);  // amount en USDT
+ *     return Math.max(config.min, Math.min(commission, config.max));
+ *                                          // ^^^ min/max en unidades (1000x mas grandes)
+ *
+ * Con un deposito de 5 USDT: comision = 0, el minimo la subia a 10, y el acreditado era
+ * 5 - 10 = **-5**. Saldo negativo. Medido.
+ *
+ * ------------------------------------------------------------------
+ * POR QUE EN UNIDADES Y NO EN USDT
+ *
+ * Porque el resultado se resta de un importe que va a tocar el saldo, y el saldo esta en
+ * unidades. Convertir dentro de la funcion obligaria a que todos los llamantes acordaran la
+ * conversion, y con cuatro llamantes es exactamente donde se colaba el error. Convertir una
+ * sola vez, en la frontera del servicio, deja esta funcion sin sorpresas.
+ *
+ * Si algun dia hace falta llamado en USDT, se anade `calculateCommissionUsdt()` que
+ * delegue en esta. No se cambia el contrato de golpe.
+ */
 export const calculateCommission = (
   amount: number,
   type: 'deposit' | 'withdrawal',
-  method: 'enzona' | 'qvapay' | 'usdt'
+  method: 'enzona' | 'qvapay' | 'usdt',
 ): number => {
   const config = monetizationConfig.commissions[type];
+
+  // Un importe no finito o negativo no produce una comision: se trataria de restar NaN o un
+  // numero negativo a un saldo, que es la forma mas rapida de corromper el dinero de
+  // alguien. Se devuelve 0 y el error real lo detecta el llamante que valida el importe.
+  if (!Number.isFinite(amount) || amount <= 0) return 0;
+
   const rate = config[method] || 0;
   const commission = Math.floor((amount * rate) / 100);
-  
+
   return Math.max(config.min, Math.min(commission, config.max));
 };
 
