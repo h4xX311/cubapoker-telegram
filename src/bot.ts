@@ -22,6 +22,20 @@ import { SUIT_SYMBOL } from './game/card.utils';
 import { seatingService } from './game/seating.service';
 import { logger } from './utils/logger';
 
+// ------------------------------------------------------------------
+// QUE HACE ESTA LINEA, Y POR QUE IMPORTA MAS DE LO QUE PARECE
+//
+// Arrancar el proceso lleva casi medio minuto, y hasta hace nada no decia NI UNA PALABRA
+// durante todo ese rato. Es lo que hace que un arranque correcto parezca un proceso
+// muerto: se abre la terminal, no aparece nada, y la conclusion razonable es que esta
+// roto. Y la conclusion razonable es la que hace que se cierre la terminal.
+//
+// Ahora lo primero que se ve es esto, al instante, y dice cuanto se espera despues.asi se
+// puede distinguir "todavia esta arrancando" de "se quedo colgado", que son dos fallos
+// opuestos y no se parecen en nada.
+// ------------------------------------------------------------------
+console.log('[cubapoker] arrancando... cargando modulos (esto tarda hasta 30s en WSL).');
+
 dotenv.config();
 
 const app = express();
@@ -675,7 +689,12 @@ const start = async () => {
     logger.info(
       `Pagos: ${SIMULATION_ENABLED ? 'SIMULACION (sin dinero real)' : 'PRODUCCION'}`,
     );
-    logger.info(`Bot: ${USE_WEBHOOK ? 'webhook' : 'polling (local)'}`);
+    // El modo del bot se lee de lo que REALMENTE se ha configurado. Antes ponia
+    // `polling (local)` siempre que no fuera produccion, incluso sin token, y decia
+    // una cosa que no era la que estaba pasando.
+    logger.info(
+      `Bot: ${SIN_TOKEN ? 'MUDO (sin token: el juego va, el bot no habla con Telegram)' : USE_WEBHOOK ? 'webhook' : 'polling (local)'}`,
+    );
   });
 
   // Limpieza de ordenes simuladas caducadas
