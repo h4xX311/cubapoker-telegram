@@ -356,8 +356,55 @@ export class SeatingService {
   }
 
   private async findSeatAnywhere(telegramId: number, exceptTableId?: string) {
+    // ------------------------------------------------------------------
+    // ESTA CONSULTA NO FILTRABA POR ESTADO DE ASIENTO
+    //
+    // Buscaba cualquier mesa con un asiento humano a tu nombre, y daba igual como estuviera
+    // ese asiento. O sea que una plaza YA LIBERDADA contaba como "sigues sentado".
+    //
+    // Eso rompia tres cosas a la vez, todas con el mismo mensaje:
+    //
+    //   - `stand` devolvia las fichas correctamente, pero acto seguido `sit` respondia
+    //     "Ya estas sentado en otra mesa". El jugador se levanta y no puede volver a
+    //     sentarse: no hay forma de jugar dos manos seguidas.
+    //   - Plazas viejas en mesas antiguas (freerolls, campos de semanas atras) te
+    //     bloqueaban el acceso a CUALQUIER mesa nueva para siempre. Por eso el recorrido
+    //     acababa en freeroll-1, freeroll-3 y freeroll-200 en vez de en una mesa de poker.
+    //   - `GET /game/my-table` SI filtraba por estado, y por eso decia que no estabas
+    //     sentado mientras este decia que si. Dos respostas contradictorias para la misma
+    //     pregunta, con dos criterios distintos.
+    //
+    // El criterio correcto es el mismo en los tres sitios: un asiento te ocupa mientras no
+    // este libre ni liquidado.
+    //
+    //   'empty'      plaza libre, no ocupas nada
+    //   'out'        liquidado, ya no juegas ahi
+    //   'active'     jugando: te ocupa
+    //   'eliminated' eliminado en un campo: te ocupa, porque el campo todavia te debe una
+    //                posicion y las fichas estan en el bote
+    //
+    // Que el asiento contenga tu `playerId` no dice si te corresponde: dice que te
+    // estuvo correspondiendo en algun momento.
+    //
+    // Los estados son los de `SeatStatus` (`src/models/Table.ts`): `active`, `folded`,
+    // `all_in`, `sitting_out`, `eliminated` y `out`. Ojo al `sitting_out`, con guion bajo.
+    // Todos menos `out` te ocupan:
+    //
+    //   active / folded / all_in / sitting_out  estas jugando ahi
+    //   eliminated                              estas eliminado, pero el campo te debe una
+    //                                            posicion y tus fichas estan en el bote
+    //   out                                     ya no ocupas nada
+    // ------------------------------------------------------------------
+    const OCUPADO = ['active', 'folded', 'all_in', 'sitting_out', 'eliminated'];
+
     const query: any = {
-      seats: { $elemMatch: { kind: 'human', playerId: String(telegramId) } },
+      seats: {
+        $elemMatch: {
+          kind: 'human',
+          playerId: String(telegramId),
+          status: { $in: OCUPADO },
+        },
+      },
     };
     if (exceptTableId) query.tableId = { $ne: exceptTableId };
     const table = await Table.findOne(query);

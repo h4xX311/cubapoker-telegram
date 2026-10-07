@@ -51,6 +51,62 @@ import { logger } from '../utils/logger';
 const router = Router();
 
 /**
+ * Que exista el documento del jugador.
+ *
+ * ------------------------------------------------------------------
+ * POR QUE ESTA FUNCION EXISTE
+ *
+ * `GET /api/me` se llama al abrir la aplicacion, y es la primera peticion que hace un
+ * jugador NUEVO: no tiene documento de usuario. Antes, ese primer `/api/me` devolvia una
+ * sesion sintetica con saldos a cero y ya. Lo siguiente era el deposito, y ahi ya reventaba:
+ * `paymentService.createDepositOrder` busca el usuario y, si no esta, responde
+ * "Usuario no encontrado".
+ *
+ * O sea: **un jugador que nunca habia entrado no podia depositar.** Nunca pudo jugar.
+ *
+ * Y no hacia falta ser nuevo en el sentido de "sin cuenta en otro lado": bastaba con haber
+ * borrado el documento, o con entrar por primera vez desde una base recien creada. Es
+ * exactamente el camino del primer usuario, que es el que mas se parece a la prueba de
+ * fuego y el que nunca se habia recorrido entero.
+ *
+ * Se crea aqui y no en el deposito porque `/api/me` se llama SIEMPRE al arrancar: es la
+ * peticion masTemprana y la mas universal. Si el usuario existe antes que nada, todo lo
+ * demas (depositar, sentarse, registrarse en un campo) tiene a quien preguntarle.
+ *
+ * `upsert` con `setOnInsert`: si el usuario ya existe no se toca nada, y en particular NO
+ * se tocan los saldos. Escribir el saldo aqui seria la forma facil de inventar dinero.
+ *
+ * Y el `playerId` se guarda como numero, no como cadena, para que el mismo jugador no
+ * acabe con dos documentos: uno creado aqui y otro creado por el bot, que si usa numero.
+ */
+async function asegurarUsuario(
+  telegramId: number,
+  datos?: { first_name?: string; username?: string },
+): Promise<void> {
+  await User.updateOne(
+    { telegramId },
+    {
+      $setOnInsert: {
+        telegramId,
+        firstName: datos?.first_name ?? 'Jugador',
+        username: datos?.username,
+        balance: { real: 0, play: 0 },
+        stats: {
+          handsPlayed: 0,
+          handsWon: 0,
+          tablesJoined: 0,
+          freerollsPlayed: 0,
+          totalRakePaid: 0,
+          totalFreerollWon: 0,
+        },
+        activeTableId: null,
+      },
+    },
+    { upsert: true },
+  );
+}
+
+/**
  * Quien soy, con el saldo listo para pintar.
  *
  * Las unidades de la base son internas (1 USDT = 1000 unidades), asi que lo que se
@@ -62,6 +118,14 @@ const router = Router();
 router.get('/me', requireTelegramAuth, async (req: Request, res: Response) => {
   try {
     const telegramId = getAuthedTelegramId(req);
+
+    // Se asegura de que el jugador existe ANTES de responder. Antes se devolvia una sesion
+    // sintetica con ceros y ya, y el deposito de ese mismo jugador fallaba despues con
+    // "Usuario no encontrado": un jugador nuevo no podia entrar nunca.
+    const delTelegram = (req as any).telegramUser as
+      | { first_name?: string; username?: string }
+      | undefined;
+    await asegurarUsuario(telegramId, delTelegram);
 
     const user = await User.findOne({ telegramId });
 

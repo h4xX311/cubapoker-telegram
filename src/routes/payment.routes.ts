@@ -180,23 +180,106 @@ router.get('/simulate/:orderId', (req: Request, res: Response) => {
   });
 });
 
-router.post('/simulate/:orderId/confirm', (req: Request, res: Response) => {
-  if (!SIMULATION_ENABLED) {
-    res.status(404).json({ error: 'Simulacion deshabilitada' });
-    return;
-  }
+/**
+ * Confirmar un deposito simulado.
+ *
+ * ------------------------------------------------------------------
+ * ESTA RUTA NO ACREDITABA NADA. NUNCA.
+ *
+ * `confirmSimulatedOrder` marcaba la orden como pagada en un `Map` EN MEMORIA y se
+ * Terminaba. No llamaba a `paymentService.creditDepositOrder`, que es la unica funcion que
+ * suma el saldo del jugador y anota el movimiento.
+ *
+ * O sea: el deposito decia "correcto", devolvia HTTP 200, y el saldo no se movia. Como el
+ * producto se desarrolla y se prueba en simulacion, **no habia forma de tener fichas
+ * jamas**: el unico camino paraJavascript conseguirlas era este, y este no acreditaba nada.
+ *
+ * El saldo solo podia BAJAR (buy-ins de mesa), nunca subir. Por eso se agotaba y no habia
+ * forma de reponerlo.
+ *
+ * La via real (`POST /deposit/confirm`) si acreditaba, porque ahi si se llamaba a
+ * `creditDepositOrder`. El fallo no era del motor de dinero: era que la rama de simulacion
+ * se habia quedado sin conectar al mismo motor.
+ *
+ * ------------------------------------------------------------------
+ * LO QUE SE HACE AHORA
+ *
+ * Confirmar en el `Map` y, DESPUES, acreditar por la misma via que la pasarela real, para
+ * que no haya dos caminos de credito distintos. Asi el libro de movimientos se escribe
+ * igual en simulacion que en produccion, y las comprobaciones de conservation de fichas
+ * siguen valiendo.
+ *
+ * `creditDepositOrder` es idempotente: si la orden ya estaba pagada devuelve
+ * `alreadyCredited` y no vuelve a sumar. Por eso confirmar dos veces no inventa dinero.
+ *
+ * ------------------------------------------------------------------
+ * Y AUTENTICACION, QUE NO TENIA
+ *
+ * La ruta no llevaba `requireTelegramAuth` ni comprobaba de quien era la orden: cualquiera
+ * que conociera un `orderId` podia confirmar el deposito de otro. Se comprueba ahora que la
+ * orden pertenezca a quien la confirma.
+ */
+router.post(
+  '/simulate/:orderId/confirm',
+  requireTelegramAuth,
+  async (req: Request, res: Response) => {
+    try {
+      if (!SIMULATION_ENABLED) {
+        res.status(404).json({ error: 'Simulacion deshabilitada' });
+        return;
+      }
 
-  const result = confirmSimulatedOrder(
-    req.params.orderId,
-    req.body.secret || SIMULATION_SECRET,
-  );
+      const telegramId = getAuthedTelegramId(req);
+      const { orderId } = req.params;
 
-  if (!result.ok) {
-    res.status(400).json({ error: result.error });
-    return;
-  }
+      // La orden tiene que ser de quien confirma. Sin esto, este endpoint permitia
+      // confirmar el deposito de cualquier otro jugador.
+      const orden = await paymentService.getOrder(orderId);
+      if (!orden) {
+        res.status(404).json({ error: 'Orden no encontrada.' });
+        return;
+      }
+      if (orden.telegramId !== telegramId) {
+        res.status(403).json({ error: 'Esta orden no te pertenece.' });
+        return;
+      }
 
-  res.json({ success: true, order: result.order });
-});
+      const result = confirmSimulatedOrder(
+        orderId,
+        req.body.secret || SIMULATION_SECRET,
+      );
+
+      if (!result.ok) {
+        res.status(400).json({ error: result.error });
+        return;
+      }
+
+      // ------------------------------------------------------------------
+      // AQUI SE ACREDITA. Lo que faltaba.
+      //
+      // Por la misma funcion que usa la pasarela real, para que no haya dos caminos de
+      // credito distintos. `txHash` simulado: marca que el pago llego, sin inventar una
+      // transaccion real que no existe.
+      // ------------------------------------------------------------------
+      const credited = await paymentService.creditDepositOrder(
+        orderId,
+        `sim-${orderId.slice(0, 8)}`,
+      );
+
+      res.json({
+        success: true,
+        order: result.order,
+        credited: credited.credited,
+        commission: credited.commission,
+        alreadyCredited: credited.alreadyCredited,
+      });
+    } catch (error) {
+      const status = error instanceof MoneyError ? error.status : 500;
+      res.status(status).json({
+        error: error instanceof Error ? error.message : 'Error confirmando el deposito',
+      });
+    }
+  },
+);
 
 export default router;

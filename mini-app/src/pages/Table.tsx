@@ -51,8 +51,31 @@ export function Table({ tableId, onBack, onBalanceChange }: Props) {
         prevPhase.current = next.hand.phase;
       } catch (err) {
         if (cancelled) return;
+
+        // ------------------------------------------------------------------
+        // ANTES, AQUI NO PASABA NADA
+        //
+        // Solo se miraba el 404. Cualquier otro error se tragaba sin decir nada, y como
+        // `view` se queda a null, la pantalla se quedaba en el spinner PARA SIEMPRE: sin
+        // mensaje, sin error, sin pista de si era la API, el servidor o el render.
+        //
+        // Tres fallos muy distintos se veian exactamente igual:
+        //
+        //   - la API devuelve algo que no es JSON (backend caido, 500 del proxy)
+        //   - la sesion expiro (401)
+        //   - cualquier otro error de la peticion
+        //
+        // Ahora todos se dicen. Un error que no se ve no se puede arreglar: se persiguen
+        // las causas equivocadas.
+        // ------------------------------------------------------------------
         if (err instanceof ApiError && err.status === 404) {
           setError('La mesa ya no existe.');
+        } else if (err instanceof ApiError) {
+          console.error('[cubapoker] fallo al cargar la mesa:', err.message, err.code);
+          setError(err.message);
+        } else {
+          console.error('[cubapoker] fallo inesperado al cargar la mesa:', err);
+          setError('No se pudo cargar la mesa. Vuelve a entrar.');
         }
       }
     };
