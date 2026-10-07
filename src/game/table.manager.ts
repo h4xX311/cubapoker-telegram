@@ -598,7 +598,43 @@ export class TableManager {
     // por que mirar; si son los jugadores, no hay con que jugar.
     // ------------------------------------------------------------------
     if (table.hand.phase === 'idle' || table.hand.phase === 'idle-awaiting') {
-      // Solo arranca una mano si hay al menos un humano y 2 jugadores
+      // ------------------------------------------------------------------
+      // UN HUMANO SIN FICHAS NO DEBE QUEDARSE SENTADO
+      //
+      // Un humano con `chips === 0` es un busted: no puede jugar, no puede ganar y no puede
+      // perder. Y como el asiento sigue `active`, la mesa ve 5 jugadores pero `activeHumans`
+      // es 0, asi que la mano NO arranca nunca: el humano no juega (no tiene) y la mesa no
+      // reparte (no hay quien pague). El juego se queda en `idle` para siempre con bots
+      // esperando a un humano que no va a actuar nunca.
+      //
+      // El caso real: un jugador perdio la pila en la mesa de practice y se quedo sentado con
+      // 0 fichas. Veia la mesa con sus bots, sin cartas y sin bote, sin ningun aviso. La
+      // partida no estaba rota: el motor esperaba a que tuviera fichas, y no habia forma de
+      // saberlo.
+      //
+      // Aqui se le saca de la mesa y se le devuelve lo que le corresponda (0), liberando el
+      // asiento. Es lo que haria el jugador al pulsar "salir", pero sin que tenga que
+      // pulsarlo, y sin dejar la mesa bloqueada mientras tanto.
+      // ------------------------------------------------------------------
+      const humansSinFichas = table.seats.filter(
+        s => s.kind === 'human' && s.status === 'active' && s.chips <= 0,
+      );
+
+      for (const seat of humansSinFichas) {
+        logger.warn(
+          `Mesa ${table.tableId}: el humano ${seat.displayName} (asiento ${seat.index}) ` +
+          'se queda sin fichas. Se le saca de la mesa y se le devuelve su saldo (0).',
+        );
+        await this.sitOutBustedHuman(table, seat);
+      }
+
+      const activeHumans2 = table.seats.filter(
+        s => s.kind === 'human' && s.status === 'active' && s.chips > 0,
+      ).length;
+      const activeTotal2 = table.seats.filter(
+        s => s.status === 'active' && s.chips > 0,
+      ).length;
+
       const activeHumans = table.seats.filter(
         s => s.kind === 'human' && s.status === 'active' && s.chips > 0,
       ).length;
@@ -629,6 +665,43 @@ export class TableManager {
     if (table.hand.phase !== 'idle') {
       await this.checkTurnTimeout(table);
     }
+  }
+
+  /**
+   * Saca de la mesa a un humano que se ha quedado sin fichas.
+   *
+   * Un `chips === 0` es un busted en una mesa cash: no puede jugar. Si se deja sentado con
+   * `status: 'active'`, la mesa cuenta un jugador mas pero `activeHumans` es 0, y la mano
+   * no arranca nunca. El jugador ve una mesa parada, sin error, sin aviso.
+   *
+   * Se le devuelve lo que le toque al saldo real (que es 0, porque esta sin fichas) y se
+   * libera el asiento. Es el mismo efecto que el jugador pulsando "salir", pero ocurre solo
+   * y la mesa no se queda bloqueada.
+   */
+  private async sitOutBustedHuman(table: ITable, seat: ISeat): Promise<void> {
+    const telegramId = Number(seat.playerId);
+    // Lo que le corresponde al saldo. Aqui es 0 (esta sin fichas), pero se calcula igual por
+    // si en el futuro un busted conserva algo.
+    const returned = Math.max(0, seat.chips + (seat.bet ?? 0));
+
+    if (Number.isFinite(telegramId) && returned > 0) {
+      // Camino normal de devolucion, el mismo que usa `standUp` en `seating.service`.
+      await User.updateOne(
+        { telegramId },
+        { $inc: { 'balance.real': returned } },
+      );
+      await User.updateOne({ telegramId }, { $set: { activeTableId: null } });
+    } else if (Number.isFinite(telegramId)) {
+      await User.updateOne({ telegramId }, { $set: { activeTableId: null } });
+    }
+
+    // Asiento liberado: `out` no cuenta como jugador en la mesa ni en `activeHumans`.
+    seat.status = 'out';
+    seat.chips = 0;
+    seat.bet = 0;
+    seat.totalBet = 0;
+
+    await table.save();
   }
 
   /** Anade un asiento de bot con buy-in coherente con la mesa. */

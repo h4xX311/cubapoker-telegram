@@ -110,6 +110,13 @@ const bot = new TelegramBot(TELEGRAM_TOKEN || '0:dry-run-sin-token', {
  * insostenible y ademas filtraba las cartas del rival al cliente.
  */
 tableManager.setNotifier(async (notice) => {
+  // Sin token de Telegram el bot es MUDO: no hay a quien mandar el aviso. Se sale aqui, antes
+  // de pedir nada, para que no se llene el log de errores `ETELEGRAM: 401 invalid token` en
+  // CADA turno de CADA mesa (que era lo que pasaba, y llenaba el log de ruido que esconde los
+  // avisos que si importan). El juego funciona igual: el aviso al bot es una comodidad para
+  // que el jugador sepa que le toca, no parte del motor. El motor juega solo por el reloj.
+  if (SIN_TOKEN) return;
+
   const user = await User.findOne({ telegramId: notice.telegramId });
   if (!user) return;
 

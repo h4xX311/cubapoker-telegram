@@ -156,6 +156,21 @@ export function Table({ tableId, onBack, onBalanceChange }: Props) {
   const inHand = view.hand.phase !== 'idle' && view.hand.phase !== 'waiting';
   const urgent = remaining !== null && remaining <= 10;
 
+  // ------------------------------------------------------------------
+  // SIN FICHAS: POR QUE NO PASA NADA, Y QUE HACER
+  //
+  // El caso real: el jugador se queda sin fichas (ha perdido la pila), sigue sentado, y la
+  // mesa no arranca la mano porque solo arranca si hay un humano CON FICHAS. El jugador ve
+  // una mesa con bots, sin cartas, sin bote, y no ocurre nada: ni error, ni aviso, ni boton.
+  // Parecia que el juego estaba roto, y el juego estaba esperando a que tuviera fichas.
+  //
+  // Aqui se dice exactamente eso, con el numero, y se ofrece la unica accion que sirve:
+  // volver a comprar fichas (rebuy). Sin esto el unico sintoma es una mesa quieta, que es
+  // indistinguible de un fallo.
+  // ------------------------------------------------------------------
+  const miAsiento = view.seats.find((s) => s.isYou);
+  const sinFichas = !!miAsiento && miAsiento.chips <= 0;
+
   return (
     <div className="p-4 pb-10 animate-fadeIn">
       <PageHeader title={view.guaranteedPrize > 0 ? `Premio ${view.guaranteedPrize} CUP` : 'Mesa'} onBack={leave} />
@@ -186,6 +201,26 @@ export function Table({ tableId, onBack, onBalanceChange }: Props) {
       {error && (
         <div className="bg-[#ff4757]/15 border border-[#ff4757] rounded-xl p-3 mb-3">
           <p className="text-sm text-[#ff8a94]">{error}</p>
+        </div>
+      )}
+
+      {/* Sin fichas: la mesa esta quieta porque no hay nadie con fichas que juegue. */}
+      {sinFichas && (
+        <div className="bg-[#ffd700]/10 border border-[#ffd700] rounded-xl p-4 mb-3 text-center">
+          <p className="text-sm font-bold text-[#ffd700] mb-1">
+            Te has quedado sin fichas
+          </p>
+          <p className="text-xs text-[#a0a0b0] mb-3 leading-relaxed">
+            Por eso la mesa no reparte cartas: hace falta al menos un jugador con fichas.
+            Sal y vuelve a comprar fichas para seguir jugando.
+          </p>
+          <button
+            onClick={leave}
+            disabled={acting}
+            className="btn btn-primary py-2 px-6 text-sm w-full"
+          >
+            {acting ? 'Saliendo…' : 'Salir y comprar fichas de nuevo'}
+          </button>
         </div>
       )}
 
