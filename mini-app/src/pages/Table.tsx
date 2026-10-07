@@ -18,6 +18,36 @@ interface Props {
 /** Frecuencia de refresco. 1.5s da respuesta sin hammering al servidor. */
 const POLL_MS = 1500;
 
+/**
+ * Que ha hecho cada jugador en la calle actual, en palabras.
+ *
+ * Sin esto, mirar la mesa es mirar un bote que sube sin saber por que: no se distingue si un
+ * rival ha igualado, si ha subido, o si se ha retirado. Es la informacion que convierte una
+ * lista de jugadores en una partida.
+ *
+ * El dato lo manda el servidor en `lastAction` por asiento. Si llega algo que no esta aqui,
+ * se muestra en crudo: mejor una etiqueta rara que no perder la informacion.
+ */
+const LAST_ACTION_LABEL: Record<string, string> = {
+  fold: 'Pass',
+  check: 'Pass',
+  call: 'Iguala',
+  bet: 'Apuesta',
+  raise: 'Sube',
+  all_in: 'All-in',
+  'all-in': 'All-in',
+};
+
+const LAST_ACTION_COLOR: Record<string, { bg: string; fg: string }> = {
+  fold: { bg: 'rgba(160,160,176,0.15)', fg: '#a0a0b0' },
+  check: { bg: 'rgba(160,160,176,0.15)', fg: '#a0a0b0' },
+  call: { bg: 'rgba(52,152,219,0.18)', fg: '#5dade2' },
+  bet: { bg: 'rgba(255,215,0,0.18)', fg: '#ffd700' },
+  raise: { bg: 'rgba(231,76,60,0.18)', fg: '#ff8a94' },
+  all_in: { bg: 'rgba(0,210,106,0.2)', fg: '#00d26a' },
+  'all-in': { bg: 'rgba(0,210,106,0.2)', fg: '#00d26a' },
+};
+
 export function Table({ tableId, onBack, onBalanceChange }: Props) {
   const [view, setView] = useState<TableView | null>(null);
   const [acting, setActing] = useState(false);
@@ -299,11 +329,30 @@ export function Table({ tableId, onBack, onBalanceChange }: Props) {
               seat.isYou ? '' : ''
             } ${seat.status === 'folded' ? 'opacity-40' : ''}`}
             style={{
-              background: '#16213e',
+              background: seat.isYou ? '#12241c' : '#16213e',
               border: `1px solid ${seat.isYou ? '#00d26a' : '#2a2a4a'}`,
+              boxShadow: seat.isYou ? '0 0 0 1px rgba(0,210,106,0.35)' : undefined,
             }}
           >
-            <div className="flex items-center gap-2.5 min-w-0">
+            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+              {/* Que ha hecho ESTE rival. Sin esto no hay mesa de poker: se ve el bote subiendo y
+                  no se sabe si los demas igualaron, subieron o se retiraron. El dato ya
+                  viene del servidor (`lastAction`); faltaba enseñarlo. */}
+              {seat.lastAction && !seat.isYou && (
+                <span className="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded flex-shrink-0"
+                  style={{
+                    background: LAST_ACTION_COLOR[seat.lastAction]?.bg ?? '#16213e',
+                    color: LAST_ACTION_COLOR[seat.lastAction]?.fg ?? '#a0a0b0',
+                  }}
+                >
+                  {LAST_ACTION_LABEL[seat.lastAction] ?? seat.lastAction}
+                </span>
+              )}
+              {seat.isYou && (
+                <span className="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded bg-[#00d26a]/20 text-[#00d26a] flex-shrink-0">
+                  Tú
+                </span>
+              )}
               <div
                 className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0"
                 style={{
