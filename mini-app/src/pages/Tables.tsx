@@ -260,7 +260,7 @@ export function Tables({
           </div>
 
           <div className="grid grid-cols-2 gap-2 mt-3">
-            {tiers.slice(0, 2).map((tier) => (
+            {tiers.map((tier) => (
               <button
                 key={tier.id}
                 onClick={() => jugarAhora(tier.id)}

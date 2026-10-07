@@ -353,11 +353,56 @@ router.post('/stand', async (req: Request, res: Response) => {
 });
 
 /** Mesa donde esta sentado el jugador (para reconectar). */
-router.get('/my-table', async (req: Request, res: Response) => {
+/**
+ * En que mesa esta sentado el usuario, o null.
+ *
+ * ------------------------------------------------------------------
+ * POR QUE NO SE USA `activeTableId`
+ *
+ * Porque ese campo solo lo escribe `seating.service.sitDown`, que es el camino de las mesas
+ * CASH SUELTAS. En un CAMPO no lo escribe nadie: `fieldManager.register` mete al jugador en
+ * una cola y le asigna asiento con su propio codigo.
+ *
+ * Asi que si estas sentado en un campo, `activeTableId` es `null`, esta ruta decia que no
+ * estas en ninguna parte, y el boton "Jugar ahora" creia que estaba libre y llamaba a
+ * `sit`, que respondia "Ya estas sentado en otra mesa. Sal de ella primero."
+ *
+ * Un mensaje imposible: la aplicacion no encuentra tu mesa y a la vez te dice que estas
+ * sentado en una.
+ *
+ * ------------------------------------------------------------------
+ * LA FUENTE DE VERDAD SON LOS ASIENTOS
+ *
+ * Se pregunta a las mesas con el mismo criterio que `fieldManager.isSeated`: un asiento con
+ * tu `playerId` que no sea `out`. Y se devuelve tambien si la mesa es de un campo, que es
+ * justo el caso que fallaba.
+ */
+router.get('/my-table', requireTelegramAuth, async (req: Request, res: Response) => {
   try {
     const telegramId = getAuthedTelegramId(req);
-    const user = await User.findOne({ telegramId });
-    res.json({ success: true, tableId: user?.activeTableId ?? null });
+
+    const mesa = await Table.findOne({
+      seats: { $elemMatch: { playerId: String(telegramId), status: { $ne: 'out' } } },
+    })
+      .select('tableId field.fieldId')
+      .lean();
+
+    if (!mesa) {
+      // Sin asiento: el usuario esta limpio. Se limpia tambien el campo del usuario, que
+      // puede haberse quedado apuntando a una mesa en la que ya no esta.
+      await User.updateOne(
+        { telegramId, activeTableId: { $ne: null } },
+        { $set: { activeTableId: null } },
+      );
+      res.json({ success: true, tableId: null, fieldId: null });
+      return;
+    }
+
+    res.json({
+      success: true,
+      tableId: mesa.tableId,
+      fieldId: mesa.field?.fieldId ?? null,
+    });
   } catch (error) {
     res.status(500).json({ error: 'Error' });
   }
