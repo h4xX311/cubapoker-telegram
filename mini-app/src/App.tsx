@@ -23,6 +23,57 @@ export default function App() {
   const [checkout, setCheckout] = useState<DepositOrder | null>(null);
   const [activeTable, setActiveTable] = useState<string | null>(null);
 
+  // ------------------------------------------------------------------
+  // SI LA URL ES DE MESA, A QUE MESA VA
+  //
+  // El bot manda un boton al jugador cuando le toca, y abre la Mini App en:
+  //
+  //     ${MINI_APP_URL}/game
+  //
+  // Sin identificador de mesa, porque el bot no lo lleva. Antes, una ruta que no se sabia
+  // resolver caia en 'home' en silencio, y el jugador veia el inicio: "no me aparece la
+  // mesa". El juego estaba funcionando (repartiendo, con bote y con turno), pero la
+  // aplicacion no iba a el.
+  //
+  // Aqui se pregunta al servidor donde esta sentado el jugador, que es la unica fuente de
+  // verdad (`GET /game/my-table` busca en los asientos, no en una copia del usuario). Asi
+  // el mismo caso de siempre queda cubierto de verdad:
+  //
+  //   - pulsa el boton del bot a mitad de una mano
+  //   - cierra la app y la vuelve a abrir
+  //   - deja la partida, vuelve a entrar por el mismo enlace
+  //
+  // Si el jugador no esta sentado en ninguna mesa, no hay adonde ir y se queda en la pagina
+  // que le toque, que es lo correcto.
+  // ------------------------------------------------------------------
+  const [mesaPendiente, setMesaPendiente] = useState(() => {
+    const ruta = window.location.pathname;
+    // Rutas que apuntan a una mesa. `/game` es la que manda el bot.
+    return /^\/(game|table)/.test(ruta);
+  });
+
+  useEffect(() => {
+    if (!mesaPendiente || activeTable) return;
+
+    let cancelado = false;
+    (async () => {
+      try {
+        const donde = await api.myTable();
+        if (cancelado) return;
+        if (donde?.tableId) {
+          setActiveTable(donde.tableId);
+        }
+      } catch {
+        // Si no se puede saber, no se inventa: se deja donde esta.
+      } finally {
+        if (!cancelado) setMesaPendiente(false);
+      }
+    })();
+    return () => {
+      cancelado = true;
+    };
+  }, [mesaPendiente, activeTable]);
+
   /**
    * El saldo vive en un unico sitio y se refresca tras cada accion que lo
    * mueve (deposito, retiro, partida). Antes cada pagina tenia su propia copia
