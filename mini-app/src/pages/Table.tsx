@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
+import { evaluarMano, type Card } from '../lib/handStrength';
 import { api, ApiError } from '../lib/api';
 import { PageHeader, SectionLabel } from '../components/Layout';
 import {
@@ -201,6 +202,30 @@ export function Table({ tableId, onBack, onBalanceChange }: Props) {
   const miAsiento = view.seats.find((s) => s.isYou);
   const sinFichas = !!miAsiento && miAsiento.chips <= 0;
 
+  // ------------------------------------------------------------------
+  // FUERZA DE MI MANO
+  //
+  // Con tus dos cartas y las comunitarias se puede saber en que posicion estas sin ver las
+  // del rival. Es parte del juego, no un extra: en una mesa real el jugador lo sabe mas o
+  // menos. Y en una mesa de bots es mas necesario todavia, porque no hay ni cuerpo ni
+  // expresiones que leer.
+  //
+  // Se recalcula solo con `useMemo` cuando cambian las cartas, que es lo unico que puede
+  // cambiar el resultado: 7 cartas como maximo, y el coste es ridiculo.
+  //
+  // IMPORTANTE: solo se miran TUS cartas y las COMUNITARIAS. Nunca las del rival. En una mesa
+  // de poker tienes una idea de como va la cosa, no la certidumbre, y esta función no puede
+  // dar la segunda.
+  // ------------------------------------------------------------------
+  const fuerza = useMemo(() => {
+    // Las cartas comunitarias llegan tipadas como `string` en `TableView`, pero el servidor
+    // envia objetos `{ rank, suit }`: es lo mismo que se pinta en pantalla. El tipo de la
+    // interfaz va por detras del dato, asi que se estrecha aqui.
+    const mias = (view.myCards ?? []) as Card[];
+    const comunes = (view.hand.communityCards ?? []) as unknown as Card[];
+    return evaluarMano([...mias, ...comunes]);
+  }, [view.myCards, view.hand.communityCards]);
+
   return (
     <div className="p-4 pb-10 animate-fadeIn">
       <PageHeader title={view.guaranteedPrize > 0 ? `Premio ${view.guaranteedPrize} CUP` : 'Mesa'} onBack={leave} />
@@ -296,6 +321,35 @@ export function Table({ tableId, onBack, onBalanceChange }: Props) {
               </span>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Fuerza de la mano. Solo cuando ya hay 5 cartas: antes de eso, no hay mano que
+          calificar y mostrar un "carta alta" seria mentir. */}
+      {fuerza && (
+        <div className="mb-4">
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-[10px] uppercase tracking-wide text-[#a0a0b0]">
+              Tu mano
+            </span>
+            <span className="text-[11px] font-bold" style={{ color: '#ffd700' }}>
+              {fuerza.name} · {fuerza.cards}
+            </span>
+          </div>
+          <div className="h-1.5 rounded-full overflow-hidden" style={{ background: '#16213e' }}>
+            <div
+              className="h-full rounded-full transition-all duration-500"
+              style={{
+                width: `${Math.round(fuerza.score * 100)}%`,
+                background:
+                  fuerza.score > 0.7
+                    ? '#00d26a'
+                    : fuerza.score > 0.35
+                      ? '#ffd700'
+                      : '#ff8a94',
+              }}
+            />
+          </div>
         </div>
       )}
 

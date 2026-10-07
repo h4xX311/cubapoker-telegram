@@ -18,7 +18,8 @@
     "test:e2e": "node scripts/test-e2e-field.js",
     "test:all": "npm run build && node scripts/run-tests.js && node scripts/test-e2e-field.js",
     "test:all:unit": "node scripts/run-tests.js",
-    "test:engine": "node scripts/test-engine.js"
+    "test:engine": "node scripts/test-engine.js",
+    "test:mano": "cd mini-app && npx tsx ../scripts/test-fuerza-mano.ts"
   },
   "dependencies": {
     "@types/cors": "^2.8.16",
