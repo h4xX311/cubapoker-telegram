@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { api, ApiError, type ChainInfo, type DepositOrder } from '../lib/api';
+import { fmtUsdt } from '../components/Balance';
 import { PageHeader, SectionLabel } from '../components/Layout';
 
 interface Props {
@@ -8,18 +9,15 @@ interface Props {
   onBalanceChange?: () => void | Promise<any>;
   onCheckout: (order: DepositOrder) => void;
 }
-type Provider = 'enzona' | 'qvapay' | 'usdt';
+type Provider = 'usdt';
 
 const PROVIDERS: { id: Provider; icon: string; name: string; note: string; min: number; rate: string }[] = [
-  { id: 'enzona', icon: '🇨🇺', name: 'EnZona', note: 'Pago móvil', min: 500, rate: '1.5%' },
-  { id: 'qvapay', icon: '💳', name: 'QvaPay', note: 'Tarjeta', min: 500, rate: '1.5%' },
   { id: 'usdt', icon: '₮', name: 'USDT', note: '5 redes', min: 5, rate: '0.5%' },
 ];
 
-const CUP_PER_USDT = 350;
-
 export function Deposit({ user, onBack, onCheckout }: Props) {
-  const [provider, setProvider] = useState<Provider>('usdt');
+  // Solo hay un metodo (USDT): no hace falta estado para el.
+  const provider: Provider = 'usdt';
   const [chains, setChains] = useState<ChainInfo[]>([]);
   const [chainId, setChainId] = useState<string>('TRC20');
   const [amount, setAmount] = useState('');
@@ -51,7 +49,7 @@ export function Deposit({ user, onBack, onCheckout }: Props) {
     setError('');
 
     if (!numericAmount || belowMinimum) {
-      setError(`El mínimo es ${config.min} ${provider === 'usdt' ? 'USDT' : 'CUP'}.`);
+      setError(`El mínimo es ${config.min} USDT.`);
       return;
     }
 
@@ -75,27 +73,16 @@ export function Deposit({ user, onBack, onCheckout }: Props) {
 
       {/* Método */}
       <SectionLabel>Método de pago</SectionLabel>
-      <div className="grid grid-cols-3 gap-2 mb-5">
-        {PROVIDERS.map(p => (
-          <button
-            key={p.id}
-            onClick={() => {
-              setProvider(p.id);
-              setAmount('');
-              setError('');
-            }}
-            aria-pressed={provider === p.id}
-            className={`card p-3 flex flex-col items-center gap-1 transition-all ${
-              provider === p.id
-                ? 'border-[#00d26a] bg-[#00d26a]/10'
-                : 'hover:border-[#2a2a4a]'
-            }`}
-          >
-            <span className="text-xl">{p.icon}</span>
-            <span className="text-xs font-semibold text-white">{p.name}</span>
-            <span className="text-[10px] text-[#a0a0b0]">{p.note}</span>
-          </button>
-        ))}
+      <div className="mb-5">
+        <div className="card p-3.5 flex items-center gap-3 border-[#00d26a]/40 bg-[#00d26a]/5">
+          <span className="text-xl">₮</span>
+          <div className="flex-1">
+            <p className="text-xs font-semibold text-white">USDT</p>
+            <p className="text-[10px] text-[#a0a0b0]">
+              5 redes · comisión 0,5 % · mínimo {PROVIDERS[0].min} USDT
+            </p>
+          </div>
+        </div>
       </div>
 
       {/* Red (solo USDT) */}
@@ -152,7 +139,7 @@ export function Deposit({ user, onBack, onCheckout }: Props) {
       )}
 
       {/* Monto */}
-      <SectionLabel>Monto {provider === 'usdt' ? '(USDT)' : '(CUP)'}</SectionLabel>
+      <SectionLabel>Monto (USDT)</SectionLabel>
       <div className="relative mb-3">
         <input
           type="number"
@@ -162,24 +149,18 @@ export function Deposit({ user, onBack, onCheckout }: Props) {
             setAmount(e.target.value);
             setError('');
           }}
-          placeholder={provider === 'usdt' ? '10' : '1000'}
+          placeholder="10"
           className="input text-lg pr-16"
           aria-label="Monto a depositar"
         />
         <span className="absolute right-4 top-1/2 -translate-y-1/2 text-sm font-semibold text-[#a0a0b0]">
-          {provider === 'usdt' ? 'USDT' : 'CUP'}
+          USDT
         </span>
       </div>
 
-      {provider === 'usdt' && numericAmount > 0 && (
-        <p className="text-xs text-[#a0a0b0] mb-3">
-          ≈ {(numericAmount * CUP_PER_USDT).toLocaleString('es-CU')} CUP
-        </p>
-      )}
-
       {belowMinimum && (
         <p className="text-xs text-[#ff8a94] mb-3">
-          Mínimo {config.min} {provider === 'usdt' ? 'USDT' : 'CUP'}
+          Mínimo {config.min} USDT
         </p>
       )}
 
@@ -217,9 +198,9 @@ export function Deposit({ user, onBack, onCheckout }: Props) {
         </p>
         <p className="text-xs text-[#a0a0b0] leading-relaxed mt-2">
           <span className="text-white font-semibold">Tu saldo retirable:</span>{' '}
-          {user?.balance?.real ?? 0} CUP
+          {fmtUsdt((user?.balance?.real ?? 0) / 1000)} USDT
           {(user?.balance?.play ?? 0) > 0 && (
-            <> · depósito de {user?.balance?.play ?? 0} CUP de promoción</>
+            <> · {fmtUsdt((user?.balance?.play ?? 0) / 1000)} USDT de promoción</>
           )}
         </p>
       </div>

@@ -1,14 +1,14 @@
 import { useState, useEffect } from 'react';
 import { api, ApiError } from '../lib/api';
 import { PageHeader } from '../components/Layout';
-import { fmtUsdt, fmtCup } from '../components/Balance';
+import { fmtUsdt } from '../components/Balance';
 
 interface Props {
   user: any;
   onBack: () => void;
   onBalanceChange?: () => void | Promise<any>;
   onPlay: (tableId: string) => void;
-  cupPerUsdt?: number;
+  120?: number;
 }
 
 /**
@@ -27,7 +27,6 @@ export function Centroll({
   onBack,
   onBalanceChange,
   onPlay,
-  cupPerUsdt = 120,
 }: Props) {
   const [info, setInfo] = useState<any>(null);
   const [loading, setLoading] = useState(true);
@@ -185,10 +184,7 @@ export function Centroll({
               ? 'Entrando…'
               : !canAfford
               ? `Necesitas ${fmtUsdt(info?.buyIn ?? 1)} USDT reales`
-              : `Entrar · ${fmtUsdt(info?.buyIn ?? 1)} USDT (${fmtCup(
-                  info?.buyInCup ?? 120,
-                  cupPerUsdt,
-                )} CUP)`}
+              : `Entrar · ${fmtUsdt(info?.buyIn ?? 1)} USDT ($ CUP)`}
           </button>
 
           {/* Por que exige saldo real */}

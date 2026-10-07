@@ -2,15 +2,13 @@ import { useState, useEffect } from 'react';
 import { api, ApiError } from '../lib/api';
 import type { CashTier, TableSummary } from '../lib/types';
 import { PageHeader, SectionLabel } from '../components/Layout';
-import { fmtUsdt, fmtCup } from '../components/Balance';
+import { fmtUsdt } from '../components/Balance';
 
 interface Props {
   user: any;
   onBack: () => void;
   onBalanceChange?: () => void | Promise<any>;
   onPlay: (tableId: string) => void;
-  /** Tipo de cambio de referencia para mostrar el equivalente en CUP. */
-  cupPerUsdt?: number;
 }
 
 export function Tables({
@@ -18,7 +16,6 @@ export function Tables({
   onBack,
   onBalanceChange,
   onPlay,
-  cupPerUsdt = 120,
 }: Props) {
   const [tables, setTables] = useState<TableSummary[]>([]);
   const [tiers, setTiers] = useState<CashTier[]>([]);
@@ -202,7 +199,7 @@ export function Tables({
           <p className="text-[#a0a0b0] text-xs">Tu saldo</p>
           <p className="text-2xl font-bold text-[#00d26a]">{fmtUsdt(balance)} USDT</p>
           <p className="text-[10px] text-[#a0a0b0] mt-0.5">
-            {fmtCup(balance, cupPerUsdt)} CUP
+             CUP
           </p>
         </div>
         <div className="text-right text-[10px] text-[#a0a0b0] leading-relaxed">
@@ -362,7 +359,7 @@ export function Tables({
                         {fmtUsdt(tier.blinds.small)}/{fmtUsdt(tier.blinds.big)}
                       </p>
                       <p className="text-[10px] text-[#6c6c80] mt-0.5">
-                        {fmtCup(tier.buyIn, cupPerUsdt)} CUP · {tier.tables} mesas
+                        {tier.tables} mesas
                       </p>
                     </div>
                     <div className="text-right">

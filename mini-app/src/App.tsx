@@ -22,8 +22,6 @@ export default function App() {
   const [errorCode, setErrorCode] = useState<string>('');
   const [checkout, setCheckout] = useState<DepositOrder | null>(null);
   const [activeTable, setActiveTable] = useState<string | null>(null);
-  /** Tipo de cambio de referencia para mostrar el equivalente en CUP. */
-  const [cupPerUsdt, setCupPerUsdt] = useState(120);
 
   /**
    * El saldo vive en un unico sitio y se refresca tras cada accion que lo
@@ -114,21 +112,14 @@ export default function App() {
     return () => window.removeEventListener('popstate', onPop);
   }, []);
 
-  // Tipo de cambio de referencia: lo manda el servidor para que el cliente no
-  // tenga una copia que se pueda desincronizar.
+  // Ya no se carga el tipo de cambio: la cuenta es solo USDT (ver `components/Balance.tsx`).
+  // La moneda no se convierte en el cliente, y por tanto no puede desincronizarse.
   useEffect(() => {
-    let cancelled = false;
-    api
-      .gameConfig()
-      .then((cfg) => {
-        if (!cancelled && cfg?.cupPerUsdt) setCupPerUsdt(cfg.cupPerUsdt);
-      })
-      .catch(() => {
-        /* el valor por defecto (120) es suficiente si falla */
-      });
-    return () => {
-      cancelled = true;
-    };
+    // Se pide la configuracion al arrancar, sin guardar el tipo de cambio: la cuenta es
+    // solo USDT y no se convierte en el cliente.
+    api.gameConfig().catch(() => {
+      /* la configuracion se vuelve a pedir cuando hace falta */
+    });
   }, []);
 
   // --- Estados de carga / error a pantalla completa ---
@@ -193,7 +184,7 @@ export default function App() {
     switch (page) {
       case 'home':
         return (
-          <Home user={user} onNavigate={navigate} cupPerUsdt={cupPerUsdt} />
+          <Home user={user} onNavigate={navigate} />
         );
       case 'deposit':
         return (
@@ -213,7 +204,6 @@ export default function App() {
             onBack={back}
             onBalanceChange={refreshUser}
             onPlay={setActiveTable}
-            cupPerUsdt={cupPerUsdt}
           />
         );
       case 'freeroll':
@@ -222,7 +212,6 @@ export default function App() {
             onBack={back}
             onBalanceChange={refreshUser}
             onPlay={setActiveTable}
-            cupPerUsdt={cupPerUsdt}
           />
         );
       case 'centroll':
@@ -232,7 +221,6 @@ export default function App() {
             onBack={back}
             onBalanceChange={refreshUser}
             onPlay={setActiveTable}
-            cupPerUsdt={cupPerUsdt}
           />
         );
       case 'game':
@@ -244,7 +232,7 @@ export default function App() {
             onBalanceChange={refreshUser}
           />
         ) : (
-          <Home user={user} onNavigate={navigate} cupPerUsdt={cupPerUsdt} />
+          <Home user={user} onNavigate={navigate} />
         );
       case 'tournaments':
         return <Tournaments user={user} onBack={back} onBalanceChange={refreshUser} />;
@@ -256,7 +244,7 @@ export default function App() {
         return <Achievements onBack={back} />;
       default:
         return (
-          <Home user={user} onNavigate={navigate} cupPerUsdt={cupPerUsdt} />
+          <Home user={user} onNavigate={navigate} />
         );
     }
   };
@@ -299,7 +287,7 @@ export default function App() {
               <span className="text-sm font-bold text-[#00d26a]">
                 {user?.balance.total ?? 0}
               </span>
-              <span className="text-[10px] text-[#a0a0b0]">CUP</span>
+              <span className="text-[10px] text-[#a0a0b0]">USDT</span>
             </button>
           </div>
         </div>

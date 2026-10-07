@@ -17,29 +17,31 @@ export const fmtUsdt = (n: number): string => {
   return v.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 };
 
-/** Equivalente en CUP, como referencia secundaria. */
-export const fmtCup = (usdt: number, cupPerUsdt: number): string =>
-  Math.round(usdt * cupPerUsdt).toLocaleString('es-ES');
-
 /**
  * Como se ve el saldo en la cabecera.
  *
- * Muestra USDT porque es la unidad de la cuenta (ver `config/currency.ts`), y el
- * equivalente en CUP en pequeno debajo: el usuario cubano razona en pesos, pero
- * el saldo que arriesga esta en dolares estables.
+ * ------------------------------------------------------------------
+ * SOLO USDT. UNA MONEDA, COMO COINPOKER
+ *
+ * Antes debajo del saldo se ponia el equivalente en CUP: "USDT · 122.100 CUP". Se quito
+ * porque son dos monedas en la misma pantalla y el usuario no sabe cual arriesga. El saldo
+ * que arriesga son USDT, y es lo unico que se muestra.
+ *
+ * Ademas era una conversion sin cotizacion real (un numero fijo guardado en el codigo), y
+ * mostrado junto a un saldo con centavos假的 da precision que no existe: 0,003 USDT son "0
+ * CUP" o "1 CUP" segun como redondee. Un numero inventado al lado del dinero real invite a
+ * la desconfianza.
+ *
+ * CoinPoker tiene una sola moneda en pantalla por la misma razon, y sin referencia secundaria.
  */
 export const BalanceDisplay = ({
   balance,
-  cupPerUsdt,
 }: {
   balance: { real: number; play: number; total: number };
-  cupPerUsdt: number;
 }) => (
   <div className="flex flex-col items-end leading-none">
     <span className="text-sm font-bold text-[#00d26a]">{fmtUsdt(balance.total)}</span>
-    <span className="text-[9px] text-[#a0a0b0] mt-0.5">
-      USDT · {fmtCup(balance.total, cupPerUsdt)} CUP
-    </span>
+    <span className="text-[9px] text-[#a0a0b0] mt-0.5">USDT</span>
   </div>
 );
 

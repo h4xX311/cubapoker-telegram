@@ -110,7 +110,7 @@ export function Achievements({ onBack }: Props) {
         </div>
         <div className="card text-center p-4">
           <p className="text-2xl font-bold text-[#ffd700]">{totalRewards}</p>
-          <p className="text-[10px] text-[#a0a0b0]">CUP ganados</p>
+          <p className="text-[10px] text-[#a0a0b0]">USDT ganados</p>
         </div>
       </div>
 

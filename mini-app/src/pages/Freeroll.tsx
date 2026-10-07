@@ -2,13 +2,13 @@ import { useState, useEffect } from 'react';
 import { api, ApiError } from '../lib/api';
 import type { FreerollSummary } from '../lib/types';
 import { PageHeader } from '../components/Layout';
-import { fmtUsdt, fmtCup } from '../components/Balance';
+import { fmtUsdt } from '../components/Balance';
 
 interface Props {
   onBack: () => void;
   onBalanceChange?: () => void | Promise<any>;
   onPlay: (tableId: string) => void;
-  cupPerUsdt?: number;
+  120?: number;
 }
 
 /**
@@ -21,7 +21,6 @@ export function Freeroll({
   onBack,
   onBalanceChange,
   onPlay,
-  cupPerUsdt = 120,
 }: Props) {
   const [freerolls, setFreerolls] = useState<FreerollSummary[]>([]);
   const [targetField, setTargetField] = useState(300);
@@ -126,8 +125,7 @@ export function Freeroll({
                     <h3 className="font-bold text-white flex items-center gap-2">
                       <span>🎁</span> Freeroll {fmtUsdt(f.prizeTier)} USDT
                     </h3>
-                    <p className="text-xs text-[#a0a0b0] mt-1">
-                      {fmtCup(f.prizeTier, cupPerUsdt)} CUP de premio · sin buy-in
+                    <p className="text-xs text-[#a0a0b0] mt-1"> USDT de premio · sin buy-in
                     </p>
                   </div>
                   <span className="badge badge-warning text-[10px]">

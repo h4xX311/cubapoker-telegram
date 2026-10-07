@@ -1,10 +1,10 @@
 import type { Page, Session } from '../lib/types';
-import { fmtUsdt, fmtCup, PromoBalanceNote } from '../components/Balance';
+import { fmtUsdt, PromoBalanceNote } from '../components/Balance';
 
 interface HomeProps {
   user: Session | null;
   onNavigate: (page: Page) => void;
-  cupPerUsdt?: number;
+  120?: number;
 }
 
 const NAV: { page: Page; emoji: string; label: string; sub: string; accent: string }[] = [
@@ -59,7 +59,7 @@ const NAV: { page: Page; emoji: string; label: string; sub: string; accent: stri
   },
 ];
 
-export function Home({ user, onNavigate, cupPerUsdt = 120 }: HomeProps) {
+export function Home({ user, onNavigate }: HomeProps) {
   const real = user?.balance?.real ?? 0;
   const play = user?.balance?.play ?? 0;
   const total = user?.balance?.total ?? 0;
@@ -98,7 +98,6 @@ export function Home({ user, onNavigate, cupPerUsdt = 120 }: HomeProps) {
 
         <p className="text-4xl font-bold text-white leading-none">{fmtUsdt(total)}</p>
         <p className="text-sm text-[#a0a0b0] mt-1">
-          USDT · {fmtCup(total, cupPerUsdt)} CUP
         </p>
 
         <div className="grid grid-cols-2 gap-3 mt-4 pt-4 border-t border-white/10">

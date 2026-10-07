@@ -46,6 +46,7 @@
 import { Router, Request, Response } from 'express';
 import { User } from '../models/User';
 import { getAuthedTelegramId, requireTelegramAuth } from '../middleware/telegramAuth';
+import { unitsToUsdt } from '../config/units';
 import { logger } from '../utils/logger';
 
 const router = Router();
@@ -162,6 +163,26 @@ router.get('/me', requireTelegramAuth, async (req: Request, res: Response) => {
     const real = user.balance?.real ?? 0;
     const play = user.balance?.play ?? 0;
 
+    // ------------------------------------------------------------------
+    // EL SALDO SALE EN USDT, NO EN UNIDADES. Y NO ES UN DETALLE.
+    //
+    // En la base el saldo esta en UNIDADES INTERNAS (1 USDT = 1000, `config/units.ts`). La
+    // interfaz, en cambio, trabaja siempre en USDT: formatea con `fmtUsdt` (que espera
+    // USDT) y COMPARA contra los buy-ins, que vienen en USDT (`tier.buyIn`).
+    //
+    //     const canAfford = balance >= tier.buyIn;
+    //
+    // Mandando unidades, un saldo de 4 975 unidades (4,975 USDT) se comparaba contra un
+    // buy-in de 1 USDT y daba `4975 >= 1`: **el boton quedaba habilitado con mil veces mas
+    // saldo de la cuenta**, y el texto de "saldo" showed 4.975 como "4975". Al pulsar, el
+    // servidor (que si razona en unidades) rechazaba la operacion, y el usuario veia un
+    // boton que se podia pulsar y un error al hacerlo.
+    //
+    // La conversion va AQUI, en la frontera, y solo aqui. El resto del backend sigue en
+    // unidades, que es la convencion documentada (`config/units.ts`, `withdrawal.rules.ts`).
+    // Se convierte al salir, no al entrar: si el servidor recibiera USDT habria que
+    // convertir en cada operacion de dinero, que es donde ya se colaron estos errores.
+    // ------------------------------------------------------------------
     res.json({
       success: true,
       user: {
@@ -170,12 +191,14 @@ router.get('/me', requireTelegramAuth, async (req: Request, res: Response) => {
         firstName: user.firstName,
         lastName: user.lastName,
         balance: {
-          real,
-          play,
-          total: real + play,
+          real: unitsToUsdt(real),
+          play: unitsToUsdt(play),
+          total: unitsToUsdt(real + play),
           // `real` es lo unico retirable: el `play` se desbloquea jugando, no se retira.
-          withdrawable: real,
+          withdrawable: unitsToUsdt(real),
         },
+        /** Las cifras crudas, en unidades, para lo que necesite la aritmetica exacta. */
+        balanceUnits: { real, play, total: real + play },
         stats: user.stats,
         // `activeTableId` no es la fuente de verdad de donde esta el jugador (eso son los
         // asientos, y lo que hace `GET /game/my-table`), pero se devuelve para que la
