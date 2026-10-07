@@ -422,7 +422,36 @@ export class TableManager {
    */
   private versionConflicts = 0;
 
-  private async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
+  /**
+ * Serializa las escrituras de UNA mesa.
+ *
+ * ------------------------------------------------------------------
+ * POR QUE ESTA FUERA DE ESTA CLASE Y POR QUE ES PUBLICA
+ *
+ * `seating.service` (sentarse, levantarse) escribe el MISMO documento de mesa que el motor.
+ * Antes el cerrojo era privado de esta clase, asi que el motor se serializaba consigo mismo y
+ * el servicio escribia por fuera: dos escritores sobre el mismo documento sin exclusion
+ * mutua.
+ *
+ * El sintoma en produccion era esto, con la partida en marcha:
+ *
+ *     VersionError: No matching document found for id "6ac520e3..." version 66
+ *       modifiedPaths "seats, seats.3, seats.3.handsWon, seats.4, hand, hand.phase,
+ *       hand.communityCards, hand.actingSeat, seats.4.chips"
+ *
+ * Que se ven los caminos de escritura de AMBOS lados: `seats` y `hand`. El tick estaba
+ * repartiendo y contando manos mientras la peticion HTTP sentaba a un jugador sobre una copia
+ * antigua. Mongo resuelve la version y **descarta una de las dos escrituras**: o el asiento no
+ * se guardaba, o la mano perdia un estado. Con fichas de por medio, cualquiera de las dos
+ * opciones es un fallo de dinero.
+ *
+ * Y no es un fallo raro: aparece en cuanto alguien se sienta mientras la mesa esta jugando,
+ * que es justo lo que hace todo el mundo.
+ *
+ * Ahora es publica porque `seating.service` la necesita, y ese modulo ya importa esta clase
+ * (no hay ciclo).
+ */
+async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
     const anterior = this.tableLocks.get(tableId) ?? Promise.resolve();
 
     // La cola avanza aunque esta operacion falle: si no, un error deja el cerrojo

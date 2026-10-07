@@ -134,27 +134,55 @@ export class SeatingService {
       joinedAt: new Date(),
     };
 
-    table.seats.push(seat);
+    // ------------------------------------------------------------------
+    // SENTARSE, CON EL CERROJO DEL MOTOR Y RELeyENDO
+    //
+    // El tick esta repartiendo, contando manos y moviendo fichas en este mismo documento
+    // mientras esta peticion HTTP ocurre. Guardar la copia que se leyo al principio es
+    // guardar una version obsoleta, y Mongo la descarta: el asiento no se guarda y el
+    // jugador cree que esta sentado. En produccion salia como:
+    //
+    //     VersionError: No matching document found for id "6ac520e3..." version 66
+    //
+    // Re-leer DENTRO del cerrojo es lo que lo arregla: dentro no hay nadie mas escribiendo, y
+    // lo que se guarda es el estado real de la mesa en ese instante. Con el cerrojo fuera, la
+    // relectura no valdria de nada, porque el tick podria escribir entre la lectura y el
+    // guardado.
+    // ------------------------------------------------------------------
+    await tableManager.withTableLock(table.tableId, async () => {
+      const actual = await Table.findOne({ tableId: table.tableId });
+      if (!actual) {
+        throw new TableError('La mesa ya no existe.', 404);
+      }
 
-    // `splitBuyIn` ya descontó `fromPlay` de `play` y acreditó su unlock a
-    // `real`. Aquí solo se descuenta el resto del saldo real. Si se descontara
-    // también `play`, se cobraría dos veces la parte de promoción.
-    await User.updateOne(
-      { telegramId },
-      {
-        $inc: {
-          'balance.real': -fromReal,
-          'stats.tablesJoined': 1,
+      // Se vuelve a comprobar el asiento: dentro del cerrojo el tick no ha escrito, pero otro
+      // escritor del servicio (dos peticiones a la vez) si puede haberlo hecho.
+      if (actual.seats.some((s) => s.kind === 'human' && s.playerId === String(telegramId))) {
+        throw new TableError('Ya estas sentado en esta mesa.', 409);
+      }
+
+      actual.seats.push(seat);
+
+      // `splitBuyIn` ya descontó `fromPlay` de `play` y acreditó su unlock a
+      // `real`. Aquí solo se descuenta el resto del saldo real. Si se descontara
+      // también `play`, se cobraría dos veces la parte de promoción.
+      await User.updateOne(
+        { telegramId },
+        {
+          $inc: {
+            'balance.real': -fromReal,
+            'stats.tablesJoined': 1,
+          },
+          $set: { activeTableId: actual.tableId },
         },
-        $set: { activeTableId: table.tableId },
-      },
-    );
+      );
 
-    if (table.seats.filter(s => s.kind === 'human').length === 1) {
-      table.status = 'waiting';
-    }
+      if (actual.seats.filter((s) => s.kind === 'human').length === 1) {
+        actual.status = 'waiting';
+      }
 
-    await table.save();
+      await actual.save();
+    });
 
     logger.info(
       `Jugador ${telegramId} se sento en ${table.tableId} (${fromPlay} play + ${fromReal} real)`,
@@ -294,28 +322,59 @@ export class SeatingService {
 
     const returned = seat.chips + seat.bet;
 
-    table.seats.splice(seatIndex, 1);
-    // Reindexar para no dejar huecos
-    table.seats.forEach((s, i) => {
-      s.index = i;
-    });
+    // ------------------------------------------------------------------
+    // LEVANTARSE, CON EL CERROJO Y RELeyENDO. Por el mismo motivo que sentarse:
+    // el tick escribe este documento a la vez. Guardar una copia vieja descarta el `save` y
+    // el jugador se queda con la mesa ocupada y las fichas dentro, sin poder salir y sin
+    // saberlo.
+    // ------------------------------------------------------------------
+    await tableManager.withTableLock(table.tableId, async () => {
+      const actual = await Table.findOne({ tableId: table.tableId });
+      if (!actual) throw new TableError('La mesa ya no existe.', 404);
 
-    if (returned > 0) {
-      await User.updateOne(
-        { telegramId },
-        { $inc: { 'balance.real': returned } },
+      // El indice puede haber cambiado entre la lectura inicial y ahora (el motor reordena
+      // asientos al liquidar), asi que se busca por identidad y no por posicion.
+      const indiceActual = actual.seats.findIndex(
+        (s) => s.kind === 'human' && s.playerId === String(telegramId),
       );
-    }
+      if (indiceActual === -1) throw new TableError('No estas en esa mesa');
 
-    await User.updateOne({ telegramId }, { $set: { activeTableId: null } });
+      const asiento = actual.seats[indiceActual];
 
-    const humansLeft = table.seats.filter(s => s.kind === 'human').length;
-    if (humansLeft === 0) {
-      table.status = 'waiting';
-      table.seats = [];
-    }
+      // Si la mano ha avanzado y ahora hay apuesta en curso, sigue sin poder salir: abandonarse
+      // con fichas en el bote seria robarlo.
+      if (actual.hand.phase !== 'idle' && asiento.status === 'active' && asiento.bet > 0) {
+        throw new TableError(
+          'Hay una mano en curso. Espera a que termine para salir.',
+          409,
+        );
+      }
 
-    await table.save();
+      const aDevolver = asiento.chips + asiento.bet;
+
+      actual.seats.splice(indiceActual, 1);
+      // Reindexar para no dejar huecos
+      actual.seats.forEach((s, i) => {
+        s.index = i;
+      });
+
+      if (aDevolver > 0) {
+        await User.updateOne(
+          { telegramId },
+          { $inc: { 'balance.real': aDevolver } },
+        );
+      }
+
+      await User.updateOne({ telegramId }, { $set: { activeTableId: null } });
+
+      const quedanHumanos = actual.seats.filter((s) => s.kind === 'human').length;
+      if (quedanHumanos === 0) {
+        actual.status = 'waiting';
+        actual.seats = [];
+      }
+
+      await actual.save();
+    });
 
     return { returned };
   }
