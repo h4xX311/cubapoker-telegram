@@ -21,7 +21,25 @@ import { Request, Response, NextFunction } from 'express';
 //
 // Leyendolo en cada llamada desaparece la dependencia del orden de carga: si el token esta,
 // esta.
-const botToken = (): string => process.env.TELEGRAM_BOT_TOKEN || '';
+// El `.trim()` NO es cosmetico, y es la diferencia entre funcionar y no.
+//
+// `bot.ts` crea el bot con `process.env.TELEGRAM_BOT_TOKEN?.trim()`. Aqui, sin recortar, se
+// calculaba la firma con el token CRUDO.
+//
+// Si la variable tiene un espacio o un salto de linea al final --que es lo que pasa al
+// pegarla en el panel de Render-- pasan DOS cosas a la vez:
+//
+//   - el bot se crea con el token recortado, asi que `getMe` funciona, el webhook se registra
+//     y `/telegram/setup` responde bien con el @username correcto
+//   - la firma se calcula con el token sin recortar, asi que `secretKey` sale DISTINTA y el
+//     hash no cuadra NUNCA
+//
+// Ese es exactamente el sintoma que se diagnostico un rato: el token correcto y la firma
+// invalida, a la vez, sin que pareciera contradictorio. No lo es: son dos lecturas distintas
+// de la misma variable.
+//
+// El token se lee por los DOS lados con el mismo recorte, o no funciona nunca.
+const botToken = (): string => (process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const MAX_AGE_SECONDS = 60 * 60; // 1 hora
 
 /**
@@ -148,6 +166,26 @@ export const requireTelegramAuth = (req: Request, res: Response, next: NextFunct
       `Sesion rechazada (${outsideTelegram ? 'fuera de Telegram' : 'dentro de Telegram'}): ` +
       `${result.error}. initData: ${initData ? `si, ${initData.length} caracteres` : 'vacio'}.`,
     );
+
+    // ------------------------------------------------------------------
+    // SI EL TOKEN TIENIESPACIOS ALREDEDOR
+    //
+    // Se dice SI o NO, y nunca el token: es un secreto y no va a un log. Pero es la
+    // diferencia entre "el token esta mal" y "el token tiene un salto de linea pegado", que
+    // producen el MISMO sintoma (firma invalida con el bot correcto) y se diagnostican igual
+    // de mal.
+    //
+    // Si esto dice que hay espacios, hay que quitar el salto de linea en el panel, no seguir
+    // mirando la aplicacion.
+    // ------------------------------------------------------------------
+    const crudo = process.env.TELEGRAM_BOT_TOKEN || '';
+    if (crudo !== crudo.trim()) {
+      logger.warn(
+        'ATENCION: TELEGRAM_BOT_TOKEN tiene espacios o saltos de linea al principio o al ' +
+        'final. El bot funciona (usa el token recortado) pero la firma no cuadra nunca ' +
+        '(usa el token crudo). Quitalos en el panel de Render.',
+      );
+    }
 
     res.status(401).json({
       error: outsideTelegram
