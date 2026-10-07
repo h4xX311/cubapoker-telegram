@@ -162,6 +162,34 @@ export function Table({ tableId, onBack, onBalanceChange }: Props) {
     }
   };
 
+  // ------------------------------------------------------------------
+  // LOS HOOKS, ANTES DE CUALQUIER `return` TEMPRANO
+  //
+  // ------------------------------------------------------------------
+  // ESTA POSICION NO ES COSA ESTETICA, ES UNA REGLA
+  //
+  // Este hook estaba DESPUES del `if (!view) return <cargando/>`. Eso rompe la regla de los
+  // hooks de React: en el primer render `view` es null y se sale antes de llegar al hook; en el
+  // siguiente ya hay vista y se ejecuta. Un render llama a 6 hooks y el siguiente a 7, y React
+  // aborta con:
+  //
+  //     Minified React error #310: Rendered more hooks than during the previous render.
+  //
+  // Pantalla en blanco. Lo que se vio en produccion.
+  //
+  // Un hook SIEMPRE va antes de cualquier `return` temprano, y el caso de que falte el dato se
+  // comprueba DENTRO del hook, no fuera. Por eso aqui empieza con `if (!view) return null`.
+  // ------------------------------------------------------------------
+  const fuerza = useMemo(() => {
+    if (!view) return null;
+    // Las cartas comunitarias llegan tipadas como `string` en `TableView`, pero el servidor
+    // envia objetos `{ rank, suit }`: es lo mismo que se pinta en pantalla. El tipo de la
+    // interfaz va por detras del dato, asi que se estrecha aqui.
+    const mias = (view.myCards ?? []) as Card[];
+    const comunes = (view.hand.communityCards ?? []) as unknown as Card[];
+    return evaluarMano([...mias, ...comunes]);
+  }, [view]);
+
   // --- Pantalla de carga ---
   if (!view) {
     return (
@@ -201,30 +229,6 @@ export function Table({ tableId, onBack, onBalanceChange }: Props) {
   // ------------------------------------------------------------------
   const miAsiento = view.seats.find((s) => s.isYou);
   const sinFichas = !!miAsiento && miAsiento.chips <= 0;
-
-  // ------------------------------------------------------------------
-  // FUERZA DE MI MANO
-  //
-  // Con tus dos cartas y las comunitarias se puede saber en que posicion estas sin ver las
-  // del rival. Es parte del juego, no un extra: en una mesa real el jugador lo sabe mas o
-  // menos. Y en una mesa de bots es mas necesario todavia, porque no hay ni cuerpo ni
-  // expresiones que leer.
-  //
-  // Se recalcula solo con `useMemo` cuando cambian las cartas, que es lo unico que puede
-  // cambiar el resultado: 7 cartas como maximo, y el coste es ridiculo.
-  //
-  // IMPORTANTE: solo se miran TUS cartas y las COMUNITARIAS. Nunca las del rival. En una mesa
-  // de poker tienes una idea de como va la cosa, no la certidumbre, y esta función no puede
-  // dar la segunda.
-  // ------------------------------------------------------------------
-  const fuerza = useMemo(() => {
-    // Las cartas comunitarias llegan tipadas como `string` en `TableView`, pero el servidor
-    // envia objetos `{ rank, suit }`: es lo mismo que se pinta en pantalla. El tipo de la
-    // interfaz va por detras del dato, asi que se estrecha aqui.
-    const mias = (view.myCards ?? []) as Card[];
-    const comunes = (view.hand.communityCards ?? []) as unknown as Card[];
-    return evaluarMano([...mias, ...comunes]);
-  }, [view.myCards, view.hand.communityCards]);
 
   return (
     <div className="p-4 pb-10 animate-fadeIn">
