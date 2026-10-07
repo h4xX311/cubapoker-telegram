@@ -1094,6 +1094,14 @@ export const fieldManager = {
       const busted = table.seats.filter(
         s => s.kind === 'human' && s.status === 'eliminated',
       );
+
+      // DIAGNOSTICO
+      logger.warn(
+        `DIAG-ELIM ${table.tableId}: fase="${table.hand.phase}" ` +
+        `asientos=[${table.seats.map((s) => s.index + ':' + s.kind + ':' + s.status + ':' + s.chips).join(' ')}] ` +
+        `busted=${busted.length}`,
+      );
+
       if (busted.length === 0) continue;
 
       // Fichas de los eliminados que pasan al bote del campo. Se lee, no se
@@ -1237,6 +1245,12 @@ export const fieldManager = {
         // mesa despues de nuestra lectura, y es exactamente el tipo de carrera que
         // hacia que los asientos nunca se liberaran. Merece un aviso: significa que
         // la mesa y el campo estan stepping el uno sobre el otro.
+        logger.warn(
+          `DIAG-OUT ${table.tableId}: marcando out ${seatsLiquidados} ` +
+          `liquidados. modificados=${resOut.modifiedCount} ` +
+          `manoViva=${hayManoViva}`,
+        );
+
         if (resOut.modifiedCount === 0) {
           logger.warn(
             `Campo ${field.fieldId}: se quiso marcar 'out' a ${seatsLiquidados} ` +
@@ -1272,7 +1286,25 @@ export const fieldManager = {
       // Aqui si se puede quitar el asiento sin riesgo, porque `hand.phase === 'idle'`
       // significa que no hay ninguna mano viva: ningun motor tiene activos a esos
       // jugadores y sus indices no le afectan a nadie.
-      if (!hayManoViva && seatsLiquidados > 0) {
+      // ------------------------------------------------------------------
+      // SOLTAR ES INDEPENDIENTE DE ADJUDICAR
+      //
+      // Antes la condicion era `!hayManoViva && seatsLiquidados > 0`, y encadenaba dos
+      // decisiones que no tienen relacion.
+      //
+      // El caso que se perdia: se adjudica con la mano EN MARCHA, asi que los asientos se
+      // marcan `out` pero no se pueden soltar. Cuando la mano acaba, la mesa queda en
+      // reposo y ya no hay nada nuevo que adjudicar (`busted` son los `out`, no los
+      // `eliminated`), asi que `seatsLiquidados` vale 0 y la liberacion no se intenta
+      // NUNCA MAS. Los asientos se acumulan, `seatsFree` da 0, las merges no ocurren, y la
+      // mesa se queda sin asientos jugables.
+      //
+      // Lo que decide es solo lo que tiene sentido: si hay asientos `out` y la mesa esta en
+      // reposo, se sueltan. Ni mas ni menos.
+      // ------------------------------------------------------------------
+      const hayOutParaSoltar = table.seats.some((s) => s.status === 'out');
+
+      if (!hayManoViva && hayOutParaSoltar) {
         // Se relee la mesa, se filtra el array en memoria y se escribe SOLO `seats`
         // con un `$set` dirigido. No se guarda el documento entero, asi que `hand` no
         // se toca (que es lo que rompia las mesas antes).
