@@ -64,6 +64,7 @@ function validateInitData(initData: string): { valid: boolean; user?: any; error
   const hash = params.get('hash');
   if (!hash) return { valid: false, error: 'hash ausente' };
 
+  // `hash` nunca entra en el calculo. `signature` SI ENTRA: es el campo que verifico.
   params.delete('hash');
 
   // 1. Comprobar antigüedad para evitar reuso de datos viejos
@@ -75,9 +76,33 @@ function validateInitData(initData: string): { valid: boolean; user?: any; error
     return { valid: false, error: 'initData expirado' };
   }
 
-  // 2. Construir data_check_string con los campos ordenados
+  // ------------------------------------------------------------------
+  // 2. EL DATA_CHECK_STRING: AQUI ESTA EL BUG QUE COSTO MEDIA HORA
+  //
+  // Antes se construia asi:
+  //
+  //     const dataCheckString = Array.from(params.entries())
+  //       .filter(([key]) => key !== 'signature')     // <-- el culpable
+  //       .sort(...).map(...).join('\n');
+  //
+  // O sea, se EXCLUIDA `signature` del calculo del `hash`.
+  //
+  // El campo `signature` (Ed25519, Bot API 7.0) forma PARTE de los campos que Telegram
+  // firma, y segun la documentacion de validacion de la Mini App va incluido en el
+  // `data_check_string` que genera el `hash`. Excluirlo produce una cadena distinta, luego un
+  // `hash` distinto, y el resultado es `firma invalida` SIEMPRE, aunque el token sea
+  // correcto, el initData llegue integro y el bot este bien configurado.
+  //
+  // Y es un fallo especialmente traicionero porque la validacion es de las pocas cosas que
+  // se pueden "comprobar" sin una sesion real: si se construye el initData a mano, se calcula
+  // el hash con la MISMA regla equivocada, y el roundtrip sale bien. La prueba verifica que
+  // el codigo es consistente consigo mismo, no que sea correcto. Solo se ve cuando Telegram
+  // firma de verdad.
+  //
+  // Se construye la lista de campos UNA vez y se filtra solo `hash`, que es lo unico que de
+  // verdad no entra. Los nombres de campo van en orden, que es lo que exige el calculo.
+  // ------------------------------------------------------------------
   const dataCheckString = Array.from(params.entries())
-    .filter(([key]) => key !== 'signature')
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([key, value]) => `${key}=${value}`)
     .join('\n');
