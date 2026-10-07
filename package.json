@@ -8,7 +8,6 @@
     "build": "tsc --skipLibCheck",
     "start": "node dist/bot.js",
     "test": "npm run build && node scripts/run-tests.js",
-    "test:all": "npm run build && node scripts/run-tests.js && node scripts/test-e2e-field.js",
     "test:chains": "node scripts/test-chains.js",
     "test:rules": "node scripts/test-business-rules.js",
     "test:payout": "node scripts/test-payout.js",
@@ -17,7 +16,7 @@
     "test:withdrawal": "node scripts/test-withdrawal.js",
     "test:usdt": "node scripts/test-usdt-deposit.js",
     "test:e2e": "node scripts/test-e2e-field.js",
-    "test:all": "npm run test:all:unit && npm run test:e2e",
+    "test:all": "npm run build && node scripts/run-tests.js && node scripts/test-e2e-field.js",
     "test:all:unit": "node scripts/run-tests.js",
     "test:engine": "node scripts/test-engine.js"
   },

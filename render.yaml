@@ -27,7 +27,28 @@ services:
     name: cubapoker-telegram-bot
     runtime: node
     plan: starter
-    buildCommand: npm install && npm run build && cd mini-app && npm install && npm run build
+    # ------------------------------------------------------------------
+# POR QUE `--include=dev` EN EL `npm install`, Y NO ES COSA ESTILISTICA
+#
+# El servicio corre con `NODE_ENV=production` (ver `envVars`), que es lo correcto: bloquea
+# el bypass de desarrollo y desactiva el polling. Y tiene un efecto secundario que rompia
+# el build entero:
+#
+#     Failed to load PostCSS config: Cannot find module 'tailwindcss'
+#
+# Con `NODE_ENV=production`, `npm install` se SALTA los `devDependencies`. Tailwind, PostCSS
+# y Autoprefixer viven ahi (son la herramienta con la que se compila la web, no codigo que
+# se ejecute), asi que no se instalaban y `vite build` moria.
+#
+# El fallo es engañoso: dice que falta un modulo, no que el flag de produccion lo salto. Y
+# deja el servicio sin interfaz: la API funciona, el bot habla con Telegram, y el Mini App no
+# existe. Justo los symptoms que parecen de configuracion de Telegram.
+#
+# `--include=dev` instala tambien los `devDependencies` durante el BUILD. No cambia nada de
+# lo que se ejecuta en produccion: `node dist/bot.js` no importa ni tailwind ni postcss, y
+# no se instalan en el contenedor final mas de lo que se instalan ahora.
+# ------------------------------------------------------------------
+buildCommand: npm install --include=dev && npm run build && cd mini-app && npm install --include=dev && npm run build
     startCommand: node dist/bot.js
     healthCheckPath: /health
     envVars:
