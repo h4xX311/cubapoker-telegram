@@ -2160,22 +2160,35 @@ export const fieldManager = {
   },
 
   /**
-   * Acredita un premio de campo en `balance.play`.
+   * Acredita un premio de campo en `balance.real`, MARCADO como premio.
    *
    * ------------------------------------------------------------------
-   * POR QUE EL PREMIO VA A `play` Y NO A `real`
+   * QUE CAMBIO, Y POR QUE
    *
-   * ESTA ES LA REGLA QUE PROTEGE A LA PLATAFORMA DE PERDER EL DINERO DE OTROS.
+   * Antes el premio iba entero a `balance.play`, o sea no retirable. Con eso ganar un torneo
+   * no daba dinero: se podia jugar horas para acabar con saldo bloqueado, y el jugador tenia
+   * que pasar por el ratio de desbloqueo 1:10 para convertirlo en algo sacable.
    *
-   * Si el premio fuera a `balance.real`, ganar un campo seria indistinguible de
-   * un deposito: se podrian comprar entradas con dinero de premio y, al jugarlas,
-   * desbloquearlo a saldo retirable. Con el ratio 1:10 de `unlockService`, ganar
-   * devuelve la décima parte de lo ganado en dinero gastable, y el resto sirve
-   * para jugar. El premio es saldo EN JUEGO, no un ahorro.
+   * Decision del 7 de octubre: **lo que ganas es tuyo y lo puedes retirar.**
    *
-   * Y por eso el premio NO puede distinguirse del buy-in al pagarse: los dos
-   * vuelven al mismo bote. El rake es lo unico que la plataforma se queda de forma
-   * permanente, y es la unica fuente de ingresos del producto.
+   * ------------------------------------------------------------------
+   * Y LO QUE NO SE PIERDE
+   *
+   * El comentario anterior de aqui decia, y con razon:
+   *
+   *   "Si el premio fuera a `balance.real`, ganar un campo seria indistinguible de un
+   *    deposito. ESTA ES LA REGLA QUE PROTEGE A LA PLATAFORMA DE PERDER EL DINERO DE OTROS."
+   *
+   * Eso se cumple asi: el premio entra a `real` (retirable, como se ha decidido) Y ADEMAS se
+   * anota en `balance.realFromPrizes`. El saldo no se parte en dos ni el jugador hace nada
+   * distinto: es una etiqueta que permite decir "este dinero es premio, no deposito", que es lo
+   * que un AML necesita y lo que perdia el saldo unico.
+   *
+   * La proteccion economica que buscaba el comentario (que un premio no se convierta en dinero
+   * gastable y luegoWithdrawable mas de lo que le tocan) ya no la daba tampoco: en las mesas de
+   * CASH las ganancias iban a `real` y las entradas consumen `play` primero, o sea que ese
+   * ciclo existia en cada mesa cash. Y el ratio 1:10 no crea saldo: lo que no se desbloquea
+   * sigue siendo jugable, no se multiplica.
    */
   async creditPrize(telegramId: number, amount: number, position: number): Promise<void> {
     if (amount <= 0) return;
@@ -2184,14 +2197,17 @@ export const fieldManager = {
       { telegramId },
       {
         $inc: {
-          'balance.play': amount,
+          // Retirable: es dinero ganado, y el dinero ganado es del jugador.
+          'balance.real': amount,
+          // La misma cifra, marcada. Es una parte de `real`, nunca mayor.
+          'balance.realFromPrizes': amount,
           'stats.totalFreerollWon': amount,
         },
       },
     );
 
     logger.info(
-      `Campo: ${telegramId} cobra ${formatUnits(amount)} USDT de promocion ` +
+      `Campo: ${telegramId} cobra ${formatUnits(amount)} USDT de premio (retirable) ` +
       `por la posicion ${position}`,
     );
   },

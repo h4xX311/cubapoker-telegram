@@ -547,6 +547,31 @@ export class PaymentService {
       );
     }
 
+    // ------------------------------------------------------------------
+    // LA PARTE MARCADA COMO PREMIO TAMBIEN BAJA
+    //
+    // Desde el 7 de octubre el premio de torneo entra al saldo retirable pero MARCADO, en
+    // `balance.realFromPrizes` (decision B, `DECISIONES.md`). Es la unica manera de que un AML
+    // pueda distinguir premio de deposito en el mismo saldo.
+    //
+    // Un retiro consume saldo real, asi que consume su parte marcada en la MISMA proporcion.
+    // Si solo bajara `real`, con el tiempo el campo acabaria marcando dinero que ya no esta en
+    // la cuenta, y por encima del saldo.
+    //
+    // El filtro sigue siendo la proteccion (`balance.real >= importe`), y `new: false` devuelve
+    // el documento ANTES de la actualizacion, que es justo el saldo sobre el que se calcula la
+    // proporcion. Una sola lectura y una sola escritura.
+    // ------------------------------------------------------------------
+    // Que parte del saldo era premio, ANTES de descontar. `premioQueSale` nunca es mas de lo que
+    // hay marcado, aunque la orden y el saldo no cuadren por lo que sea.
+    const saldoPrevio = await User.findOne({ telegramId: order.telegramId });
+    const marcadoPrevio = saldoPrevio?.balance?.realFromPrizes ?? 0;
+    const realPrevio = saldoPrevio?.balance?.real ?? 0;
+    const premioQueSale = Math.min(
+      marcadoPrevio,
+      Math.round((marcadoPrevio * debitUnits) / Math.max(1, realPrevio)),
+    );
+
     // El filtro es la proteccion: `balance.real >= importe`. Ademas evita el
     // doble cobro, porque el estado de la orden tambien se exige `pending` y solo
     // una de las dos aprobaciones concurrentes lo cumple.
@@ -555,7 +580,12 @@ export class PaymentService {
         telegramId: order.telegramId,
         'balance.real': { $gte: debitUnits },
       },
-      { $inc: { 'balance.real': -debitUnits } },
+      {
+        $inc: {
+          'balance.real': -debitUnits,
+          'balance.realFromPrizes': -premioQueSale,
+        },
+      },
       { new: false },
     );
 

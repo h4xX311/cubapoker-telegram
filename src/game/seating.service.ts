@@ -359,9 +359,38 @@ export class SeatingService {
       });
 
       if (aDevolver > 0) {
+        // El saldo ANTES de devolver, porque es la base de la proporcion: de lo que tiene,
+        // cuanto es premio. Se lee aqui y no dentro de la Actualizacion para que quede claro
+        // que es una operacion de lectura normal, no una expresion de Mongo.
+        const antesDeDevolver = await User.findOne({ telegramId });
+        const saldoAntes = antesDeDevolver?.balance?.real ?? 0;
+        const marcadoAntes = antesDeDevolver?.balance?.realFromPrizes ?? 0;
+
+        // Lo que sale de la parte marcada. Nunca mas de lo que hay marcado, aunque la mesa
+        // estuviera corrupta y devolviera mas de lo que el jugador tenia.
+        const premioQueSale = Math.min(
+          marcadoAntes,
+          Math.round((marcadoAntes * aDevolver) / Math.max(1, saldoAntes)),
+        );
+
         await User.updateOne(
           { telegramId },
-          { $inc: { 'balance.real': aDevolver } },
+          {
+          $inc: {
+            'balance.real': aDevolver,
+            // La parte marcada como premio baja en la MISMA proporcion.
+            //
+            // Sin esto, a los pocos ciclos `realFromPrizes` acabaria marcando dinero que el
+            // jugador ya no tiene, y acabaria por ser MAYOR que el saldo. El informe de
+            // "que es premio y que es deposito" es justo para lo que existe el campo, asi que
+            // un campo que miente es peor que no tenerlo.
+            //
+            // Proporcion: de `realFromPrizes` sobre `real` (antes de devolver). Si el
+            // jugador devuelve todo, no le queda nada de premio; si devuelve la mitad, la
+            // mitad. Nunca baja de cero.
+            'balance.realFromPrizes': -premioQueSale,
+          },
+        },
         );
       }
 

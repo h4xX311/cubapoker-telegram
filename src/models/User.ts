@@ -32,10 +32,33 @@ export interface IUser extends Document {
   chatId?: number;
 
   balance: {
-    /** CUP retirables (depositos) */
+    /** USDT retirables (depositos) */
     real: number;
-    /** CUP de promocion, no retirables (freerolls) */
+    /** USDT de promocion, no retirables (freerolls, bonuses) */
     play: number;
+    /**
+     * Parte de `real` que viene de PREMIOS, no de depositos.
+     *
+     * ------------------------------------------------------------------
+     * PARA QUE EXISTE
+     *
+     * Decision del 7 de octubre: **lo que se gana es del jugador y se puede retirar.** Antes
+     * el premio de un campo iba entero a `play`, con lo cual ganar un torneo no daba dinero
+     * retirable: se podia jugar mucho rato para acabar con saldo bloqueado.
+     *
+     * Pero premio y deposito no son lo mismo, y mezclarlos tiene consecuencias: un premio
+     * grande seria indistinguible de dinero entrante, que es justo lo que un AML mira. Y el
+     * propio codigo lo decia: "si el premio fuera a `balance.real`, ganar un campo seria
+     * indistinguible de un deposito".
+     *
+     * Con este campo se cumplen las dos cosas: el premio entra a `real` y se retira normal,
+     * y ademas queda marcado como premio. El saldo no se parte en dos ni el jugador tiene que
+     * hacer nada: es una etiqueta, no un saldo aparte.
+     *
+     * Nunca puede ser mayor que `real`: es una parte, no una cantidad independiente. Cuando
+     * el jugador gasta saldo, esta cifra baja en la misma proporcion.
+     */
+    realFromPrizes?: number;
   };
 
   /** Estadisticas agregadas para el perfil */
@@ -65,6 +88,10 @@ const userSchema = new Schema<IUser>({
   balance: {
     real: { type: Number, default: 0, min: 0 },
     play: { type: Number, default: 0, min: 0 },
+    // Parte de `real` que viene de premios. Ver el comentario de la interfaz: es una etiqueta
+    // para poder distinguir premio de deposito, no un saldo aparte. Por eso puede ser 0 y por
+    // eso vive DENTRO de `balance` y no al lado.
+    realFromPrizes: { type: Number, default: 0, min: 0 },
   },
 
   stats: {
