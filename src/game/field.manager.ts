@@ -99,6 +99,79 @@ export const markShuttingDown = (): void => {
   isShuttingDown = true;
 };
 
+// ======================================================================
+// CERROJO POR CAMPO
+//
+// ----------------------------------------------------------------------
+// POR QUE NO BASTABA EL INDICE UNICO
+//
+// El indice `un_campo_vivo_por_nivel` evita que se abran 18 campos a la vez. Eso esta bien,
+// pero NO arregla el bote, porque el problema no era abrir el campo: era escribir encima.
+//
+// Medido, con el indice ya puesto:
+//
+//     20 registros concurrentes  ->  1 solo campo, 0 errores   (antes: 18 campos)
+//     cobrado de las carteras       20.000
+//     dice el campo                    1.000
+//     DESAPARECIDO                 19.000 unidades
+//     waiting                        -13      sentados: 30
+//
+// Veinte llamadas a `register()` leen el MISMO documento, cada una suma 1000 con un `$inc`
+// (atomico, perfecto, base = 20000) y luego cada una llama a `trySeat()`, que acaba en
+// `field.save()`. Y `save()` escribe el documento entero con los valores que trae en memoria,
+// que son los de antes de los `$inc` de los demas.
+//
+// O sea: veinte `$inc` correctos y veinte `$set` equivocados. Gana el ultimo en escribir.
+//
+// ESTO ES DINERO QUE SE PIERDE, no que se invente. Al ganador se le paga un bote al que le
+// faltan 19.000 unidades, y la diferencia la pone la plataforma.
+//
+// ----------------------------------------------------------------------
+// EL ARREGLO
+//
+// Serializar `register()` por campo, igual que `TableManager.withTableLock` serializa por
+// mesa. Dentro del cerrojo el documento no lo puede tocar nadie mas, asi que el `$inc` y el
+// `save()` cuentan la misma version.
+//
+// La cola avanza aunque la operacion falle (`anterior.then(fn, fn)`), porque si no un error
+// deja el cerrojo envenenado y las siguientes registrations de ese campo cuelgan para
+// siempre. Y la entrada se borra cuando ya no queda nadie delante, para que el mapa no crezca
+// sin limite.
+//
+// LIMITE HONESTO, Y ESTE ES EL IMPORTANTE
+//
+// Esto es un cerrojo EN MEMORIA: serializa dentro de un proceso, no entre procesos. Render
+// corre `WEB_CONCURRENCY=1`, asi que mientras sea asi aguanta. Con dos instancias volveria a
+// pasar, y el indice unico no lo evita (el evita los campos duplicados, no las escrituras
+// perdidas). Para varios procesos haria falta un cerrojo en la base o un unico duenno de
+// las escrituras; se anota en DEPLOY.md como pendiente.
+// ======================================================================
+const fieldLocks = new Map<string, Promise<unknown>>();
+
+/**
+ * Ejecuta `fn` sin que nadie mas toque el mismo campo a la vez.
+ *
+ * La clave es el `tierId`, no el `fieldId`: al empezar un registro el campo todavia no esta
+ * elegido, y lo que se quiere serializar es "dos personas pulsando JUGAR en el mismo nivel".
+ */
+export async function withFieldLock<T>(tierId: string, fn: () => Promise<T>): Promise<T> {
+  const anterior = fieldLocks.get(tierId) ?? Promise.resolve();
+  const siguiente = anterior.then(fn, fn);
+
+  fieldLocks.set(
+    tierId,
+    siguiente.catch(() => undefined),
+  );
+
+  try {
+    return await siguiente;
+  } finally {
+    if (fieldLocks.get(tierId) === siguiente) {
+      fieldLocks.delete(tierId);
+    }
+  }
+}
+
 /**
  * Apagado del gestor de campos.
  *
@@ -178,28 +251,68 @@ export const fieldManager = {
 
     const fieldId = `cash-${tierId}-${Date.now().toString(36)}`;
 
-    const field = await Field.create({
-      fieldId,
-      kind: 'cash',
-      tierId,
-      status: 'filling',
-      buyInUnits: tier.buyInUnits,
-      targetField: tier.fieldSize,
-      waiting: 0,
-      seated: 0,
-      playersRemaining: 0,
-      paidPositionsLeft: PAID_POSITIONS,
-      plannedTables: tablesForField(tier.fieldSize),
-      tables: [],
-    });
+    // ------------------------------------------------------------------
+    // EL INDICE UNICO, Y POR QUE SE ABRE EN UN `for`
+    //
+    // Con dos registros a la vez los dos salen del `findOne` sin campo y los dos intentan
+    // crear. Antes los dos tenian exito y se abrian 18 campos de golpe, con 18.000
+    // unidades cobradas de mas por todo el boton de entrada.
+    //
+    // Ahora manda el indice `un_campo_vivo_por_nivel`: al segundo le salta E11000. Eso no
+    // es un problema que reintentar solo, es la senal de que el campo YA EXISTE, asi que
+    // se vuelve a buscar y se devuelve ese. Quien pierde la carrera no crea nada, no cobra
+    // a nadie y no rompe nada.
+    //
+    // Y el bucle son tres intentos por si dos caen en el mismo instante, que es posible.
+    // ------------------------------------------------------------------
+    for (let intento = 1; intento <= 3; intento++) {
+      try {
+        const field = await Field.create({
+          fieldId,
+          kind: 'cash',
+          tierId,
+          status: 'filling',
+          buyInUnits: tier.buyInUnits,
+          targetField: tier.fieldSize,
+          waiting: 0,
+          seated: 0,
+          playersRemaining: 0,
+          paidPositionsLeft: PAID_POSITIONS,
+          plannedTables: tablesForField(tier.fieldSize),
+          tables: [],
+        });
 
-    logger.info(
-      `Campo ${fieldId} abierto: ${tier.fieldSize} participantes, ` +
-      `bote bruto ${formatUnits(tier.buyInUnits * tier.fieldSize)} USDT, ` +
-      `${field.plannedTables} mesas de ${SEATS_PER_TABLE}`,
+        logger.info(
+          `Campo ${fieldId} abierto: ${tier.fieldSize} participantes, ` +
+          `bote bruto ${formatUnits(tier.buyInUnits * tier.fieldSize)} USDT, ` +
+          `${field.plannedTables} mesas de ${SEATS_PER_TABLE}`,
+        );
+
+        return field;
+      } catch (err: any) {
+        // No es el indice unico: es cualquier otra cosa, y no hay que disimularla.
+        if (err?.code !== 11000) throw err;
+
+        const ganador = await Field.findOne({
+          tierId,
+          status: { $in: ['filling', 'running', 'final'] },
+        });
+        if (!ganador) continue; // No se ve todavia. Raro, pero se reintenta.
+
+        logger.info(
+          `Campo ${fieldId}: otro registro abrio ${ganador.fieldId} primero. ` +
+          `Se entra ahi.`,
+        );
+        return ganador;
+      }
+    }
+
+    // Tres veces sin poder ver un campo vivo. No se puede registrar en un campo
+    // imaginario, y aquí tampoco: es preferible fallar a cobrar de mas.
+    throw new FieldError(
+      'No se pudo abrir el campo. Intentalo de nuevo en un momento.',
+      'FIELD_OPEN_FAILED',
     );
-
-    return field;
   },
 
   /**
@@ -213,6 +326,24 @@ export const fieldManager = {
    * que en las mesas cash.
    */
   async register(
+    telegramId: number,
+    tierId: TableTierId,
+    username?: string,
+  ): Promise<{ fieldId: string; position: number; seated: boolean }> {
+    // Todo el registro va en serie. Sin esto, veinte personas pulsando JUGAR a la vez
+    // comparten documento y el `save()` de una pisa el `$inc` de las otras: medido, el bote
+    // se quedaba en 1.000 de 20.000. Ver `withFieldLock` para el detalle.
+    return withFieldLock(tierId, () => this.registrarEnCampo(telegramId, tierId, username));
+  },
+
+  /**
+   * El cuerpo de `register()`, ya dentro del cerrojo.
+   *
+   * El cerrojo va por `tierId` y no por `fieldId` a proposito: al empezar, el campo todavia
+   * no esta elegido (lo elige `openField`), asi que un cerrojo por `fieldId` no impediria
+   * que dos registros a la vez se pelearan por abrirlo y por escribir en el.
+   */
+  async registrarEnCampo(
     telegramId: number,
     tierId: TableTierId,
     username?: string,
@@ -267,14 +398,60 @@ export const fieldManager = {
     queues.set(field.fieldId, queue);
 
     const position = queue.length;
-    const seated = await this.trySeat(field);
 
-    logger.info(
-      `Jugador ${telegramId} registrado en ${field.fieldId} ` +
-      `(cola #${position}, ${seated ? 'sentado' : 'en espera'})`,
-    );
+    // ------------------------------------------------------------------
+    // LA RED QUE NO EXISTIA: SI FALLA EL ASIENTO, EL DINERO VUELVE
+    //
+    // Medido con 20 registros simultaneos: 19 se sentaban y 1 reventaba con
+    // `E11000 duplicate key` al crear la mesa. Ese jugador ya habia pagado y no se sentaba en
+    // ninguna parte. **Cobro sin entrega.**
+    //
+    // El cobro va ANTES del asiento porque el asiento necesita las fichas. Pero en cuanto
+    // el cobro ha pasado, el jugador es deudor de la plataforma: o se sienta, o se le
+    // devuelve. Que no haya forma de cobrar y quedarse sin dar nada es exactamente el tipo
+    // de forgotura que no se ve leyendo, solo mirando el saldo de alguien despues.
+    //
+    // Aqui se deshace TODO lo hecho, en orden inverso, antes de propagar el error. Y el
+    // `catch` no se limita a capturar: si el `finally` de limpieza falla, no se come el
+    // error original, que es el que explica que paso.
+    // ------------------------------------------------------------------
+    try {
+      const seated = await this.trySeat(field);
 
-    return { fieldId: field.fieldId, position, seated };
+      logger.info(
+        `Jugador ${telegramId} registrado en ${field.fieldId} ` +
+        `(cola #${position}, ${seated ? 'sentado' : 'en espera'})`,
+      );
+
+      return { fieldId: field.fieldId, position, seated };
+    } catch (err) {
+      logger.error(
+        `Jugador ${telegramId}: cobro hecho pero el asiento fallo ` +
+        `(${err instanceof Error ? err.message : String(err)}). Se le devuelve el buy-in.`,
+      );
+
+      // 1. De la cola, para que no se siente a la mitad de la mano siguiente.
+      const cola = queues.get(field.fieldId) ?? [];
+      const i = cola.findIndex((p) => p.telegramId === telegramId);
+      if (i !== -1) {
+        cola.splice(i, 1);
+        queues.set(field.fieldId, cola);
+      }
+
+      // 2. De los contadores del campo. Sin esto el bote cuenta un buy-in que ya no esta
+      //    cobrado, y al pagar el premio se paga con dinero que no salio de nadie.
+      await Field.updateOne(
+        { _id: field._id },
+        { $inc: { waiting: -1, buyInsCollected: -tier.buyInUnits } },
+      );
+
+      // 3. A la cartera. Este es el que importa: si los dos anteriores fallan y este no,
+      //    el jugador conserva las fichas; si este falla, al menos queda registrado que se
+      //    le debia.
+      await this.refund(telegramId, tier.buyInUnits);
+
+      throw err;
+    }
   },
 
   /** Sale del campo y le devuelve el buy-in. Solo antes de empezar. */
@@ -547,7 +724,7 @@ export const fieldManager = {
     const tier = getTier(field.tierId as TableTierId)!;
     const tableId = `field-${field.fieldId}-t${tableNumber}`;
 
-    return Table.create({
+    const documento = {
       tableId,
       kind: 'cash',
       tierId: field.tierId,
@@ -578,7 +755,37 @@ export const fieldManager = {
         actingSeat: -1,
         dealerSeat: 0,
       },
-    });
+    };
+
+    // ------------------------------------------------------------------
+    // UPSERT, NO `create`
+    //
+    // Con veinte registros a la vez, veinte `trySeat()` se lanzan a la vez y todas
+    // intentan crear la mesa `t1`. Una gana y las otras dieciocho revientan con
+    // `E11000 duplicate key`... DESPUES de haber cobrado el buy-in.
+    //
+    // Ese era el agujero del que salia el "1 con error" del test: ese jugador habia pagado
+    // y no se sentaba en ninguna parte. Cobro sin entrega.
+    //
+    // Con `$setOnInsert` la mesa se crea una vez y las demas llamadas la recuperan tal cual.
+    // No es "reintentar hasta que salga": es que el resultado es el mismo llegue quien llegue.
+    //
+    // El `catch` del 11000 esta por si dos upserts se cruzan en el mismo instante, que Mongo
+    // si puede rechazar: en ese caso la mesa existe y solo hay que ir a buscarla.
+    // ------------------------------------------------------------------
+    try {
+      return await Table.findOneAndUpdate(
+        { tableId },
+        { $setOnInsert: documento },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+      ) as ITable;
+    } catch (err: any) {
+      if (err?.code !== 11000) throw err;
+
+      const yaExiste = await Table.findOne({ tableId });
+      if (!yaExiste) throw err;
+      return yaExiste;
+    }
   },
 
   /** Construye el asiento de un humano. */

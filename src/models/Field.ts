@@ -257,6 +257,38 @@ const fieldSchema = new Schema<IField>(
 fieldSchema.index({ kind: 1, status: 1, createdAt: 1 });
 fieldSchema.index({ status: 1, 'tables.tableId': 1 });
 
+// ----------------------------------------------------------------------
+// UN SOLO CAMPO ABIERTO POR NIVEL, GARANTIZADO POR LA BASE
+//
+// `openField()` era un check-then-act: `findOne` y si no hay ninguno, `create`. Dos
+// registros simultaneos leen ambos que no hay campo, y los dos crean uno. Medido:
+//
+//     20 registros concurrentes  ->  18 campos abiertos a la vez
+//     cobrado de las carteras       20.000 unidades
+//     dice el campo principal       2.000
+//     DESAPARECIDO                18.000 unidades
+//     waiting                       -1
+//
+// Y el `buyInsCollected: 3000` sin ningun deposito detras que se encontro en produccion
+// no era un numero de pruebas: eran tres registros concurrentes peleandose el mismo
+// campo, cada uno sumando mil, y el `field.save()` de uno pisando al otro.
+//
+// El indice unico parcial es lo unico que lo arregla de verdad: no es codigo que "se
+// acuerde" de no hacerlo, es que la base NO DEJA. Y aguanta varios procesos a la vez,
+// cosa que un cerrojo en memoria no.
+//
+// Solo aplica a los campos VIVOS (`filling`, `running`, `final`). Los terminados pueden
+// convivir cuantos se quiera, que es lo que se quiere: el historico.
+// ----------------------------------------------------------------------
+fieldSchema.index(
+  { tierId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { status: { $in: ['filling', 'running', 'final'] } },
+    name: 'un_campo_vivo_por_nivel',
+  },
+);
+
 export const Field = model<IField>('Field', fieldSchema);
 
 /** Vista publica del campo para la API y la UI. */

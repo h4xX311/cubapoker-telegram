@@ -19,7 +19,10 @@
     "test:all": "npm run build && node scripts/run-tests.js && node scripts/test-e2e-field.js",
     "test:all:unit": "node scripts/run-tests.js",
     "test:engine": "node scripts/test-engine.js",
-    "test:mano": "cd mini-app && npx tsx ../scripts/test-fuerza-mano.ts"
+    "test:mano": "cd mini-app && npx tsx ../scripts/test-fuerza-mano.ts",
+    "test:pote": "npm run build && node scripts/test-conservacion-pote.js",
+    "test:indices": "npm run build && node scripts/asegurar-indices.js",
+    "test:cancelar": "npm run build && node scripts/test-cancelar-campo.js"
   },
   "dependencies": {
     "@types/cors": "^2.8.16",

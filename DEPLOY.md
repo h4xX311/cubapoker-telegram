@@ -305,3 +305,24 @@ Si cambias el dominio o la `MINI_APP_URL`, repite el paso 6.2.
   agujero por el que cualquiera suplanta cualquier cuenta.
 - **No apuntes el `.env` de desarrollo a la base de producción.** Para desarrollo, una base
   aparte.
+- **No subas `WEB_CONCURRENCY` a 2.** Este es el mas importante de los cinco.
+
+  `withTableLock` (por mesa) y `withFieldLock` (por campo) son cerrojos **en memoria**: un
+  `Map` del proceso. Serializan escrituras **dentro** de una instancia, y no entre dos.
+
+  Por eso el servicio corre con una sola instancia. Con dos, dos registros simultaneos
+  pueden tocar el mismo documento a la vez y el `$inc` de uno se pierde bajo el `save()` del
+  otro. Medido: 20 registros concurrentes dejaron el bote del campo en **1.000 unidades de
+  20.000**, con 19.000 de jugadores dentro que no estaban en ninguna parte.
+
+  El indice unico `un_campo_vivo_por_nivel` **no** lo evita: ese indice impide abrir dos
+  campos del mismo nivel, que es otro fallo. Las escrituras perdidas son suyas.
+
+  Para mas de una instancia haria falta un cerrojo en la base de datos, o un unico duenno de
+  las escrituras (por ejemplo, que solo el bucle del motor escriba en el campo y las rutas
+  HTTP manden intenciones en vez de escribir). Es un cambio de arquitectura, no un flag.
+
+- **No quites el indice `un_campo_vivo_por_nivel`.** Es lo unico que impide que 20 personas
+  pulsando JUGAR a la vez abran 18 campos y cobren 18 veces. Si `scripts/asegurar-indices.js`
+  dice que no existe, el sistema sigue arrancando y parece que todo va bien, solo que ya
+  no. Correlo en cada despliegue.
