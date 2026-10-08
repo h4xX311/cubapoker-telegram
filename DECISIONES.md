@@ -79,3 +79,38 @@ jugador no sabe si está sentado ni cómo volver.
 **Las ciegas de los niveles.** Ahora la mesa es `5/10` con buy-in de 1 USDT: son 0,005/0,01
 USDT de ciegas, muy bajo para poker real. CoinPoker empieza en **1/2 USDT** con buy-in de
 ~100. Es una decisión de producto y de dinero, no técnica.
+
+---
+
+## 3 · Qué pasa con el dinero cuando un campo se cancela
+
+**Decisión del 7 de octubre.** Depende de si el campo tiene premio real:
+
+### Campo de práctica (sin premio real) → **A: recupera todo el mundo**
+
+Sentados y eliminados por igual.
+
+El campo no repartía nada real, así que no hay premio que respetar y nadie tiene por qué
+perder. Es un ensayo: si se interrumpe, no pasa nada.
+
+### Campo con premio real → **B: respeta el poker**
+
+- Los que **siguen sentados** recuperan su buy-in.
+- Los **eliminados no**: sus fichas ya fueron al bote.
+
+Es la regla de un torneo de verdad. Un jugador que sale eliminado en la calle 3 no puede
+quedar además con el buy-in intacto, porque el bote se quedaría corto y el premio se
+pagaría con dinero que no salió de él.
+
+### Por qué se decide por campo y no siempre igual
+
+Porque en el caso A **no hay nada en juego**. Regalar el dinero a todos en un torneo de
+práctica es lo correcto. Regalar el dinero a todos en un torneo con premio es fabricar dinero
+y la plataforma paga de su bolsillo.
+
+Que el campo diga cuál de los dos es, en el propio campo, y no lo que adivine el código.
+
+### Follow the rake
+
+Pendiente de decidir: el `rakeCollected` de un campo cancelado, ¿se queda la plataforma o se
+devuelve con las fichas? No se ha tocado.
