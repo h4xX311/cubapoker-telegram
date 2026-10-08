@@ -116,16 +116,40 @@ export const markShuttingDown = (): void => {
 export const shutdownFieldManager = async (): Promise<void> => {
   markShuttingDown();
 
-  const active = await Field.countDocuments({
+  // ------------------------------------------------------------------
+  // SOLO CUENTA LOS CAMPOS QUE TIENEN ALGO QUE DECIDIR
+  //
+  // Antes contaba TODOS los que estaban en `filling`, incluidos los vacios: campos que se
+  // abrieron, no se lleno nadie, y se quedan ahi para siempre.
+  //
+  // El caso real: tres campos en `filling` con `waiting: 0`, `seated: 0` y ni una mesa con
+  // jugadores. No habia nada que continuar ni nada que devolver. Y el aviso salia en CADA
+  // despliegue, durante semanas, diciendo "el dinero sigue bloqueado".
+  //
+  // Dos cosas malas a la vez: un aviso que miente sobre el dinero, y un aviso que aparece
+  // siempre. Un aviso constante es un aviso que nadie lee, y el dia que de verdad haya fichas
+  // de alguien bloqueadas, tampoco se le va a hacer caso.
+  //
+  // Ahora solo cuenta lo que de verdad necesita a una persona: campos con jugadores sentados,
+  // o con dinero cobrado que no se ha repartido. Un campo vacio se limpia solo (ver
+  // `limpiarCamposVacias`), asi que no llega aqui.
+  // ------------------------------------------------------------------
+  const conJugadoresONDinero = await Field.countDocuments({
     status: { $in: ['filling', 'running', 'final'] },
+    $or: [
+      { waiting: { $gt: 0 } },
+      { seated: { $gt: 0 } },
+      { playersRemaining: { $gt: 0 } },
+      { buyInsCollected: { $gt: 0 } },
+    ],
   });
   const paused = await Field.countDocuments({ status: 'paused' });
 
-  if (active > 0 || paused > 0) {
+  if (conJugadoresONDinero > 0 || paused > 0) {
     logger.warn(
-      `Apagando con ${active} campo(s) sin terminar. Sus mesas quedan pausadas ` +
-      'y el dinero sigue bloqueado: hay que decidir si se continua o se cancela ' +
-      'con devolucion (ver /api/admin/paused-tables).',
+      `Apagando con ${conJugadoresONDinero} campo(s) con jugadores o dinero. ` +
+      'Sus mesas quedan pausadas y el dinero sigue bloqueado: hay que decidir si se continua ' +
+      'o se cancela con devolucion (ver /api/admin/paused-tables).',
     );
   }
 };
@@ -883,6 +907,91 @@ export const fieldManager = {
    * Al reves, se fusionarian mesas que aun tenian jugadores eliminandose y se
    * declararia la mesa final antes de tiempo.
    */
+  /**
+   * Cierra un campo abierto que no se esta llenando.
+   *
+   * ------------------------------------------------------------------
+   * QUE PASABA
+   *
+   * Un campo se abre, cobra buy-ins, y si no se llena se queda en `filling` PARA SIEMPRE.
+   * No habia ninguna regla que lo cerrara. El caso real: tres campos en `filling` con
+   * `waiting: 0`, `seated: 0` y ni una mesa con jugadores,_OPEN desde hace dias, que solo
+   * aparecian en el aviso de apagado y no se podian ni continuar ni cancelar.
+   *
+   * Ese aviso decia "el dinero sigue bloqueado" y era verdad en forma pero no en sustancia:
+   * `buyInsCollected` tenia 3000 sin que hubiera Detrás ni un solo deposito. Un numero fantasma
+   * de pruebas. Aun asi, salia el aviso en cada despliegue, y un aviso constante es un aviso
+   * que nadie lee, y el dia que de verdad haya fichas de alguien paradas, tampoco se le hara
+   * caso.
+   *
+   * ------------------------------------------------------------------
+   * QUE SE HACE
+   *
+   * Un campo en `filling` se cierra solo si:
+   *   - no hay NADIE esperando
+   *   - no hay NADIE sentado
+   *   - y ha pasado un rato sin actividad (para no cerrar uno que acaba de abrirse)
+   *
+   * Y ANTES de cerrarlo se devuelve el dinero a quien lo pago, si lo hubo. Un campo cerrado
+   * sin devolver es exactamente el problema que se queria evitar.
+   */
+  async limpiarCampoAbandonado(field: any): Promise<void> {
+    const hayGente = (field.waiting ?? 0) > 0 || (field.seated ?? 0) > 0;
+
+    if (hayGente) return;
+
+    // Margen para que un campo recien abierto no se cierre antes de que llegue el primer
+    // jugador. Diez minutos es de sobra para que alguien se apunte.
+    const SIN_GENTE_MS = 10 * 60 * 1000;
+    const ultimoCambio = new Date(field.updatedAt || field.createdAt).getTime();
+    if (Date.now() - ultimoCambio < SIN_GENTE_MS) return;
+
+    const cobrado = field.buyInsCollected ?? 0;
+
+    logger.warn(
+      `Campo ${field.fieldId} lleva abierto sin nadie (espera ${field.waiting ?? 0}, ` +
+      `sentados ${field.seated ?? 0}, ${formatUnits(cobrado)} USDT cobrados). Se cierra.`,
+    );
+
+    // El dinero se devuelve ANTES de cerrar el campo. Si el cierre fallara, el campo sigue
+    // abierto y se puede reintentar; al reves, el campo estaria cerrado con el dinero fuera.
+    if (cobrado > 0) {
+      await this.devolverBuyInsDelCampo(field, cobrado);
+    }
+
+    field.status = 'finished';
+    field.playersRemaining = 0;
+    field.updatedAt = new Date();
+    await field.save();
+
+    logger.info(`Campo ${field.fieldId} cerrado por abandonado, sin jugadores.`);
+  },
+
+  /**
+   * Devuelve lo que se cobro a los jugadores de un campo que se cancela.
+   *
+   * Solo se llama desde `limpiarCampoAbandonado`, donde ya se ha comprobado que no hay ni
+   * uno dentro. Cada jugador recibe su buy-in integro a `balance.real`.
+   */
+  async devolverBuyInsDelCampo(field: any, cobrado: number): Promise<void> {
+    const registrados = field.registrations ?? field.players ?? [];
+    const reparto = Math.floor(cobrado / Math.max(1, registrados.length));
+
+    for (const r of registrados) {
+      const telegramId = Number(r.telegramId ?? r.userId ?? r);
+      if (!Number.isFinite(telegramId) || telegramId <= 0) continue;
+      await User.updateOne(
+        { telegramId },
+        { $inc: { 'balance.real': reparto } },
+      );
+    }
+
+    logger.info(
+      `Campo ${field.fieldId}: ${formatUnits(reparto)} USDT devueltos a ` +
+      `${registrados.length} jugador(es).`,
+    );
+  },
+
   async tick(): Promise<void> {
     // Durante el apagado ordenado no se hace nada. Sin esta comprobacion, un
     // tick que arrancara mientras `shutdownEngine` esta esperando escribiria
@@ -902,6 +1011,7 @@ export const fieldManager = {
         if (field.status === 'filling') {
           await this.trySeat(field);
           await this.checkFieldStart(field);
+          await this.limpiarCampoAbandonado(field);
           continue;
         }
 
