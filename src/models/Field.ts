@@ -42,7 +42,16 @@ export type FieldStatus =
   /** Queda una sola mesa: es la final. */
   | 'final'
   /** Liquidado. El premio esta repartido. */
-  | 'finished';
+  | 'finished'
+  /**
+   * Cancelado antes de terminar. El dinero se devolvio segun la regla de `DECISIONES.md`.
+   *
+   * Es distinto de `finished` a proposito: en `finished` hubo un ganador y se pago un premio;
+   * en `cancelled` se devolvieron buy-ins y nadie gano. Mezclarlos haria que el informe
+   * contara como "campos jugados" unos que no se jugaron, y que la conciliacion buscara un
+   * premio que no existe.
+   */
+  | 'cancelled';
 
 export interface IField extends Document {
   /** Identificador del campo, como `cash-t500-a7f3k2` */
@@ -160,8 +169,56 @@ export interface IField extends Document {
   /** Resultados del reparto, para el informe y para "mis premios". */
   results?: FieldResult[];
 
+  /**
+   * QUIEN PAGO, Y POR CUANTO.
+   *
+   * ------------------------------------------------------------------
+   * POR QUE EXISTE ESTO
+   *
+   * `register()` cobraba el buy-in y subia un contador:
+   *
+   *     await this.chargeBuyIn(telegramId, buyIn);
+   *     await Field.updateOne({_id}, { $inc: { waiting: 1, buyInsCollected: buyIn } });
+   *
+   * Un contador no tiene dueno. Cuando el campo se cancelaba no habia a quien devolverle
+   * nada, porque el documento no guardaba ni un solo `telegramId`.
+   *
+   * Medido: tres jugadores, 3.000 unidades cobradas, campo cancelado, **0 devueltas**.
+   *
+   * Y peor: el contador se podia subir sin que hubiera nadie detras. El campo
+   * `cash-t1-muwyjj37` tenia `buyInsCollected: 3000` y ningun deposito que lo explicara.
+   *
+   * Aqui se anota cada cobro con su `telegramId`. `buyInsCollected` sigue siendo la suma,
+   * pero deja de ser la unica verdad: si los dos no cuadran, es que hay un fallo, y el
+   * proximo test lo dira con el numero.
+   */
+  registrations: FieldRegistration[];
+
   createdAt: Date;
   updatedAt: Date;
+}
+
+/**
+ * Una entrada cobrada del campo.
+ *
+ * El `status` es lo que hace posible la regla de devolucion que se decidio en
+ * `DECISIONES.md`:
+ *
+ *   - `waiting`    apuntado, aun sin asiento
+ *   - `seated`     jugando
+ *   - `eliminated` sus fichas fueron al bote; NO se le devuelve si el campo tiene premio real
+ *   - `refunded`   ya se le devolvio el buy-in
+ *
+ * Sin este estado no se puede aplicar la regla B: habria que adivinar quien sigue vivo
+ * mirando las mesas, y un jugador puede estar entre dos mesas durante una fusion.
+ */
+export interface FieldRegistration {
+  telegramId: number;
+  username?: string;
+  /** Lo que pago, en unidades internas. Se guarda aparte por si el buy-in cambia. */
+  buyIn: number;
+  status: 'waiting' | 'seated' | 'eliminated' | 'refunded';
+  at: Date;
 }
 
 /** Referencia a una mesa del campo. */
@@ -212,6 +269,21 @@ const fieldResultSchema = new Schema<FieldResult>(
   { _id: false },
 );
 
+const fieldRegistrationSchema = new Schema<FieldRegistration>(
+  {
+    telegramId: { type: Number, required: true },
+    username: String,
+    buyIn: { type: Number, required: true },
+    status: {
+      type: String,
+      enum: ['waiting', 'seated', 'eliminated', 'refunded'],
+      default: 'waiting',
+    },
+    at: { type: Date, default: Date.now },
+  },
+  { _id: false },
+);
+
 const fieldSchema = new Schema<IField>(
   {
     fieldId: { type: String, required: true, unique: true, index: true },
@@ -222,7 +294,7 @@ const fieldSchema = new Schema<IField>(
 
     status: {
       type: String,
-      enum: ['filling', 'running', 'final', 'finished'],
+      enum: ['filling', 'running', 'final', 'finished', 'cancelled'],
       default: 'filling',
       index: true,
     },
@@ -248,6 +320,9 @@ const fieldSchema = new Schema<IField>(
     finishedAt: Date,
 
     results: { type: [fieldResultSchema], default: [] },
+
+    // Quien pago. Sin esto no se puede devolver un campo cancelado (ver `FieldRegistration`).
+    registrations: { type: [fieldRegistrationSchema], default: [] },
   },
   { timestamps: true },
 );

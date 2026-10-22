@@ -386,10 +386,45 @@ export const fieldManager = {
       );
     }
 
-    await Field.updateOne(
-      { _id: field._id },
-      { $inc: { waiting: 1, buyInsCollected: tier.buyInUnits } },
-    );
+    // ------------------------------------------------------------------
+    // EL COBRO Y LA ANOTACION, EN LA MISMA ESCRITURA
+    //
+    // Antes esto era solo un `$inc`: subia un contador sin dejar constancia de quien habia
+    // pagado. Cuando habia que devolver, no habia a quien.
+    //
+    // Ahora el `$push` va en el mismo `updateOne`. No es cosmetico: una sola operacion sobre
+    // un documento es atomica, asi que o quedan los dos (contador y persona) o no queda
+    // ninguno. Con dos escrituras separadas se puede cobrar y no anotar, que es exactamente
+    // el estado del que salio el `3000` sin dueno.
+    //
+    // Si esta escritura falla, el `catch` de abajo devuelve el dinero. Un jugador nunca se
+    // queda con el buy-in cobrado y sin entrada.
+    // ------------------------------------------------------------------
+    try {
+      await Field.updateOne(
+        { _id: field._id },
+        {
+          $inc: { waiting: 1, buyInsCollected: tier.buyInUnits },
+          $push: {
+            registrations: {
+              telegramId,
+              username,
+              buyIn: tier.buyInUnits,
+              status: 'waiting',
+              at: new Date(),
+            },
+          },
+        },
+      );
+    } catch (err) {
+      logger.error(
+        `Jugador ${telegramId}: se cobro el buy-in pero no se pudo anotar en el campo ` +
+        `${field.fieldId}. Se le devuelve.`,
+      );
+      await this.refund(telegramId, tier.buyInUnits);
+      throw err;
+    }
+
     field.waiting += 1;
     field.buyInsCollected += tier.buyInUnits;
 
@@ -438,11 +473,16 @@ export const fieldManager = {
         queues.set(field.fieldId, cola);
       }
 
-      // 2. De los contadores del campo. Sin esto el bote cuenta un buy-in que ya no esta
-      //    cobrado, y al pagar el premio se paga con dinero que no salio de nadie.
+      // 2. De los contadores del campo Y de la lista de registrados. Sin lo primero el bote
+      //    cuenta un buy-in que ya no esta cobrado, y al pagar el premio se paga con dinero
+      //    que no salio de nadie. Sin lo segundo, el campo cree que le debe una entrada a
+      //    alguien a quien ya se le devolvio, y una cancelacion le pagaria dos veces.
       await Field.updateOne(
         { _id: field._id },
-        { $inc: { waiting: -1, buyInsCollected: -tier.buyInUnits } },
+        {
+          $inc: { waiting: -1, buyInsCollected: -tier.buyInUnits },
+          $pull: { registrations: { telegramId } },
+        },
       );
 
       // 3. A la cartera. Este es el que importa: si los dos anteriores fallan y este no,
@@ -537,6 +577,21 @@ export const fieldManager = {
 
     // Lo que no llego a jugar esta integro: se devuelve entero.
     await this.refund(telegramId, field.buyInUnits);
+
+    // ------------------------------------------------------------------
+    // Y SE ANOTA QUE YA SE LE DEVOLVIO
+    //
+    // Sin esto, la entrada sigue en `registrations` como si estuviera viva. Si luego se
+    // cancelara el campo, `cancelarCampo` veria a este jugador, le volveria a pagar el
+    // buy-in, y le habria devuelto el dinero DOS VECES: una al salir y otra al cancelar.
+    //
+    // Se marca `refunded` en vez de borrarla para que quede el rastro de que paso. Un
+    // documento que dice "a este se le devolvio el 8 de octubre" vale mas que un hueco.
+    // ------------------------------------------------------------------
+    await Field.updateOne(
+      { _id: field._id, 'registrations.telegramId': telegramId },
+      { $set: { 'registrations.$.status': 'refunded' } },
+    );
 
     if (soltado.modifiedCount > 0) {
       logger.info(
@@ -666,6 +721,16 @@ export const fieldManager = {
         await Field.updateOne(
           { _id: field._id },
           { $inc: { waiting: -1, seated: 1, playersRemaining: 1 } },
+        );
+
+        // La entrada pasa a `seated`. Va en un `updateOne` aparte y NO en el de arriba a
+        // proposito: si se juntaran, el filtro tendria que incluir
+        // `registrations.telegramId`, y entonces un campo antiguo sin `registrations` no
+        // cuadraria contadores nunca. Los contadores van siempre; la anotacion, si existe
+        // la entrada.
+        await Field.updateOne(
+          { _id: field._id, 'registrations.telegramId': player.telegramId },
+          { $set: { 'registrations.$.status': 'seated' } },
         );
 
         // ------------------------------------------------------------------
@@ -1153,50 +1218,210 @@ export const fieldManager = {
     const ultimoCambio = new Date(field.updatedAt || field.createdAt).getTime();
     if (Date.now() - ultimoCambio < SIN_GENTE_MS) return;
 
-    const cobrado = field.buyInsCollected ?? 0;
-
     logger.warn(
       `Campo ${field.fieldId} lleva abierto sin nadie (espera ${field.waiting ?? 0}, ` +
-      `sentados ${field.seated ?? 0}, ${formatUnits(cobrado)} USDT cobrados). Se cierra.`,
+      `sentados ${field.seated ?? 0}, ${formatUnits(field.buyInsCollected ?? 0)} USDT ` +
+      'cobrados). Se cancela y se devuelve.',
     );
 
-    // El dinero se devuelve ANTES de cerrar el campo. Si el cierre fallara, el campo sigue
-    // abierto y se puede reintentar; al reves, el campo estaria cerrado con el dinero fuera.
-    if (cobrado > 0) {
-      await this.devolverBuyInsDelCampo(field, cobrado);
-    }
-
-    field.status = 'finished';
-    field.playersRemaining = 0;
-    field.updatedAt = new Date();
-    await field.save();
-
-    logger.info(`Campo ${field.fieldId} cerrado por abandonado, sin jugadores.`);
+    // Sin nadie dentro, la politica da igual: todos los que pagaron son "vivos". Se usa la
+    // misma funcion que la cancelacion manual para que haya UN SOLO camino que devuelve
+    // dinero. Dos caminos distintos para devolver es como se acaba devolviendo dos veces.
+    await this.cancelarCampo(field.fieldId, { politica: 'todos', motivo: 'abandonado' });
   },
 
   /**
-   * Devuelve lo que se cobro a los jugadores de un campo que se cancela.
+   * CANCELA UN CAMPO Y DEVUELVE EL DINERO.
    *
-   * Solo se llama desde `limpiarCampoAbandonado`, donde ya se ha comprobado que no hay ni
-   * uno dentro. Cada jugador recibe su buy-in integro a `balance.real`.
+   * ------------------------------------------------------------------
+   * LA REGLA, QUE ESTA DECIDIDA EN `DECISIONES.md`
+   *
+   *   'todos'      (A)  Devuelve el buy-in a TODO el que pago, siga sentado o eliminado.
+   *                     Es para campos de practica, donde no habia nada en juego.
+   *
+   *   'soloVivos'  (B)  Devuelve solo a los que NO fueron eliminados. Los eliminados no
+   *                     recuperan nada: sus fichas ya fueron al bote.
+   *
+   * Por defecto se usa 'soloVivos' si el campo tiene buy-in, porque es la que NO fabrica
+   * dinero. Devolver el buy-in a un eliminado en un campo con premio real es pagar dos veces
+   * con dinero que no salio de el.
+   *
+   * ------------------------------------------------------------------
+   * POR QUE ES RESUMIBLE
+   *
+   * Cada devolucion se marca con `registrations.$.status = 'refunded'` ANTES de acreditar.
+   * Si el proceso se cae a la mitad, al volver a llamar los ya devueltos se saltan y los que
+   * faltan se pagan. Una cancelacion a medias no deja a nadie sin su dinero para siempre.
+   *
+   * Se marca antes y no despues a proposito: si se acreditara primero y se marcara despues,
+   * un fallo entre las dos escrituras haria que el reintento pagara otra vez. Pagar dos veces
+   * es peor que pagar tarde, y el reintento lo arregla.
    */
-  async devolverBuyInsDelCampo(field: any, cobrado: number): Promise<void> {
-    const registrados = field.registrations ?? field.players ?? [];
-    const reparto = Math.floor(cobrado / Math.max(1, registrados.length));
+  async cancelarCampo(
+    fieldId: string,
+    opciones: {
+      politica?: 'todos' | 'soloVivos';
+      motivo?: string;
+      /** Para que un operador pueda forzar la cancelacion de un campo ya cerrado. */
+      forzar?: boolean;
+    } = {},
+  ): Promise<{
+    cancelado: boolean;
+    yaEstaba: boolean;
+    devuelto: number;
+    jugadores: number;
+    retenido: number;
+  }> {
+    const field = await Field.findOne({ fieldId });
+    if (!field) {
+      throw new FieldError('Campo no encontrado', 'NOT_FOUND');
+    }
 
-    for (const r of registrados) {
-      const telegramId = Number(r.telegramId ?? r.userId ?? r);
-      if (!Number.isFinite(telegramId) || telegramId <= 0) continue;
-      await User.updateOne(
-        { telegramId },
-        { $inc: { 'balance.real': reparto } },
+    // ------------------------------------------------------------------
+    // UN CAMPO TERMINADO NO SE CANCELA
+    //
+    // Si ya se repartio el premio, devolver ademas los buy-ins seria pagar dos veces. Y si
+    // ya estaba cancelado, la segunda llamada no debe mover nada (es lo que hace que el
+    // boton del panel se pueda pulsar dos veces sin miedo).
+    // ------------------------------------------------------------------
+    if (field.status === 'finished' && !opciones.forzar) {
+      throw new FieldError(
+        'Ese campo ya termino y el premio esta repartido: no se puede cancelar.',
+        'FIELD_FINISHED',
       );
     }
 
-    logger.info(
-      `Campo ${field.fieldId}: ${formatUnits(reparto)} USDT devueltos a ` +
-      `${registrados.length} jugador(es).`,
+    if (field.status === 'cancelled') {
+      return { cancelado: false, yaEstaba: true, devuelto: 0, jugadores: 0, retenido: 0 };
+    }
+
+    const politica =
+      opciones.politica ?? (field.kind === 'cash' ? 'soloVivos' : 'todos');
+
+    // Se relee la lista de registrados. Puede haber cambiado desde el `findOne`.
+    const actual = await Field.findById(field._id);
+    const registros = (actual?.registrations ?? []) as Array<{
+      telegramId: number;
+      buyIn: number;
+      status: string;
+    }>;
+
+    // Quien cobra, agrupado por jugador. Agrupado y no por entrada suelta porque un jugador
+    // con dos entradas (un fallo que no deberia pasar) tiene derecho a las dos, y pagar una
+    // sola seria quedarse con dinero suyo.
+    const aDevolver = new Map<number, number>();
+
+    for (const r of registros) {
+      if (r.status === 'refunded') continue;
+      if (politica === 'soloVivos' && r.status === 'eliminated') continue;
+
+      aDevolver.set(r.telegramId, (aDevolver.get(r.telegramId) ?? 0) + (r.buyIn ?? 0));
+    }
+
+    const totalARecibir = [...aDevolver.values()].reduce((s, n) => s + n, 0);
+    const totalCobrado = registros.reduce((s, r) => s + (r.buyIn ?? 0), 0);
+
+    logger.warn(
+      `Campo ${fieldId}: CANCELACION. Politica '${politica}' ` +
+      `(${opciones.motivo ?? 'manual'}). Se devuelven ${formatUnits(totalARecibir)} USDT a ` +
+      `${aDevolver.size} jugador(es); se retienen ${formatUnits(totalCobrado - totalARecibir)}.`,
     );
+
+    let devueltos = 0;
+    let jugadores = 0;
+
+    for (const [telegramId, importe] of aDevolver) {
+      if (importe <= 0) continue;
+
+      // 1. Se reclama la devolucion. Solo la gana quien pasa de no-refunded a refunded, asi
+      //    que dos procesos a la vez no pueden pagar dos veces al mismo jugador.
+      const claim = await Field.updateOne(
+        { _id: field._id },
+        { $set: { 'registrations.$[r].status': 'refunded' } },
+        {
+          arrayFilters: [
+            { 'r.telegramId': telegramId, 'r.status': { $ne: 'refunded' } },
+          ],
+        },
+      );
+
+      if (claim.modifiedCount === 0 && claim.matchedCount === 0) {
+        logger.error(
+          `Campo ${fieldId}: no se pudo reclamar la devolucion de ${telegramId}. ` +
+          'Se salta para no pagar a ciegas.',
+        );
+        continue;
+      }
+
+      if (claim.modifiedCount === 0) continue; // Ya estaba devuelto.
+
+      // 2. Se acredita. Si esto falla, se deshace la marca para que el reintento lo coja.
+      try {
+        await User.updateOne(
+          { telegramId },
+          { $inc: { 'balance.real': importe } },
+        );
+      } catch (err) {
+        await Field.updateOne(
+          { _id: field._id },
+          { $set: { 'registrations.$[r].status': 'seated' } },
+          { arrayFilters: [{ 'r.telegramId': telegramId, 'r.status': 'refunded' }] },
+        );
+        logger.error(
+          `Campo ${fieldId}: fallo al acreditar ${importe} a ${telegramId}. ` +
+          'Se deshace la marca; la cancelacion se puede reintentar.',
+        );
+        throw err;
+      }
+
+      devueltos += importe;
+      jugadores++;
+    }
+
+    // ------------------------------------------------------------------
+    // EL CAMPO QUEDA CERRADO
+    //
+    // `buyInsCollected` se deja en lo que NO se ha devuelto: es el dinero que la plataforma
+    // retiene de este campo (los buy-ins de los eliminados, en la politica B). Asi el saldo
+    // del campo sigue significando "dinero que tengo de aqui", que es lo que comprueba la
+    // conciliacion.
+    // ------------------------------------------------------------------
+    const retenido = totalCobrado - totalARecibir;
+
+    await Field.updateOne(
+      { _id: field._id },
+      {
+        $set: {
+          status: 'cancelled',
+          playersRemaining: 0,
+          waiting: 0,
+          seated: 0,
+          buyInsCollected: retenido,
+          finishedAt: new Date(),
+        },
+      },
+    );
+
+    logger.warn(
+      `Campo ${fieldId}: cancelado. ${formatUnits(devueltos)} USDT devueltos a ` +
+      `${jugadores} jugador(es). Retenido: ${formatUnits(retenido)} USDT.`,
+    );
+
+    if ((field.rakeCollected ?? 0) > 0) {
+      logger.warn(
+        `Campo ${fieldId}: cancelado con ${formatUnits(field.rakeCollected)} USDT de rake ya ` +
+        'contabilizado. NO se ha tocado: falta decidir si en un campo cancelado el rake se ' +
+        'devuelve o se queda (ver DECISIONES.md).',
+      );
+    }
+
+    return {
+      cancelado: true,
+      yaEstaba: false,
+      devuelto: devueltos,
+      jugadores,
+      retenido,
+    };
   },
 
   async tick(): Promise<void> {
@@ -1490,6 +1715,21 @@ export const fieldManager = {
           );
           continue;
         }
+
+        // ------------------------------------------------------------------
+        // LA ENTRADA QUEDA MARCADA COMO ELIMINADA
+        //
+        // Es lo que permite aplicar la regla B de `DECISIONES.md` al cancelar un campo con
+        // premio real: los que siguen vivos recuperan su buy-in, y los eliminados no,
+        // porque sus fichas ya fueron al bote.
+        //
+        // Sin esta marca habria que adivinar quien sigue vivo mirando las mesas, y durante
+        // una fusion un jugador puede no estar en ninguna o estar en dos.
+        // ------------------------------------------------------------------
+        await Field.updateOne(
+          { _id: field._id, 'registrations.telegramId': telegramId },
+          { $set: { 'registrations.$.status': 'eliminated' } },
+        );
 
         // ------------------------------------------------------------------
         // LAS FICHAS DEL ELIMINADO NO VUELVEN A SU CARTERA
