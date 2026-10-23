@@ -169,12 +169,17 @@ export const api = {
     request<any>('/game/stand', { method: 'POST', body: { tableId } }),
   myTable: () => request<{ tableId: string | null }>('/game/my-table'),
 
-  // Freerolls
+  // Freerolls horarios (campo multi-mesa, gratis)
   freerolls: () => request<any>('/game/freerolls'),
-  joinFreeroll: (prizeTier: number, freerollId?: string) =>
-    request<any>('/game/freerolls/join', {
+  registerFreeroll: (fieldId?: string) =>
+    request<any>('/game/freerolls/register', {
       method: 'POST',
-      body: { prizeTier, freerollId },
+      body: { fieldId },
+    }),
+  leaveFreeroll: (fieldId: string) =>
+    request<any>('/game/freerolls/leave', {
+      method: 'POST',
+      body: { fieldId },
     }),
 
   // Centrolls: buy-in de saldo real, premio en fichas de promocion

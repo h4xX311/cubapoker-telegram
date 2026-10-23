@@ -1,174 +1,134 @@
-import { useState, useEffect } from 'react';
-import { api, ApiError } from '../lib/api';
+import type { Page } from '../lib/types';
 import { PageHeader, SectionLabel } from '../components/Layout';
 
 interface Props {
-  user: any;
   onBack: () => void;
-  onBalanceChange?: () => void | Promise<any>;
+  onNavigate: (page: Page) => void;
 }
 
-const TYPE_META: Record<string, { icon: string; label: string }> = {
-  sit_and_go: { icon: '⚡', label: 'Sit & Go' },
-  scheduled: { icon: '📅', label: 'Programado' },
-  freeroll: { icon: '🎁', label: 'Gratis' },
-};
-
-export function Tournaments({ user, onBack, onBalanceChange }: Props) {
-  const [tournaments, setTournaments] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const [notice, setNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
-
-  const load = async () => {
-    try {
-      const res = await api.tournaments();
-      setTournaments(res.tournaments || []);
-    } catch {
-      setTournaments([]);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    load();
-  }, []);
-
-  const register = async (id: string) => {
-    setBusyId(id);
-    setNotice(null);
-    try {
-      await api.registerTournament(id);
-      setNotice({ type: 'ok', text: 'Te registraste. Te avisaremos cuando empiece.' });
-      await onBalanceChange?.();
-      await load();
-    } catch (err) {
-      setNotice({
-        type: 'err',
-        text: err instanceof ApiError ? err.message : 'No se pudo completar el registro.',
-      });
-    } finally {
-      setBusyId(null);
-    }
-  };
-
+/**
+ * TORNEOS
+ * =======
+ *
+ * ------------------------------------------------------------------
+ * POR QUE ESTA PANTALLA YA NO PIDE DATOS
+ *
+ * Antes llamaba a `GET /game/tournaments`, una ruta que no existe. El `fetch` devolvia el
+ * HTML del 404, el `catch` lo convertia en una lista vacia y la pagina quedaba en "No hay
+ * torneos abiertos" para siempre. No era un fallo visible: parecia que no habia torneos.
+ *
+ * Mientras no exista el producto de torneos con buy-in, esta pantalla no debe fingir que
+ * consulta algo. Muestra lo que SI se puede jugar hoy (freerolls y centroll) y dice con
+ * claridad que lo demas esta por llegar. Una promesa vacia cuesta mas que una ausencia
+ * honesta.
+ * ------------------------------------------------------------------
+ */
+export function Tournaments({ onBack, onNavigate }: Props) {
   return (
     <div className="p-4 pb-10 animate-fadeIn">
       <PageHeader title="Torneos" onBack={onBack} />
 
-      {loading ? (
-        <div className="text-center py-12">
-          <div className="spinner mx-auto mb-3" />
-          <p className="text-sm text-[#a0a0b0]">Cargando torneos…</p>
+      <div
+        className="rounded-2xl p-4 mb-5"
+        style={{
+          background:
+            'linear-gradient(135deg, rgba(155,89,182,0.16) 0%, rgba(15,15,26,0.6) 100%)',
+          border: '1px solid rgba(155,89,182,0.35)',
+        }}
+      >
+        <p className="text-sm font-bold text-white mb-1">
+          Torneos multi-mesa, 7 por mesa
+        </p>
+        <p className="text-xs text-[#a0a0b0] leading-relaxed">
+          Los jugadores se reparten en mesas de 7 y las mesas se fusionan hasta
+          la final. Las ciegas suben por niveles y el premio se reparte entre las
+          últimas posiciones.
+        </p>
+      </div>
+
+      <SectionLabel>Disponible ahora</SectionLabel>
+
+      <div className="space-y-2.5 mb-6">
+        <button
+          onClick={() => onNavigate('freeroll')}
+          className="card w-full flex items-center gap-4 text-left hover:border-[#ffd700] transition-all"
+        >
+          <div
+            className="w-12 h-12 rounded-xl flex items-center justify-center shrink-0 text-xl"
+            style={{
+              background: 'linear-gradient(135deg, #ffd700 0%, #e6a800 100%)',
+            }}
+          >
+            🎁
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold text-white">Freeroll horario</p>
+            <p className="text-[11px] text-[#a0a0b0]">
+              Gratis · uno cada hora · premio en saldo de promoción
+            </p>
+          </div>
+          <span className="text-[#a0a0b0]">→</span>
+        </button>
+
+        <button
+          onClick={() => onNavigate('centroll')}
+          className="card w-full flex items-center gap-4 text-left hover:border-[#e67e22] transition-all"
+        >
+          <div
+            className="w-12 h-12 rounded-xl flex items-center justify-center shrink-0 text-xl"
+            style={{
+              background: 'linear-gradient(135deg, #e67e22 0%, #d35400 100%)',
+            }}
+          >
+            ⚡
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold text-white">Centroll</p>
+            <p className="text-[11px] text-[#a0a0b0]">
+              Entrada de 0,01 USDT · arranca al llenarse
+            </p>
+          </div>
+          <span className="text-[#a0a0b0]">→</span>
+        </button>
+      </div>
+
+      <SectionLabel>Próximamente</SectionLabel>
+
+      <div className="card flex items-center gap-4 mb-6 opacity-70">
+        <div
+          className="w-12 h-12 rounded-xl flex items-center justify-center shrink-0 text-xl"
+          style={{ background: '#2a2a4a' }}
+        >
+          🏆
         </div>
-      ) : tournaments.length === 0 ? (
-        <div className="card text-center py-10">
-          <div className="text-4xl mb-3">🏆</div>
-          <h2 className="font-semibold text-white mb-1">No hay torneos abiertos</h2>
-          <p className="text-sm text-[#a0a0b0]">
-            Vuelve pronto. Publicamos nuevos torneos cada día.
+        <div className="flex-1">
+          <p className="text-sm font-semibold text-white">
+            Torneos con buy-in y garantizado
+          </p>
+          <p className="text-[11px] text-[#a0a0b0]">
+            Programados, con ciegas por niveles y premio fijo
           </p>
         </div>
-      ) : (
-        <>
-          {notice && (
-            <div
-              className={`rounded-xl p-3 mb-4 border text-sm ${
-                notice.type === 'ok'
-                  ? 'bg-[#00d26a]/10 border-[#00d26a] text-[#00d26a]'
-                  : 'bg-[#ff4757]/10 border-[#ff4757] text-[#ff8a94]'
-              }`}
-            >
-              {notice.text}
-            </div>
-          )}
+        <span className="badge badge-warning">Pronto</span>
+      </div>
 
-          <div className="space-y-3">
-            {tournaments.map((t, i) => {
-              const meta = TYPE_META[t.type] ?? { icon: '🏆', label: 'Torneo' };
-              const full = t.playerCount >= t.maxPlayers;
-              const running = t.status === 'running';
-              const isFree = t.buyIn === 0;
-              const canAfford = isFree || (user?.balance?.real ?? 0) >= t.buyIn;
-              const progress = Math.min(100, (t.playerCount / t.maxPlayers) * 100);
-
-              return (
-                <article
-                  key={t.id}
-                  className="card animate-slideUp"
-                  style={{ animationDelay: `${i * 50}ms` }}
-                >
-                  <header className="flex items-start justify-between mb-3">
-                    <div className="flex items-center gap-3 min-w-0">
-                      <span className="text-2xl">{meta.icon}</span>
-                      <div className="min-w-0">
-                        <h3 className="font-semibold text-white truncate">{t.name}</h3>
-                        <p className="text-xs text-[#a0a0b0]">{meta.label}</p>
-                      </div>
-                    </div>
-                    <span
-                      className={`badge text-[10px] ${
-                        running ? 'badge-warning' : full ? 'badge-danger' : 'badge-success'
-                      }`}
-                    >
-                      {running ? 'En curso' : full ? 'Llena' : 'Abierto'}
-                    </span>
-                  </header>
-
-                  <div className="grid grid-cols-3 gap-2 mb-3 text-center">
-                    <Stat label="Buy-in" value={isFree ? 'Gratis' : `${t.buyIn}`} unit={isFree ? '' : 'CUP'} />
-                    <Stat label="Jugadores" value={`${t.playerCount}/${t.maxPlayers}`} />
-                    <Stat label="Premio" value={`${t.prizePool ?? 0}`} unit="CUP" gold />
-                  </div>
-
-                  <div className="progress-bar mb-3">
-                    <div className="progress-bar-fill" style={{ width: `${progress}%` }} />
-                  </div>
-
-                  {!running && !full && (
-                    <button
-                      onClick={() => register(t.id)}
-                      disabled={busyId === t.id || !canAfford}
-                      className="w-full btn btn-primary py-2.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {busyId === t.id
-                        ? 'Registrando…'
-                        : !canAfford
-                        ? `Te faltan ${t.buyIn - (user?.balance?.real ?? 0)} CUP`
-                        : isFree
-                          ? 'Participar gratis'
-                          : `Inscribirse · ${t.buyIn} CUP`}
-                    </button>
-                  )}
-                </article>
-              );
-            })}
-          </div>
-        </>
-      )}
-
-      <div className="mt-6 card">
-        <SectionLabel>Cómo funciona</SectionLabel>
+      <div className="card">
+        <SectionLabel>Cómo se reparte</SectionLabel>
         <ul className="text-xs text-[#a0a0b0] space-y-1.5 leading-relaxed">
-          <li>• <span className="text-white">Sit & Go</span>: empieza cuando se llena la mesa.</li>
-          <li>• <span className="text-white">Programado</span>: fecha y hora fijas, premio garantizado.</li>
-          <li>• <span className="text-white">Freeroll</span>: sin costo, solo para clasificar.</li>
-          <li>• El reparto sigue la estructura estándar 50 / 30 / 20.</li>
+          <li>
+            • <span className="text-white">Freeroll</span>: 50% / 30% / 20% entre
+            los tres primeros.
+          </li>
+          <li>
+            • <span className="text-white">Cash</span>: el 5% de rake de cada
+            bote; el resto vuelve a los jugadores.
+          </li>
+          <li>
+            • Los premios de freeroll van a saldo de promoción: se juegan y se
+            desbloquean 1 de cada 10.
+          </li>
         </ul>
       </div>
-    </div>
-  );
-}
-
-function Stat({ label, value, unit, gold }: { label: string; value: string; unit?: string; gold?: boolean }) {
-  return (
-    <div>
-      <p className="text-[10px] text-[#a0a0b0] uppercase tracking-wide">{label}</p>
-      <p className={`text-sm font-bold ${gold ? 'text-[#ffd700]' : 'text-white'}`}>
-        {value}
-        {unit && <span className="text-[10px] text-[#a0a0b0] ml-0.5">{unit}</span>}
-      </p>
     </div>
   );
 }

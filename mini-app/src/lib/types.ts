@@ -8,6 +8,7 @@
 
 export const PAGES = [
   'home',
+  'profile',
   'deposit',
   'withdraw',
   'game',
@@ -93,6 +94,33 @@ export interface CashTier {
   /** Rake estimado del campo completo. */
   estRake: number;
   payout: PayoutEntry[];
+}
+
+/** Un freeroll en el lobby (abierto o en juego). */
+export interface FreerollCampo {
+  fieldId: string;
+  inicio: string | null;
+  finRegistro: string | null;
+  estado: string;
+  premioUsdt: number;
+  inscritos: number;
+  jugadoresVivos: number;
+  plazasPagadas: number;
+  /** Porcentaje por posicion: [50, 30, 20]. */
+  reparto: number[];
+  inscrito: boolean;
+  maxPorMesa: number;
+  tamanoMaximo: number;
+}
+
+/** Un slot de la lista de proximas horas (puede no tener campo creado aun). */
+export interface FreerollSlot {
+  clave: string;
+  inicio: string;
+  finRegistro: string;
+  premioUsdt: number;
+  jugadores: number;
+  estado: string;
 }
 
 /** Mecanismo de Promotional Dollars. */

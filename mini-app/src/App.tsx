@@ -10,6 +10,7 @@ import { Tables } from './pages/Tables';
 import { Table } from './pages/Table';
 import { Centroll } from './pages/Centroll';
 import { Freeroll } from './pages/Freeroll';
+import { Profile } from './pages/Profile';
 import { SimulatePay } from './pages/SimulatePay';
 import { api, ApiError, type DepositOrder } from './lib/api';
 import { pageFromPath as resolvePage, type Page, type Session } from './lib/types';
@@ -265,7 +266,23 @@ export default function App() {
     switch (page) {
       case 'home':
         return (
-          <Home user={user} onNavigate={navigate} />
+          <Home
+            user={user}
+            onNavigate={navigate}
+            onPlay={(tableId) => {
+              setActiveTable(tableId);
+              navigate('game');
+            }}
+          />
+        );
+      case 'profile':
+        return (
+          <Profile
+            user={user}
+            onBack={back}
+            onDeposit={() => navigate('deposit')}
+            onWithdraw={() => navigate('withdraw')}
+          />
         );
       case 'deposit':
         return (
@@ -313,10 +330,14 @@ export default function App() {
             onBalanceChange={refreshUser}
           />
         ) : (
-          <Home user={user} onNavigate={navigate} />
+          <Home
+            user={user}
+            onNavigate={navigate}
+            onPlay={(tableId) => setActiveTable(tableId)}
+          />
         );
       case 'tournaments':
-        return <Tournaments user={user} onBack={back} onBalanceChange={refreshUser} />;
+        return <Tournaments onBack={back} onNavigate={navigate} />;
       case 'vip':
         return <VIP user={user} onBack={back} onBalanceChange={refreshUser} />;
       case 'referrals':
@@ -325,7 +346,14 @@ export default function App() {
         return <Achievements onBack={back} />;
       default:
         return (
-          <Home user={user} onNavigate={navigate} />
+          <Home
+            user={user}
+            onNavigate={navigate}
+            onPlay={(tableId) => {
+              setActiveTable(tableId);
+              navigate('game');
+            }}
+          />
         );
     }
   };

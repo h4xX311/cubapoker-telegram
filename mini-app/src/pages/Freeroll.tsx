@@ -1,66 +1,129 @@
-import { useState, useEffect } from 'react';
+﻿import { useState, useEffect } from 'react';
 import { api, ApiError } from '../lib/api';
-import type { FreerollSummary } from '../lib/types';
+import type { FreerollCampo, FreerollSlot } from '../lib/types';
 import { PageHeader } from '../components/Layout';
 import { fmtUsdt } from '../components/Balance';
+import { fmtCuenta, horaLocal, segundosHasta } from '../lib/tiempo';
 
 interface Props {
   onBack: () => void;
   onBalanceChange?: () => void | Promise<any>;
   onPlay: (tableId: string) => void;
-  120?: number;
 }
 
-/**
- * Freerolls: entrada gratis, premio en saldo de promocion.
- *
- * No recibe `user` porque la pantalla no muestra saldo: la unica accion es
- * apuntarse, y el estado de la cuenta ya esta en la cabecera.
- */
-export function Freeroll({
-  onBack,
-  onBalanceChange,
-  onPlay,
-}: Props) {
-  const [freerolls, setFreerolls] = useState<FreerollSummary[]>([]);
-  const [targetField, setTargetField] = useState(300);
-  const [maxField, setMaxField] = useState(900);
-  const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState<number | null>(null);
-  const [error, setError] = useState('');
+const POSICIONES = ['1.Âº', '2.Âº', '3.Âº', '4.Âº', '5.Âº'];
 
-  const load = async () => {
+/**
+ * FREEROLLS HORARIOS
+ * ==================
+ *
+ * Un torneo cada hora, gratis, con premio en saldo de promocion. La pagina hace tres cosas
+ * y ninguna es decorativa:
+ *
+ *   1. Cuenta atras real hasta el inicio. Sin ella, el jugador no sabe si le da tiempo.
+ *   2. Inscribe y desinscribe. El boton cambia de estado segun si ya esta dentro.
+ *   3. Entra a la mesa cuando el torneo ya empezo. Si el jugador cierra la app y vuelve,
+ *      aqui tiene el camino de vuelta.
+ *
+ * La cuenta atras se calcula en el cliente con la hora ISO del servidor. El servidor no
+ * manda "faltan 12 minutos" porque ese numero caduca en cuanto sale de la respuesta.
+ */
+export function Freeroll({ onBack, onBalanceChange, onPlay }: Props) {
+  const [datos, setDatos] = useState<{
+    abierto: FreerollCampo | null;
+    enJuego: FreerollCampo[];
+    proximos: FreerollSlot[];
+  } | null>(null);
+
+  const [cargando, setCargando] = useState(true);
+  const [error, setError] = useState('');
+  const [ocupado, setOcupado] = useState<string | null>(null);
+  const [ahora, setAhora] = useState(() => Date.now());
+
+  const cargar = async () => {
     try {
       const res = await api.freerolls();
-      setFreerolls(res.freerolls || []);
-      if (res.targetField) setTargetField(res.targetField);
-      if (res.maxField) setMaxField(res.maxField);
-    } catch {
-      setFreerolls([]);
+      setDatos({
+        abierto: res.abierto ?? null,
+        enJuego: res.enJuego ?? [],
+        proximos: res.proximos ?? [],
+      });
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? err.message
+          : 'No se pudieron cargar los freerolls.',
+      );
     } finally {
-      setLoading(false);
+      setCargando(false);
     }
   };
 
   useEffect(() => {
-    load();
-    const timer = setInterval(load, 6000);
+    cargar();
+    // Cada 10 s se refresca el numero de inscritos. La cuenta atras va por su cuenta.
+    const timer = setInterval(cargar, 10_000);
     return () => clearInterval(timer);
   }, []);
 
-  const join = async (tier: FreerollSummary) => {
-    setBusy(tier.prizeTier);
+  useEffect(() => {
+    const timer = setInterval(() => setAhora(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Cuando la cuenta atras llega a cero, el torneo esta arrancando. Se recarga para que el
+  // campo abierto pase a "en juego" sin que el jugador tenga que hacer nada.
+  const segundosAlInicio = segundosHasta(datos?.abierto?.inicio, ahora);
+  useEffect(() => {
+    if (!datos?.abierto || segundosAlInicio > 0) return;
+    const timer = setTimeout(cargar, 1500);
+    return () => clearTimeout(timer);
+  }, [segundosAlInicio, datos?.abierto?.fieldId]);
+
+  const inscribir = async (fieldId: string) => {
+    setOcupado(fieldId);
     setError('');
     try {
-      const res = await api.joinFreeroll(tier.prizeTier, tier.tableId);
+      await api.registerFreeroll(fieldId);
       await onBalanceChange?.();
-      if (res.tableId) onPlay(res.tableId);
+      await cargar();
     } catch (err) {
       setError(
-        err instanceof ApiError ? err.message : 'No se pudo entrar al freeroll.',
+        err instanceof ApiError ? err.message : 'No se pudo inscribir.',
       );
     } finally {
-      setBusy(null);
+      setOcupado(null);
+    }
+  };
+
+  const salir = async (fieldId: string) => {
+    setOcupado(fieldId);
+    setError('');
+    try {
+      await api.leaveFreeroll(fieldId);
+      await cargar();
+    } catch (err) {
+      setError(
+        err instanceof ApiError ? err.message : 'No se pudo cancelar.',
+      );
+    } finally {
+      setOcupado(null);
+    }
+  };
+
+  const entrarAMesa = async () => {
+    setError('');
+    try {
+      const donde = await api.myTable();
+      if (donde?.tableId) {
+        onPlay(donde.tableId);
+      } else {
+        setError(
+          'Tu mesa se esta preparando. Espera unos segundos y vuelve a intentarlo.',
+        );
+      }
+    } catch {
+      setError('No se pudo abrir tu mesa. Intentalo de nuevo.');
     }
   };
 
@@ -68,25 +131,25 @@ export function Freeroll({
     <div className="p-4 pb-10 animate-fadeIn">
       <PageHeader title="Freerolls" onBack={onBack} />
 
-      {/* El mecanismo del ratio. Sin esto el jugador no entiende su saldo. */}
+      {/* Explicacion del producto, en una linea. */}
       <div
         className="rounded-2xl p-4 mb-5"
         style={{
-          background: 'rgba(255,215,0,0.08)',
+          background:
+            'linear-gradient(135deg, rgba(255,215,0,0.12) 0%, rgba(255,183,0,0.04) 100%)',
           border: '1px solid rgba(255,215,0,0.3)',
         }}
       >
         <div className="flex items-start gap-3">
-          <span className="text-xl">🎁</span>
+          <span className="text-2xl">ðŸŽ</span>
           <div>
             <p className="text-sm font-bold text-[#ffd700] mb-1">
-              Entrada gratis, premio en saldo de promoción
+              Un torneo gratis cada hora
             </p>
             <p className="text-xs text-[#a0a0b0] leading-relaxed">
-              No pagas nada por entrar. Lo que ganas es saldo de promoción: sirve
-              para jugar en cualquier campo, y al usarlo se desbloquea{' '}
-              <strong className="text-white">1 de cada 10</strong> a saldo
-              retirable. El resto se consume jugando.
+              Mesas de 7 hasta completar el campo. El premio es saldo de
+              promociÃ³n: se juega y se desbloquea 1 de cada 10 a saldo
+              retirable.
             </p>
           </div>
         </div>
@@ -98,94 +161,247 @@ export function Freeroll({
         </div>
       )}
 
-      {loading ? (
+      {cargando ? (
         <div className="text-center py-12">
           <div className="spinner mx-auto" />
         </div>
       ) : (
-        <div className="space-y-3">
-          {freerolls.map((f, i) => {
-            const target = f.fieldTarget || targetField;
-            const isFull = f.players >= target;
-            const pct = Math.min(100, Math.round((f.players / target) * 100));
+        <div className="space-y-4">
+          {/* ---------------- Proximo torneo ---------------- */}
+          {datos?.abierto && (
+            <TarjetaProximo
+              campo={datos.abierto}
+              segundos={segundosAlInicio}
+              ocupado={ocupado === datos.abierto.fieldId}
+              onInscribir={() => inscribir(datos.abierto!.fieldId)}
+              onSalir={() => salir(datos.abierto!.fieldId)}
+            />
+          )}
 
+          {/* ---------------- En juego, registro tardio ---------------- */}
+          {datos?.enJuego?.map((campo) => {
+            const restante = segundosHasta(campo.finRegistro, ahora);
             return (
               <article
-                key={f.prizeTier}
-                className="card relative overflow-hidden animate-slideUp"
-                style={{ animationDelay: `${i * 40}ms` }}
+                key={campo.fieldId}
+                className="card relative overflow-hidden"
+                style={{ borderColor: 'rgba(0,210,106,0.45)' }}
               >
-                <div
-                  className="absolute -top-8 -right-8 w-28 h-28 rounded-full opacity-15"
-                  style={{ background: '#ffd700' }}
-                />
-
-                <header className="flex items-start justify-between mb-3 relative">
+                <div className="flex items-start justify-between mb-2">
                   <div>
-                    <h3 className="font-bold text-white flex items-center gap-2">
-                      <span>🎁</span> Freeroll {fmtUsdt(f.prizeTier)} USDT
+                    <span className="badge badge-success text-[10px]">
+                      EN JUEGO
+                    </span>
+                    <h3 className="font-bold text-white mt-2">
+                      Freeroll de las {campo.inicio ? horaLocal(campo.inicio) : ''}
                     </h3>
-                    <p className="text-xs text-[#a0a0b0] mt-1"> USDT de premio · sin buy-in
+                    <p className="text-xs text-[#a0a0b0] mt-1">
+                      {campo.jugadoresVivos} jugadores vivos Â· premio{' '}
+                      {fmtUsdt(campo.premioUsdt)} USDT
                     </p>
                   </div>
-                  <span className="badge badge-warning text-[10px]">
-                    {isFull ? 'Cerrado' : f.phase === 'running' ? 'En curso' : 'Abierto'}
-                  </span>
-                </header>
-
-                {/* Progreso de inscripcion */}
-                <div className="mb-3 relative">
-                  <div className="flex justify-between text-[10px] mb-1">
-                    <span className="text-[#a0a0b0]">
-                      Campo: <strong className="text-white">{f.players}</strong> de {target}
-                    </span>
-                    <span className="text-[#a0a0b0]">{pct}%</span>
+                  <div className="text-right">
+                    <p className="text-[9px] text-[#a0a0b0] uppercase">
+                      TardÃ­o cierra en
+                    </p>
+                    <p className="text-lg font-bold text-[#00d26a] tabular-nums">
+                      {fmtCuenta(restante)}
+                    </p>
                   </div>
-                  <div className="progress-bar">
-                    <div
-                      className="progress-bar-fill"
-                      style={{ width: `${pct}%`, background: '#ffd700' }}
-                    />
-                  </div>
-                  <p className="text-[10px] text-[#6c6c80] mt-1">
-                    Arranca al completarse. Tope de {maxField} inscritos.
-                  </p>
                 </div>
 
-                {/* Reparto */}
-                <div className="flex gap-2 mb-3 relative">
-                  {f.payout.map((pctShare, idx) => (
-                    <div
-                      key={idx}
-                      className="flex-1 text-center p-2 rounded-xl"
-                      style={{ background: '#0f0f1a' }}
-                    >
-                      <p className="text-[9px] text-[#a0a0b0]">
-                        {['1º', '2º', '3º'][idx] ?? `${idx + 1}º`}
-                      </p>
-                      <p className="text-sm font-bold text-[#ffd700]">
-                        {fmtUsdt(Math.floor((f.pot * pctShare) / 100))}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-
-                <button
-                  onClick={() => join(f)}
-                  disabled={busy === f.prizeTier || isFull}
-                  className="w-full btn btn-gold py-2.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed relative"
-                >
-                  {busy === f.prizeTier
-                    ? 'Registrando…'
-                    : isFull
-                    ? 'Completo'
-                    : 'Participar gratis'}
-                </button>
+                {campo.inscrito ? (
+                  <button
+                    onClick={entrarAMesa}
+                    className="w-full btn btn-primary py-2.5 text-sm"
+                  >
+                    Entrar a mi mesa
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => inscribir(campo.fieldId)}
+                    disabled={ocupado === campo.fieldId}
+                    className="w-full btn btn-primary py-2.5 text-sm disabled:opacity-50"
+                  >
+                    {ocupado === campo.fieldId
+                      ? 'Entrandoâ€¦'
+                      : 'Entrar ahora (registro tardÃ­o)'}
+                  </button>
+                )}
               </article>
             );
           })}
+
+          {/* ---------------- Proximas horas ---------------- */}
+          {datos?.proximos && datos.proximos.length > 0 && (
+            <section>
+              <h2 className="text-[#a0a0b0] text-xs uppercase tracking-wide mb-3">
+                PrÃ³ximas horas
+              </h2>
+              <div className="space-y-2">
+                {datos.proximos.map((slot) => (
+                  <div
+                    key={slot.clave}
+                    className="flex items-center justify-between rounded-xl px-4 py-3"
+                    style={{
+                      background: '#151525',
+                      border: '1px solid #2a2a4a',
+                    }}
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className="text-lg">ðŸ•</span>
+                      <div>
+                        <p className="text-sm font-semibold text-white">
+                          {horaLocal(slot.inicio)}
+                        </p>
+                        <p className="text-[10px] text-[#a0a0b0]">
+                          Gratis Â· {fmtUsdt(slot.premioUsdt)} USDT de premio
+                        </p>
+                      </div>
+                    </div>
+                    <span className="text-[10px] text-[#6c6c80]">
+                      {fmtCuenta(segundosHasta(slot.inicio, ahora))}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {!datos?.abierto && !datos?.enJuego?.length && (
+            <div className="card text-center py-8">
+              <p className="text-3xl mb-2">ðŸ•</p>
+              <p className="text-sm text-white font-semibold">
+                El prÃ³ximo freeroll se abre en un momento
+              </p>
+              <p className="text-xs text-[#a0a0b0] mt-1">
+                Uno cada hora, en punto.
+              </p>
+            </div>
+          )}
         </div>
       )}
     </div>
+  );
+}
+
+/** La tarjeta del proximo torneo: la cuenta atras es el elemento principal. */
+function TarjetaProximo({
+  campo,
+  segundos,
+  ocupado,
+  onInscribir,
+  onSalir,
+}: {
+  campo: FreerollCampo;
+  segundos: number;
+  ocupado: boolean;
+  onInscribir: () => void;
+  onSalir: () => void;
+}) {
+  const lleno = campo.inscritos >= campo.tamanoMaximo;
+
+  return (
+    <article
+      className="rounded-2xl p-5 relative overflow-hidden animate-slideUp"
+      style={{
+        background: 'linear-gradient(150deg, #2a2410 0%, #151525 60%, #0f0f1a 100%)',
+        border: '1px solid rgba(255,215,0,0.35)',
+      }}
+    >
+      <div
+        className="absolute -top-10 -right-10 w-36 h-36 rounded-full opacity-20"
+        style={{ background: '#ffd700' }}
+      />
+
+      <header className="relative flex items-start justify-between mb-4">
+        <div>
+          <p className="text-[10px] uppercase tracking-widest text-[#ffd700] font-bold">
+            PrÃ³ximo torneo
+          </p>
+          <h2 className="text-2xl font-bold text-white mt-1">
+            {campo.inicio ? horaLocal(campo.inicio) : 'â€”'}
+          </h2>
+          <p className="text-xs text-[#a0a0b0] mt-1">
+            {campo.inscritos} de {campo.tamanoMaximo} inscritos Â· mesas de{' '}
+            {campo.maxPorMesa}
+          </p>
+        </div>
+        {campo.inscrito && (
+          <span className="badge badge-success text-[10px]">APUNTADO</span>
+        )}
+      </header>
+
+      {/* Cuenta atras */}
+      <div className="relative text-center py-4 mb-4 rounded-xl" style={{ background: 'rgba(0,0,0,0.35)' }}>
+        <p className="text-[10px] text-[#a0a0b0] uppercase tracking-widest mb-1">
+          Empieza en
+        </p>
+        <p className="text-4xl font-bold text-[#ffd700] tabular-nums leading-none">
+          {fmtCuenta(segundos)}
+        </p>
+      </div>
+
+      {/* Premio y reparto */}
+      <div className="relative mb-4">
+        <div className="flex items-baseline justify-between mb-2">
+          <span className="text-[10px] text-[#a0a0b0] uppercase tracking-wide">
+            Premio total
+          </span>
+          <span className="text-xl font-bold text-[#00d26a]">
+            {fmtUsdt(campo.premioUsdt)} USDT
+          </span>
+        </div>
+        <div className="flex gap-2">
+          {campo.reparto.map((pct, i) => (
+            <div
+              key={i}
+              className="flex-1 text-center p-2 rounded-lg"
+              style={{ background: 'rgba(255,255,255,0.04)' }}
+            >
+              <p className="text-[9px] text-[#a0a0b0]">
+                {POSICIONES[i] ?? `${i + 1}.Âº`}
+              </p>
+              <p className="text-xs font-bold text-white">
+                {fmtUsdt(Math.floor((campo.premioUsdt * pct) / 100))}
+              </p>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="relative flex gap-2">
+        {campo.inscrito ? (
+          <>
+            <button
+              onClick={onSalir}
+              disabled={ocupado}
+              className="flex-1 btn btn-outline py-2.5 text-sm disabled:opacity-50"
+            >
+              {ocupado ? 'Cancelandoâ€¦' : 'Cancelar inscripciÃ³n'}
+            </button>
+            <button
+              onClick={onInscribir}
+              disabled
+              className="flex-1 btn btn-primary py-2.5 text-sm opacity-60"
+            >
+              EstÃ¡s dentro
+            </button>
+          </>
+        ) : (
+          <button
+            onClick={onInscribir}
+            disabled={ocupado || lleno}
+            className="w-full btn btn-gold py-3 text-sm disabled:opacity-50"
+          >
+            {lleno
+              ? 'Campo completo'
+              : ocupado
+                ? 'Inscribiendoâ€¦'
+                : 'Inscribirme gratis'}
+          </button>
+        )}
+      </div>
+    </article>
   );
 }
