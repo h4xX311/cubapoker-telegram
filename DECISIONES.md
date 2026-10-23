@@ -114,3 +114,46 @@ Que el campo diga cuál de los dos es, en el propio campo, y no lo que adivine e
 
 Pendiente de decidir: el `rakeCollected` de un campo cancelado, ¿se queda la plataforma o se
 devuelve con las fichas? No se ha tocado.
+
+---
+
+## 4 · El freeroll horario
+
+**Decisión:** un freeroll cada hora, multi-mesa (hasta 300 jugadores en mesas de 7), gratis,
+con registro tardío de 12 minutos. El premio va entero a **saldo de promoción**.
+
+### Reglas
+
+| | |
+|---|---|
+| Horario | Un slot por hora en punto (UTC). `claveSlot` = `YYYY-MM-DDTHH` |
+| Entrada | Gratis. No cobra buy-in ni rake |
+| Fichas | 1.000, ciegas 5/10 |
+| Mínimo para arrancar | 2. Con 1 humano se rellena con bots hasta 2 |
+| Sin nadie | Se cancela: no se paga un torneo de bots con dinero de la casa |
+| Registro tardío | Hasta 12 minutos después del inicio, con las mismas 1.000 fichas |
+| Premio | `FREEROLL_HOURLY_PRIZE_USDT` (1 USDT por defecto), reparto 50/30/20 |
+| Destino | `balance.play` (promoción). No retirable directamente |
+
+El campo lleva `tierId = freeroll-<clave>`. El índice único parcial
+`un_campo_vivo_por_nivel` impide que dos peticiones simultáneas abran dos campos del mismo
+slot.
+
+### Por qué el premio va a promoción
+
+Es dinero de la casa, no de otros jugadores. Si fuera retirable, cada hora habría una
+extracción directa de 1 USDT sin que nadie hubiera puesto dinero. En promoción se juega y se
+desbloquea con el mecanismo que ya existe (1 de cada 10). Queda registrado en
+`stats.totalFreerollWon` para que el jugador lo vea.
+
+### Por qué se cancela cuando no hay nadie
+
+Rellenar con bots un torneo vacío y pagar el premio al bot ganador es pagar por nada. El
+relleno con bots existe para que **un humano** no se quede esperando solo: con cero humanos
+no hay a quién entretener.
+
+### Lo que falta decidir
+
+**El premio de 1 USDT por hora.** Son 24 USDT al día de la casa si se juegan todos los slots.
+Es una decisión de producto y de presupuesto, no técnica: se cambia con
+`FREEROLL_HOURLY_PRIZE_USDT` sin tocar código.

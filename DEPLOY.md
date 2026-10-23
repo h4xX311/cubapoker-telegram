@@ -154,6 +154,7 @@ En **Environment** del servicio. `render.yaml` deja varias como `sync: false`, o
 | `USDT_CONTRACT_ADDRESS` | Verifícala antes: multiplicar con una dirección equivocada es un robo directo |
 | `TELEGRAM_WEBHOOK_SECRET` | Verifica la firma del webhook. Recomendado |
 | `ALLOW_SIMULATED_WITHDRAWALS` | **Déjala en `false`**. Ver [Payments](#7-pagos) |
+| `FREEROLL_HOURLY_PRIZE_USDT` | Premio del freeroll horario, en USDT. Por defecto `1` |
 
 ---
 
@@ -321,6 +322,11 @@ Si cambias el dominio o la `MINI_APP_URL`, repite el paso 6.2.
   Para mas de una instancia haria falta un cerrojo en la base de datos, o un unico duenno de
   las escrituras (por ejemplo, que solo el bucle del motor escriba en el campo y las rutas
   HTTP manden intenciones en vez de escribir). Es un cambio de arquitectura, no un flag.
+
+  El **freeroll horario** lo necesita igual o mas: cada instancia corre su propio
+  `setInterval(procesar, 30 s)`. El indice unico evita abrir dos campos del mismo slot, pero
+  dos procesos pueden intentar arrancar o cancelar el mismo campo a la vez. El guard
+  `procesando` es una variable en memoria del proceso: no cruza instancias.
 
 - **No quites el indice `un_campo_vivo_por_nivel`.** Es lo unico que impide que 20 personas
   pulsando JUGAR a la vez abran 18 campos y cobren 18 veces. Si `scripts/asegurar-indices.js`
