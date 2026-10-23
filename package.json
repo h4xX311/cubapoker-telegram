@@ -22,7 +22,8 @@
     "test:mano": "cd mini-app && npx tsx ../scripts/test-fuerza-mano.ts",
     "test:pote": "npm run build && node scripts/test-conservacion-pote.js",
     "test:indices": "npm run build && node scripts/asegurar-indices.js",
-    "test:cancelar": "npm run build && node scripts/test-cancelar-campo.js"
+    "test:cancelar": "npm run build && node scripts/test-cancelar-campo.js",
+    "test:centroll": "npm run build && node scripts/test-centroll.js"
   },
   "dependencies": {
     "@types/cors": "^2.8.16",

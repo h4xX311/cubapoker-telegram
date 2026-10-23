@@ -74,7 +74,7 @@ export interface ISeat {
 
 export interface ITable extends Document {
   tableId: string;
-  kind: 'cash' | 'freeroll';
+  kind: 'cash' | 'freeroll' | 'centroll';
   /** Solo en mesas cash */
   tierId?: string;
   /** Solo en freeroll */
@@ -184,7 +184,9 @@ const seatSchema = new Schema<ISeat>(
 
 const tableSchema = new Schema<ITable>({
   tableId: { type: String, required: true, unique: true, index: true },
-  kind: { type: String, enum: ['cash', 'freeroll'], required: true, index: true },
+  // `centroll` faltaba, y no fallaba el campo: fallaba LA MESA, al sentar al primer
+  // jugador. Se veia como "Table validation failed", no como un problema de enum.
+  kind: { type: String, enum: ['cash', 'freeroll', 'centroll'], required: true, index: true },
   tierId: String,
   prizeTier: Number,
 

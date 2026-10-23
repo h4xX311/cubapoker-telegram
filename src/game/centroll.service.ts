@@ -11,6 +11,13 @@ import {
 } from '../config/product';
 import { usdtToUnits, unitsToUsdt, formatUnits, blindsFor } from '../config/units';
 import { logger } from '../utils/logger';
+// El mismo cerrojo por nivel que usa `field.manager`. `field.manager` no importa este modulo,
+// asi que no hay ciclo. Se comparte para que "dos personas pulsando JUGAR a la vez" se
+// serialice igual en un centroll que en un campo de cash.
+import { withFieldLock } from './field.manager';
+
+/** Clave del cerrojo. Un centroll es un solo nivel, siempre el mismo. */
+const LOCK_CENTROLL = 'centroll';
 
 /**
  * Centrolls: buy-in de 0,01 USDT que consume saldo REAL y paga fichas.
@@ -76,6 +83,18 @@ export const centrollService = {
     telegramId: number,
     username?: string,
   ): Promise<{ fieldId: string; queued: boolean }> {
+    // Todo el registro en serie, por el mismo motivo que en `field.manager.register`: sin
+    // esto, dos registros a la vez leen el mismo documento, cada uno suma su buy-in con un
+    // `$inc`, y el `save()` de `trySeat` escribe una copia vieja encima. Medido en los campos
+    // de cash: 20 jugadores dejaban el bote en 1.000 de 20.000.
+    return withFieldLock(LOCK_CENTROLL, () => this.registrarEnCentroll(telegramId, username));
+  },
+
+  /** El cuerpo de `register()`, ya dentro del cerrojo. */
+  async registrarEnCentroll(
+    telegramId: number,
+    username?: string,
+  ): Promise<{ fieldId: string; queued: boolean }> {
     const user = await User.findOne({ telegramId });
     if (!user) throw new CentrollError('Usuario no encontrado', 'NOT_FOUND');
 
@@ -97,6 +116,31 @@ export const centrollService = {
       throw new CentrollError('Ya estás jugando un centroll', 'ALREADY_IN');
     }
 
+    // ------------------------------------------------------------------
+    // Y NO PUEDE PAGAR DOS VECES EL MISMO
+    //
+    // `isSeated` mira solo las mesas. Un jugador que esta EN COLA no tiene asiento, asi que
+    // pasaba el filtro y podia pulsar JUGAR otra vez: se le cobraba el buy-in dos veces y
+    // se le apuntaba dos veces. El segundo cobro no le daba ninguna ventaja, solo le quitaba
+    // el dinero.
+    //
+    // La lista de `registrations` es la que sabe quien pago, tenga asiento o no.
+    // ------------------------------------------------------------------
+    const yaApuntado = await Field.findOne({
+      kind: 'centroll',
+      status: { $in: ['filling', 'running', 'final'] },
+      registrations: {
+        $elemMatch: { telegramId, status: { $in: ['waiting', 'seated'] } },
+      },
+    });
+
+    if (yaApuntado) {
+      throw new CentrollError(
+        'Ya estás apuntado a este centroll. No hace falta pagar otra entrada.',
+        'ALREADY_IN',
+      );
+    }
+
     const field = await this.openField();
 
     // --- Cobro ---
@@ -112,16 +156,78 @@ export const centrollService = {
       );
     }
 
-    await Field.updateOne(
-      { _id: field._id },
-      { $inc: { waiting: 1, buyInsCollected: buyIn } },
-    );
+    // ------------------------------------------------------------------
+    // EL COBRO Y LA ANOTACION, EN LA MISMA ESCRITURA
+    //
+    // Antes solo se subia un contador. Si el centroll se cancelaba no habia a quien
+    // devolverle el dinero, porque el documento no guardaba ni un `telegramId`. Es el mismo
+    // fallo que se encontro en los campos de cash, y aqui estaba igual de roto.
+    //
+    // Si esta escritura falla, se devuelve el buy-in antes de propagar el error: un jugador
+    // no se queda con el dinero cobrado y sin entrada.
+    // ------------------------------------------------------------------
+    try {
+      await Field.updateOne(
+        { _id: field._id },
+        {
+          $inc: { waiting: 1, buyInsCollected: buyIn },
+          $push: {
+            registrations: {
+              telegramId,
+              username,
+              buyIn,
+              status: 'waiting',
+              at: new Date(),
+            },
+          },
+        },
+      );
+    } catch (err) {
+      logger.error(
+        `Centroll: se cobro a ${telegramId} pero no se pudo anotar. Se le devuelve.`,
+      );
+      await User.updateOne({ telegramId }, { $inc: { 'balance.real': buyIn } });
+      throw err;
+    }
 
     const queue = queues.get(field.fieldId) ?? [];
     queue.push({ telegramId, username });
     queues.set(field.fieldId, queue);
 
-    const seated = await this.trySeat(field);
+    // ------------------------------------------------------------------
+    // SI EL ASIENTO FALLA, EL DINERO VUELVE
+    //
+    // El cobro va antes del asiento porque el asiento necesita las fichas. Pero en cuanto se
+    // ha cobrado, o se sienta o se devuelve. Antes, un fallo aqui dejaba al jugador sin
+    // dinero y sin mesa, y el error solo se veia en el log.
+    // ------------------------------------------------------------------
+    let seated: boolean;
+    try {
+      seated = await this.trySeat(field);
+    } catch (err) {
+      logger.error(
+        `Centroll: cobro hecho pero el asiento de ${telegramId} fallo ` +
+        `(${err instanceof Error ? err.message : String(err)}). Se le devuelve el buy-in.`,
+      );
+
+      const cola = queues.get(field.fieldId) ?? [];
+      const i = cola.findIndex((p) => p.telegramId === telegramId);
+      if (i !== -1) {
+        cola.splice(i, 1);
+        queues.set(field.fieldId, cola);
+      }
+
+      await Field.updateOne(
+        { _id: field._id },
+        {
+          $inc: { waiting: -1, buyInsCollected: -buyIn },
+          $pull: { registrations: { telegramId } },
+        },
+      );
+
+      await User.updateOne({ telegramId }, { $inc: { 'balance.real': buyIn } });
+      throw err;
+    }
 
     logger.info(
       `Centroll ${field.fieldId}: jugador ${telegramId} ` +
@@ -146,11 +252,29 @@ export const centrollService = {
     // fichas: suficiente para jugar unas 150 ciegas antes de quedarse corto.
     const { small, big } = blindsFor(unitsToUsdt(buyIn) * 1.5);
 
-    return Field.create({
+    // ------------------------------------------------------------------
+    // TRES ARREGLOS QUE HACIAN QUE ESTO NO FUNCIONARA NUNCA
+    //
+    // 1. `kind: 'centroll'` no estaba en el enum del esquema. Cada `create()` fallaba con
+    //    `ValidationError` y el jugador solo veia "no se pudo". La funcion entera estaba
+    //    muerta y nada lo decia.
+    //
+    // 2. El campo se llamaba `buyIn`. El esquema tiene `buyInUnits` y lo exige (`required`),
+    //    asi que aunque el enum hubiera estado bien, esto habria fallado igual: mongoose NO
+    //    avisa de las claves que sobran en un `create()`. Es exactamente el fallo que ya esta
+    //    documentado en `models/Field.ts` y que dejo `openField` sin funcionar el primer dia.
+    //
+    // 3. `tierId: 'centroll'`. Ademas de identificar el nivel, es lo que hace que el indice
+    //    unico `un_campo_vivo_por_nivel` impida abrir DOS centrolls a la vez. Sin el, dos
+    //    registros simultaneos abren dos campos y cada uno cobra su parte: el mismo fallo que
+    //    dejo 18 campos abiertos en los campos de cash.
+    // ------------------------------------------------------------------
+    const documento = {
       fieldId,
       kind: 'centroll',
+      tierId: LOCK_CENTROLL,
       status: 'filling',
-      buyIn,
+      buyInUnits: buyIn,
       targetField: CENTROLL.targetField,
       waiting: 0,
       seated: 0,
@@ -159,7 +283,35 @@ export const centrollService = {
       plannedTables: Math.ceil(CENTROLL.targetField / SEATS_PER_TABLE),
       tables: [],
       // Los centrolls tienen buy-in real: no hay `prizeTier`.
-    });
+    };
+
+    // `small` y `big` no se usan en el documento del campo: las ciegas salen de la mesa
+    // (`createTable`). Se dejan calculadas arriba por si el campo las necesitara y no se
+    // tocan aqui para no cambiar el comportamiento de las mesas.
+    void small;
+    void big;
+
+    for (let intento = 1; intento <= 3; intento++) {
+      try {
+        const field = await Field.create(documento);
+        logger.info(`Centroll ${fieldId} abierto (buy-in ${formatUnits(buyIn)} USDT).`);
+        return field;
+      } catch (err: any) {
+        if (err?.code !== 11000) throw err;
+
+        // Otro registro lo abrio primero. No es un error: se entra al que hay.
+        const ganador = await Field.findOne({
+          kind: 'centroll',
+          status: { $in: ['filling', 'running', 'final'] },
+        });
+        if (ganador) return ganador;
+      }
+    }
+
+    throw new CentrollError(
+      'No se pudo abrir el centroll. Intentalo de nuevo en un momento.',
+      'OPEN_FAILED',
+    );
   },
 
   /** Sienta a quien este en cola. */
@@ -215,12 +367,31 @@ export const centrollService = {
 
       await Field.updateOne(
         { _id: field._id },
+        { $inc: { waiting: -1, seated: 1, playersRemaining: 1 } },
+      );
+
+      // La entrada pasa a `seated`, para que una cancelacion sepa quien sigue dentro.
+      await Field.updateOne(
+        { _id: field._id, 'registrations.telegramId': player.telegramId },
+        { $set: { 'registrations.$.status': 'seated' } },
+      );
+
+      // ------------------------------------------------------------------
+      // LA MESA SE ANOTA UNA VEZ, NO UNA POR JUGADOR
+      //
+      // Antes este `$push` iba junto al `$inc`, asi que cada jugador que se sentaba anadia
+      // OTRA entrada de la misma mesa. Con 7 por mesa, `field.tables` acababa con 7 copias
+      // de `t1`. Todo lo que cuenta mesas o promedia asientos sobre esa lista queda mal.
+      //
+      // El filtro `'tables.tableId': { $ne: ... }` hace que solo la primera vez entre.
+      // ------------------------------------------------------------------
+      await Field.updateOne(
+        { _id: field._id, 'tables.tableId': { $ne: table.tableId } },
         {
-          $inc: { waiting: -1, seated: 1, playersRemaining: 1 },
           $push: {
             tables: {
               tableId: table.tableId,
-              seated: 1,
+              seated: 0,
               eliminated: 0,
               createdAt: new Date(),
             } as FieldTable,
@@ -247,8 +418,10 @@ export const centrollService = {
     const buyIn = usdtToUnits(CENTROLL.buyInUsdt);
     const { small, big } = blindsFor(unitsToUsdt(buyIn) * 1.5);
 
-    return Table.create({
-      tableId: `centroll-${field.fieldId}-t${tableNumber}`,
+    const tableId = `centroll-${field.fieldId}-t${tableNumber}`;
+
+    const documento = {
+      tableId,
       kind: 'centroll',
       status: 'waiting',
       smallBlind: small,
@@ -273,7 +446,23 @@ export const centrollService = {
         actingSeat: -1,
         dealerSeat: 0,
       },
-    });
+    };
+
+    // Upsert, no `create`. Con dos jugadores sentandose a la vez, los dos intentan crear la
+    // mesa `t1`; uno gana y el otro revienta con `E11000`. Ese era el jugador que pagaba y
+    // se quedaba sin mesa (ver `field.manager.createFieldTable`, donde se midio).
+    try {
+      return (await Table.findOneAndUpdate(
+        { tableId },
+        { $setOnInsert: documento },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+      )) as ITable;
+    } catch (err: any) {
+      if (err?.code !== 11000) throw err;
+      const yaExiste = await Table.findOne({ tableId });
+      if (!yaExiste) throw err;
+      return yaExiste;
+    }
   },
 
   /** Arranca el centroll. */
@@ -388,7 +577,30 @@ export const centrollService = {
     );
   },
 
-  /** Devuelve el buy-in si el centroll no llego a arrancar. */
+  /**
+   * Devuelve el buy-in si el centroll no llego a arrancar.
+   *
+   * ------------------------------------------------------------------
+   * ANTES SE MIRABA LA COLA EN MEMORIA
+   *
+   *     const queue = queues.get(field.fieldId) ?? [];
+   *     const idx = queue.findIndex(p => p.telegramId === telegramId);
+   *     if (idx === -1) return 0;
+   *
+   * La cola vive en un `Map` del proceso. Tras un reinicio esta vacia, asi que un jugador
+   * que habia pagado y estaba esperando **no podia recuperar su dinero nunca**: el bot le
+   * decia que no estaba apuntado, y el campo no tenia constancia de el.
+   *
+   * La verdad es `registrations`, que esta en la base.
+   *
+   * ------------------------------------------------------------------
+   * Y NO SE DEVUELVE DOS VECES
+   *
+   * Se reclama la entrada con un filtro de estado: solo pasa de `waiting`/`seated` a
+   * `refunded` una vez. Si se llama dos veces, la segunda no encuentra nada que reclamar y
+   * devuelve 0, en vez de pagar otra vez.
+   * ------------------------------------------------------------------
+   */
   async refundIfNotStarted(telegramId: number): Promise<number> {
     const field = await Field.findOne({
       kind: 'centroll',
@@ -396,20 +608,64 @@ export const centrollService = {
     });
     if (!field) return 0;
 
-    const queue = queues.get(field.fieldId) ?? [];
-    const idx = queue.findIndex(p => p.telegramId === telegramId);
-    if (idx === -1) return 0;
-
-    queue.splice(idx, 1);
-    queues.set(field.fieldId, queue);
-
-    const buyIn = usdtToUnits(CENTROLL.buyInUsdt);
-    await User.updateOne({ telegramId }, { $inc: { 'balance.real': buyIn } });
-    await Field.updateOne(
-      { _id: field._id },
-      { $inc: { waiting: -1, buyInsCollected: -buyIn } },
+    const entrada = (field.registrations ?? []).find(
+      (r) =>
+        r.telegramId === telegramId &&
+        (r.status === 'waiting' || r.status === 'seated'),
     );
 
-    return buyIn;
+    if (!entrada) return 0; // No pago, o ya se le devolvio.
+
+    // 1. Se reclama. Si otro proceso la reclamo antes, no se paga.
+    const claim = await Field.updateOne(
+      { _id: field._id },
+      { $set: { 'registrations.$[r].status': 'refunded' } },
+      {
+        arrayFilters: [
+          { 'r.telegramId': telegramId, 'r.status': { $in: ['waiting', 'seated'] } },
+        ],
+      },
+    );
+
+    if (claim.modifiedCount === 0) return 0;
+
+    // 2. Se saca de la cola en memoria, si estaba (puede no estar tras un reinicio).
+    const queue = queues.get(field.fieldId) ?? [];
+    const idx = queue.findIndex((p) => p.telegramId === telegramId);
+    if (idx !== -1) {
+      queue.splice(idx, 1);
+      queues.set(field.fieldId, queue);
+    }
+
+    // 3. Se suelta el asiento si estaba sentado, para no dejar una plaza ocupada por
+    //    alguien a quien ya se le devolvio.
+    await Table.updateMany(
+      {
+        'field.fieldId': field.fieldId,
+        seats: { $elemMatch: { playerId: String(telegramId), status: { $ne: 'out' } } },
+      },
+      { $pull: { seats: { playerId: String(telegramId) } } },
+    );
+
+    // 4. Contadores. `waiting` o `seated` segun donde estuviera.
+    const inc =
+      entrada.status === 'waiting'
+        ? { waiting: -1, buyInsCollected: -entrada.buyIn }
+        : { seated: -1, playersRemaining: -1, buyInsCollected: -entrada.buyIn };
+
+    await Field.updateOne({ _id: field._id }, { $inc: inc });
+
+    // 5. A la cartera.
+    await User.updateOne(
+      { telegramId },
+      { $inc: { 'balance.real': entrada.buyIn } },
+    );
+
+    logger.info(
+      `Centroll ${field.fieldId}: a ${telegramId} se le devuelve ` +
+      `${formatUnits(entrada.buyIn)} USDT porque no arranco.`,
+    );
+
+    return entrada.buyIn;
   },
 };
