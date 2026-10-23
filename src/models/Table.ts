@@ -94,6 +94,15 @@ export interface ITable extends Document {
    */
   buyInUnits: number;
 
+  /**
+   * Fichas con las que entra cada jugador. Solo en mesas de freeroll.
+   *
+   * En un freeroll el `buyInUnits` es 0 (nadie paga), pero las fichas del torneo no son
+   * cero. Sin este campo los bots entraban con `smallBlind * 2` y se quedaban sin stack en
+   * dos manos, mientras el humano tenia 100 ciegas.
+   */
+  startChips?: number;
+
   seats: ISeat[];
   /** Asientos de esta mesa fisica. Siempre SEATS_PER_TABLE (7). */
   maxSeats: number;
@@ -200,6 +209,8 @@ const tableSchema = new Schema<ITable>({
   smallBlind: { type: Number, required: true },
   bigBlind: { type: Number, required: true },
   buyInUnits: { type: Number, required: true },
+  // Fichas iniciales del freeroll. Es distinto del buy-in: aqui nadie paga.
+  startChips: Number,
 
   seats: { type: [seatSchema], default: [] },
   maxSeats: { type: Number, required: true },

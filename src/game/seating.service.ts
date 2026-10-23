@@ -806,25 +806,26 @@ export class SeatingService {
   // ======================================================================
 
   /**
-   * Crea una mesa de cada tier y un freeroll por escalon.
+   * Crea una mesa de cada tier de cash.
    * Se ejecuta al arrancar para que el lobby nunca este vacio.
+   *
+   * ------------------------------------------------------------------
+   * LOS FREEROLLS YA NO SE SIEMBRAN AQUI
+   *
+   * Antes se creaba una mesa de freeroll por cada escalon de premio (1, 3, 10, 25, 50 y 200
+   * CUP). Ese producto ya no existe: el freeroll es ahora un CAMPO horario multi-mesa que
+   * gestiona `freeroll.service.ts`, con su propio reloj y su propio premio en USDT.
+   *
+   * Si se siguieran sembrando, el servidor arrancaria seis mesas `freeroll-1`, `freeroll-3`...
+   * que nadie puede listar ni usar, y el log diria "premio 1 CUP" en un producto que ya solo
+   * habla USDT. Ruido que confunde justo cuando se mira un despliegue.
+   * ------------------------------------------------------------------
    */
   async seedTables(): Promise<void> {
     for (const tier of TABLE_TIER_LIST) {
       const existing = await Table.findOne({ kind: 'cash', tierId: tier.id, status: 'waiting' });
       if (!existing) {
         await this.createCashTable(tier.id);
-      }
-    }
-
-    for (const prize of FREEROLL_PRIZES) {
-      const existing = await Table.findOne({
-        kind: 'freeroll',
-        prizeTier: prize,
-        status: { $in: ['waiting', 'running'] },
-      });
-      if (!existing) {
-        await this.createFreeroll(prize);
       }
     }
 

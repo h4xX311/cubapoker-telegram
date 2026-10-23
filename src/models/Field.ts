@@ -99,6 +99,54 @@ export interface IField extends Document {
   buyInUnits: number;
 
   /**
+   * PREMIO DE UN FREEROLL, en unidades internas. Lo pone la casa.
+   *
+   * ------------------------------------------------------------------
+   * POR QUE NO SE PUEDE DEDUCIR DEL BOTE
+   *
+   * En un campo de cash el premio sale de `buyInsCollected`: cada jugador paga su entrada y
+   * ese dinero es el bote. En un freeroll nadie paga, asi que `buyInsCollected` es 0 y el
+   * bote, por definicion, tambien. El premio es un GASTO DE ADQUISICION del operador, no
+   * una suma de entradas.
+   *
+   * Sin este campo, `settleField` repartiria 0 y el freeroll no pagaria nada. Y el error no
+   * seria visible: el campo terminaria `finished`, sin errores y con todos los premios a
+   * cero.
+   * ------------------------------------------------------------------
+   */
+  prizePoolUnits?: number;
+
+  /**
+   * Hora a la que se cierra la inscripcion y arranca el campo.
+   *
+   * Un freeroll NO arranca al llenarse: arranca a su hora, como un torneo programado. Si
+   * arrancara al llenarse, el jugador que se apunta temprano no sabria cuando empieza y el
+   * que llega tarde se lo pierde sin aviso.
+   */
+  scheduledStartAt?: Date;
+
+  /**
+   * Hasta cuando se puede entrar con el torneo ya empezado (registro tardio).
+   *
+   * Se apunta en el documento y no se calcula al vuelo con `scheduledStartAt + 12 min`
+   * porque esa regla acabaria escrita en dos sitios (aqui y en la UI) y un dia dirian cosas
+   * distintas.
+   */
+  lateRegUntil?: Date;
+
+  /** Fichas con las que empieza cada jugador. Solo freeroll. */
+  startChips?: number;
+
+  /**
+   * Ciegas del freeroll, ya calculadas al abrirlo.
+   *
+   * Se guardan aqui porque `createFieldTable` las pedia al tier de cash (`getTier`), y un
+   * freeroll no tiene tier. Sin esto, la mesa no se puede crear y el campo se queda vacio.
+   */
+  smallBlind?: number;
+  bigBlind?: number;
+
+  /**
    * Participantes objetivo para arrancar. Al llenarse, `status` pasa a
    * `running`. Para el cash son los `fieldSize` del tier; para un freeroll,
    * `FREEROLL_TARGET_FIELD`.
@@ -310,6 +358,16 @@ const fieldSchema = new Schema<IField>(
     },
 
     buyInUnits: { type: Number, required: true },
+
+    // Premio del freeroll. Es dinero de la casa, no una suma de entradas.
+    prizePoolUnits: { type: Number, default: 0 },
+    // Hora de arranque y fin del registro tardio. Los dos, para no repetir la regla.
+    scheduledStartAt: Date,
+    lateRegUntil: Date,
+    // Fichas iniciales y ciegas del freeroll, ya calculadas.
+    startChips: Number,
+    smallBlind: Number,
+    bigBlind: Number,
 
     targetField: { type: Number, required: true },
 

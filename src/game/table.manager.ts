@@ -599,9 +599,8 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
       // parte. Calcularlo ahi, con `targetField`, es lo mismo que hace
       // `seating.service.joinFreeroll`.
       const botChips =
-        table.buyInUnits > 0
-          ? table.buyInUnits
-          : table.smallBlind * 2;
+        table.startChips ??
+        (table.buyInUnits > 0 ? table.buyInUnits : table.smallBlind * 2);
       for (let i = 0; i < toAdd; i++) {
         this.addBotSeat(table, botChips);
       }
@@ -808,8 +807,24 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
   /** Anade un asiento de bot con buy-in coherente con la mesa. */
   private addBotSeat(table: ITable, buyIn: number): ISeat {
     const profile: BotProfile = botFactory.create();
+
+    // ------------------------------------------------------------------
+    // EL INDICE TIENE QUE SER UN HUECO LIBRE, NO `seats.length`
+    //
+    // El motor identifica a cada jugador por el string de su indice. Con
+    // `index: table.seats.length`, en cuanto se libera un asiento `out` el array se acorta
+    // y el siguiente bot recibe un indice que YA esta ocupado. El motor escribe entonces las
+    // fichas de un jugador sobre otro (ver el comentario de `syncEngineToTable`).
+    //
+    // Se busca el primer entero libre, que es lo mismo que hace `field.manager` al sentar a
+    // un humano.
+    // ------------------------------------------------------------------
+    const usados = new Set(table.seats.map((s) => s.index));
+    let indiceLibre = 0;
+    while (usados.has(indiceLibre)) indiceLibre++;
+
     const seat: ISeat = {
-      index: table.seats.length,
+      index: indiceLibre,
       kind: 'bot',
       playerId: profile.id,
       displayName: profile.name,
@@ -835,6 +850,46 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
 
     table.seats.push(seat);
     return seat;
+  }
+
+  /**
+   * Rellena una mesa con bots hasta que haya `minimo` asientos ACTIVOS.
+   *
+   * ------------------------------------------------------------------
+   * PARA QUE HACE FALTA, SI YA HAY UN RELLENO AUTOMATICO
+   *
+   * El relleno del `tick` es gradual: mete dos bots por vuelta y solo mientras el campo se
+   * esta llenando. Eso esta bien para un campo de 300 que tarda minutos en juntar gente.
+   *
+   * Un freeroll arranca a una hora fija, y puede llegar con UN solo humano. En ese momento
+   * `startField` exige dos asientos activos por mesa. Si se confia en que el `tick` ya habra
+   * puesto los bots, el arranque falla o se retrasa un ciclo, y el jugador ve un torneo que
+   * empieza tarde sin saber por que.
+   *
+   * Aqui se ponen los que falten en el acto y se devuelve cuantos se anyadieron, para que el
+   * planificador pueda registrar el numero en el log.
+   * ------------------------------------------------------------------
+   */
+  async asegurarMinimoAsientos(tableId: string, minimo: number): Promise<number> {
+    const table = await Table.findOne({ tableId });
+    if (!table) return 0;
+
+    const activos = () =>
+      table.seats.filter((s) => s.status === 'active' && s.chips > 0).length;
+
+    const max = table.maxSeats || 7;
+    let anyadidos = 0;
+
+    while (activos() < minimo && table.seats.length < max) {
+      const fichas =
+        table.startChips ??
+        (table.buyInUnits > 0 ? table.buyInUnits : table.smallBlind * 2);
+      this.addBotSeat(table, fichas);
+      anyadidos++;
+    }
+
+    if (anyadidos > 0) await table.save();
+    return anyadidos;
   }
 
   // ======================================================================

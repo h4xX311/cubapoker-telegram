@@ -7,11 +7,18 @@ import {
   TABLE_TIER_LIST,
   SEATS_PER_TABLE,
   FIELD_PAYOUT,
+  FREEROLL_PAYOUT,
   PAID_POSITIONS,
   FREEROLL_TARGET_FIELD,
   getTier,
   type TableTierId,
 } from '../config/product';
+import {
+  CIEGA_GRANDE_FREEROLL,
+  CIEGA_PEQUENA_FREEROLL,
+  FICHAS_INICIALES_FREEROLL,
+  PLAZAS_PAGADAS_FREEROLL,
+} from '../config/freeroll';
 import {
   shouldMergeTables,
   planMerge,
@@ -316,6 +323,156 @@ export const fieldManager = {
   },
 
   /**
+   * Ciegas y fichas iniciales de un campo, sea de CASH o de FREEROLL.
+   *
+   * ------------------------------------------------------------------
+   * POR QUE HACE FALTA ESTO
+   *
+   * `createFieldTable` pedia las ciegas a `getTier(field.tierId)`. Un freeroll no tiene
+   * nivel de buy-in: su `tierId` identifica la HORA (`freeroll-2026-10-23T20`), no un
+   * escalon de precio. `getTier` devolvia `undefined`, y el `!` de TypeScript no avisa en
+   * ejecucion: la mesa se creaba con `smallBlind: undefined` o reventaba al primer asiento.
+   *
+   * Aqui la regla esta en un solo sitio y el resto del gestor no necesita saber de que tipo
+   * es el campo.
+   */
+  blindsDeCampo(field: IField): { small: number; big: number; startChips: number } {
+    if (field.kind === 'freeroll') {
+      return {
+        small: field.smallBlind ?? CIEGA_PEQUENA_FREEROLL,
+        big: field.bigBlind ?? CIEGA_GRANDE_FREEROLL,
+        startChips: field.startChips ?? FICHAS_INICIALES_FREEROLL,
+      };
+    }
+
+    const tier = getTier(field.tierId as TableTierId);
+    if (!tier) {
+      throw new FieldError(
+        `Campo ${field.fieldId}: el nivel "${field.tierId}" no existe.`,
+        'UNKNOWN_TIER',
+      );
+    }
+
+    return {
+      small: tier.blinds.small,
+      big: tier.blinds.big,
+      // En cash, las fichas iniciales son el buy-in. El campo no las usa para crear mesas,
+      // pero devolverlas aqui evita que cada llamador invente su propio valor.
+      startChips: field.buyInUnits,
+    };
+  },
+
+  /**
+   * Inscribe GRATIS a un jugador en un freeroll.
+   *
+   * ------------------------------------------------------------------
+   * POR QUE NO SE REUTILIZA `register()`
+   *
+   * `register()` cobra un buy-in. Un freeroll no se cobra: si se llamara, el jugador pagaria
+   * por un torneo que se anuncia como gratis. Y no es solo el cobro: `register()` exige un
+   * `tierId` de cash para saber cuanto cobrar.
+   *
+   * Lo que SI se reutiliza es todo lo demas: la anotacion en `registrations` con el cobro en
+   * la misma escritura (aqui sin cobro), la cola y `trySeat`, que es quien sabe repartir
+   * asientos, crear mesas y arrancar cuando toca.
+   *
+   * ------------------------------------------------------------------
+   * REGISTRO TARDIO
+   *
+   * Un freeroll acepta gente con el torneo ya empezado hasta `lateRegUntil`. El jugador
+   * entra con las fichas iniciales completas, como en cualquier torneo con registro tardio:
+   * no se le descuentan las ciegas que pasaron porque no estaba.
+   */
+  async registrarEnFreeroll(
+    field: IField,
+    telegramId: number,
+    username?: string,
+  ): Promise<{ fieldId: string; seated: boolean; position: number; late: boolean }> {
+    const ahora = Date.now();
+
+    const enFilling = field.status === 'filling';
+    const enTardio =
+      field.status === 'running' &&
+      !!field.lateRegUntil &&
+      ahora < new Date(field.lateRegUntil).getTime();
+
+    if (!enFilling && !enTardio) {
+      throw new FieldError(
+        'La inscripcion de este freeroll ya esta cerrada.',
+        'REGISTRATION_CLOSED',
+      );
+    }
+
+    // Ya apuntado: no se le duplica la entrada. Sin esto, pulsar dos veces crea dos
+    // `registrations`, y al liquidar el torneo el mismo jugador cobraria dos plazas.
+    const yaApuntado = await Field.findOne({
+      fieldId: field.fieldId,
+      registrations: {
+        $elemMatch: {
+          telegramId,
+          status: { $in: ['waiting', 'seated'] },
+        },
+      },
+    });
+
+    if (yaApuntado) {
+      throw new FieldError(
+        'Ya estas apuntado a este freeroll.',
+        'ALREADY_IN',
+      );
+    }
+
+    // Un jugador no puede estar en dos sitios a la vez: ni en otro campo ni en una mesa
+    // suelta. En un torneo eso seria jugar dos mesas con el mismo reloj.
+    if (await this.isSeated(telegramId)) {
+      throw new FieldError(
+        'Ya estas jugando en otra mesa. Termina o sal de ella antes de entrar.',
+        'ALREADY_IN_FIELD',
+      );
+    }
+
+    const { startChips } = this.blindsDeCampo(field);
+
+    // La anotacion. En un freeroll no hay cobro, asi que no hay nada que deshacer si falla:
+    // o queda la entrada o no queda. Aun asi se hace en UNA escritura, para que el contador
+    // y la persona nunca se separen.
+    await Field.updateOne(
+      { _id: field._id },
+      {
+        $inc: { waiting: 1 },
+        $push: {
+          registrations: {
+            telegramId,
+            username,
+            // 0: no pago nada. Se guarda igual para que la liquidacion sepa que esta
+            // inscrito y no lo confunda con un hueco.
+            buyIn: 0,
+            status: 'waiting',
+            at: new Date(),
+          },
+        },
+      },
+    );
+
+    field.waiting += 1;
+
+    const queue = queues.get(field.fieldId) ?? [];
+    queue.push({ telegramId, chips: startChips, username });
+    queues.set(field.fieldId, queue);
+
+    const position = queue.length;
+    const seated = await this.trySeat(field);
+
+    logger.info(
+      `Freeroll ${field.fieldId}: ${telegramId} inscrito ` +
+      `(${enTardio ? 'registro tardio' : 'registro normal'}, ` +
+      `${seated ? 'sentado' : 'en cola'})`,
+    );
+
+    return { fieldId: field.fieldId, seated, position, late: enTardio };
+  },
+
+  /**
    * Registra a un jugador en el campo: le cobra el buy-in y lo mete en cola.
    *
    * COBRO. El buy-in se descuenta aqui y solo aqui. Al final, lo que no se
@@ -615,10 +772,24 @@ export const fieldManager = {
    * a entrar en cola sin volver a registrarse.
    */
   async trySeat(field: IField): Promise<boolean> {
-    if (field.status !== 'filling') return false;
+    // ------------------------------------------------------------------
+    // UN FREEROLL SIGUE SENTANDO GENTE CON EL TORNEO EMPEZADO
+    //
+    // `status === 'filling'` era la unica puerta. Para un campo de cash es correcto: el
+    // campo arranca y se cierra la inscripcion. Un freeroll con registro tardio no: durante
+    // 12 minutos despues del inicio, el que llega tiene que poder sentarse.
+    //
+    // Se comprueba contra `lateRegUntil`, que esta en el documento y por tanto sobrevive a
+    // un reinicio. Una variable en memoria se perderia y el registro tardio se cerraria solo
+    // al desplegar.
+    // ------------------------------------------------------------------
+    const enRegistroTardio =
+      field.kind === 'freeroll' &&
+      field.status === 'running' &&
+      !!field.lateRegUntil &&
+      Date.now() < new Date(field.lateRegUntil).getTime();
 
-    const tier = getTier(field.tierId as TableTierId);
-    if (!tier) return false;
+    if (field.status !== 'filling' && !enRegistroTardio) return false;
 
     const queue = queues.get(field.fieldId) ?? [];
     let seatedAny = false;
@@ -777,7 +948,16 @@ export const fieldManager = {
     }
 
     // --- Arrancar si se lleno ---
-    if (queue.length === 0 && this.countSeated(field) >= field.targetField) {
+    //
+    // Solo un campo que AUN NO HA EMPEZADO puede arrancar por llenarse. Un freeroll esta en
+    // `running` por su reloj, no por su aforo: si esta rama se ejecutara con el torneo ya
+    // empezado, `startField` volveria a fijar `playersRemaining` y `startedAt`, y las
+    // posiciones de los que ya se han eliminado se resentirian.
+    if (
+      field.status === 'filling' &&
+      queue.length === 0 &&
+      this.countSeated(field) >= field.targetField
+    ) {
       await this.startField(field);
     }
 
@@ -786,21 +966,29 @@ export const fieldManager = {
 
   /** Crea una mesa de 7 que pertenece al campo. */
   async createFieldTable(field: IField, tableNumber: number): Promise<ITable> {
-    const tier = getTier(field.tierId as TableTierId)!;
+    const { small, big, startChips } = this.blindsDeCampo(field);
+    const esFreeroll = field.kind === 'freeroll';
     const tableId = `field-${field.fieldId}-t${tableNumber}`;
 
     const documento = {
       tableId,
-      kind: 'cash',
+      // Una mesa de freeroll se marca como tal para que el motor sepa que sus fichas son
+      // puntos del torneo y no saldo del jugador.
+      kind: esFreeroll ? ('freeroll' as const) : ('cash' as const),
       tierId: field.tierId,
       status: 'waiting',
-      // Las ciegas salen del tier ya calculadas en unidades internas. No se
+      // Las ciegas salen del campo ya calculadas en unidades internas. No se
       // derivan aqui con `Math.round(buyIn / 100)`: el redondeo puede dar dos
       // valores distintos para el mismo tier segun cuando se cree la mesa, y el
       // jugador lo notaria al pasar de una mesa a otra del mismo campo.
-      smallBlind: tier.blinds.small,
-      bigBlind: tier.blinds.big,
-      buyInUnits: field.buyInUnits,
+      smallBlind: small,
+      bigBlind: big,
+      // En un freeroll nadie paga entrada: el buy-in de la mesa es 0. Las fichas con las
+      // que se juega van en `startChips`, que es otra cosa.
+      buyInUnits: esFreeroll ? 0 : field.buyInUnits,
+      // Solo en freeroll. Es lo que usan los bots para entrar con el mismo stack que un
+      // humano; sin esto entrarian con `smallBlind * 2` y caerian en dos manos.
+      ...(esFreeroll ? { startChips } : {}),
       maxSeats: SEATS_PER_TABLE,
       seats: [],
       field: {
@@ -2356,10 +2544,28 @@ export const fieldManager = {
     // Se toma el MAXIMO entre lo ya cobrado por mano y el del campo, no la suma: si
     // las mesas ya cobraron su parte no se vuelve a cobrar. Asi el rake total es el
     // 5% del campo, venga como venga la distribucion de manos.
-    const grossPot = field.buyInsCollected;
-    const rakeObjetivo = rakeOfField(grossPot);
-    let rake = Math.max(field.rakeCollected, rakeObjetivo);
-    const netPot = Math.max(0, grossPot - rake);
+    // ------------------------------------------------------------------
+    // UN FREEROLL NO TIENE BOTE DE ENTRADAS: TIENE UN PREMIO DE LA CASA
+    //
+    // En un campo de cash, `buyInsCollected` es el bote y el rake sale de ahi. En un
+    // freeroll nadie paga entrada, asi que `buyInsCollected` es 0 y aplicar la misma
+    // formula repartiria CERO. El campo terminaria `finished`, sin un solo error en el log
+    // y con todos los premios a cero: el fallo mas silencioso posible.
+    //
+    // El premio es `prizePoolUnits`, lo pone el operador, y no lleva rake. Se reparte
+    // entero entre las plazas de `FREEROLL_PAYOUT` (50/30/20).
+    //
+    // Las FICHAS de la mesa no son dinero aqui: son puntos del torneo. Por eso se barren
+    // igual (para que una segunda liquidacion no las pague otra vez) pero no se usan para
+    // calcular el premio.
+    // ------------------------------------------------------------------
+    const esFreeroll = field.kind === 'freeroll';
+    const premioCasa = Math.max(0, field.prizePoolUnits ?? 0);
+
+    const grossPot = esFreeroll ? premioCasa : field.buyInsCollected;
+    const rakeObjetivo = esFreeroll ? 0 : rakeOfField(grossPot);
+    let rake = esFreeroll ? 0 : Math.max(field.rakeCollected, rakeObjetivo);
+    const netPot = esFreeroll ? premioCasa : Math.max(0, grossPot - rake);
 
     // ------------------------------------------------------------------
     // CUANTO SE REPARTE: NUNCA MAS DE `grossPot - rake`
@@ -2376,9 +2582,9 @@ export const fieldManager = {
     // suman exactamente el 5% del campo. Repartir el minimo hace que el error sea
     // hacia el lado conservador: la plataforma retiene la diferencia en vez de
     // regalarla.
-    const distributable = Math.min(swept, netPot);
-    const withheld = swept - distributable;
-    const faltan = netPot - swept;
+    const distributable = esFreeroll ? premioCasa : Math.min(swept, netPot);
+    const withheld = esFreeroll ? 0 : swept - distributable;
+    const faltan = esFreeroll ? 0 : netPot - swept;
 
     if (faltan > 0) {
       // ------------------------------------------------------------------
@@ -2458,7 +2664,13 @@ export const fieldManager = {
 
     // El reparto por posicion. `FIELD_PAYOUT` suma 100, asi que las partes cubren
     // todo el bote; lo que sobre por posiciones sin adjudicado va al ganador.
-    const shares = splitPrize(distributable, FIELD_PAYOUT);
+    //
+    // Un freeroll reparte con SU tabla (50/30/20), no con la del cash: son productos
+    // distintos y el numero de plazas pagadas no tiene por que coincidir.
+    const shares = splitPrize(
+      distributable,
+      esFreeroll ? FREEROLL_PAYOUT : FIELD_PAYOUT,
+    );
 
     // Las posiciones ya adjudicadas durante el campo (las de `collectEliminations`).
     // Se leen de `field`, no del documento cerrado: el cierre atomico de mas abajo
@@ -2504,7 +2716,12 @@ export const fieldManager = {
         continue;
       }
 
-      await this.creditPrize(telegramId, amount, position);
+      await this.creditPrize(
+        telegramId,
+        amount,
+        position,
+        esFreeroll ? 'play' : 'real',
+      );
       paid.push({ position, telegramId, username, amount, tableId });
     }
 
@@ -2512,7 +2729,12 @@ export const fieldManager = {
     // que en un Sit'n'Go es exactamente lo que hace: se lleva la pila.
     if (remainder > 0) {
       if (winnerId !== null) {
-        await this.creditPrize(winnerId, remainder, 1);
+        await this.creditPrize(
+          winnerId,
+          remainder,
+          1,
+          esFreeroll ? 'play' : 'real',
+        );
         logger.info(
           `Campo ${field.fieldId}: ${formatUnits(remainder)} USDT de posiciones sin ` +
           `adjudicar van al ganador ${winnerId}`,
@@ -2609,6 +2831,61 @@ export const fieldManager = {
   // ======================================================================
 
   /** Jugadores sentados reales (no el contador, que puede ir atrasado). */
+  /**
+   * Reconstruye la cola en memoria de un freeroll desde `registrations`.
+   *
+   * ------------------------------------------------------------------
+   * POR QUE HACE FALTA
+   *
+   * La cola de espera (`queues`) es un `Map` del proceso. Al reiniciar el servidor se vacia.
+   * `registrations` esta en la base y sobrevive.
+   *
+   * Sin esta reconstruccion, un despliegue a las 19:59 dejaria el freeroll de las 20:00 con
+   * jugadores apuntados en el documento y una cola vacia: `trySeat` no sentaria a nadie y
+   * `startField` fallaria por no haber dos activos. El torneo se cancelaria "solo".
+   *
+   * No se duplican entradas: si el jugador ya esta en la cola (registro normal, sin reinicio)
+   * se salta.
+   * ------------------------------------------------------------------
+   */
+  async rehidratarColaFreeroll(field: IField): Promise<number> {
+    if (field.kind !== 'freeroll') return 0;
+
+    const pendientes = (field.registrations ?? []).filter(
+      (r) => r.status === 'waiting',
+    );
+
+    if (pendientes.length === 0) return 0;
+
+    const { startChips } = this.blindsDeCampo(field);
+    const queue = queues.get(field.fieldId) ?? [];
+    const yaEnCola = new Set(queue.map((p) => p.telegramId));
+
+    let anyadidos = 0;
+    for (const r of pendientes) {
+      if (yaEnCola.has(r.telegramId)) continue;
+      queue.push({
+        telegramId: r.telegramId,
+        chips: startChips,
+        username: r.username,
+      });
+      yaEnCola.add(r.telegramId);
+      anyadidos++;
+    }
+
+    queues.set(field.fieldId, queue);
+    return anyadidos;
+  },
+
+  /** Saca a un jugador de la cola en memoria. No toca la base. */
+  sacarDeCola(fieldId: string, telegramId: number): void {
+    const queue = queues.get(fieldId) ?? [];
+    const i = queue.findIndex((p) => p.telegramId === telegramId);
+    if (i === -1) return;
+    queue.splice(i, 1);
+    queues.set(fieldId, queue);
+  },
+
   countSeated(field: IField): number {
     const queue = queues.get(field.fieldId) ?? [];
     return field.seated + queue.length;
@@ -2650,6 +2927,11 @@ export const fieldManager = {
       tierId: field.tierId,
       status: field.status,
       buyIn: field.buyInUnits,
+      // Un freeroll no cobra entrada: su bote es `prizePoolUnits`, que lo pone la casa.
+      prizePoolUnits: field.prizePoolUnits ?? 0,
+      scheduledStartAt: field.scheduledStartAt ?? null,
+      lateRegUntil: field.lateRegUntil ?? null,
+      startChips: field.startChips ?? null,
       targetField: field.targetField,
       seated: field.seated,
       waiting: field.waiting,
@@ -2747,8 +3029,45 @@ export const fieldManager = {
    * ciclo existia en cada mesa cash. Y el ratio 1:10 no crea saldo: lo que no se desbloquea
    * sigue siendo jugable, no se multiplica.
    */
-  async creditPrize(telegramId: number, amount: number, position: number): Promise<void> {
+  async creditPrize(
+    telegramId: number,
+    amount: number,
+    position: number,
+    destino: 'real' | 'play' = 'real',
+  ): Promise<void> {
     if (amount <= 0) return;
+
+    // ------------------------------------------------------------------
+    // UN PREMIO DE FREEROLL VA A `balance.play`, NO A `balance.real`
+    //
+    // Decision del 23 de octubre: el freeroll es el gancho de adquisicion, y su premio se
+    // juega y se desbloquea jugando (ratio 1:10). Si fuera retirable desde el primer
+    // momento, cada torneo gratuito sacaria dinero real de la plataforma sin que nadie
+    // hubiera pagado una entrada. Con 24 freerolls al dia, ese agujero no se nota el primer
+    // dia; se nota el mes que viene.
+    //
+    // Los campos de CASH siguen pagando a `real`: ahi el dinero salio de los buy-ins de los
+    // demas y es del jugador.
+    // ------------------------------------------------------------------
+    if (destino === 'play') {
+      await User.updateOne(
+        { telegramId },
+        {
+          $inc: {
+            'balance.play': amount,
+            // Se anota igual en la estadistica de freerolls ganados. Es la misma cifra
+            // historica de siempre, sin cambiarle el significado.
+            'stats.totalFreerollWon': amount,
+          },
+        },
+      );
+
+      logger.info(
+        `Freeroll: ${telegramId} cobra ${formatUnits(amount)} USDT de promocion ` +
+        `por la posicion ${position}`,
+      );
+      return;
+    }
 
     await User.updateOne(
       { telegramId },

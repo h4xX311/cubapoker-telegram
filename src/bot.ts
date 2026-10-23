@@ -19,6 +19,7 @@ import { VIP_CONFIG, VIPLevel } from './models/VIP';
 import { SIMULATION_ENABLED, pruneSimulatedOrders } from './services/payment/gateway';
 import { tableManager, shutdownEngine } from './game/table.manager';
 import { fieldManager } from './game/field.manager';
+import { freerollManager } from './game/freeroll.service';
 import { SUIT_SYMBOL } from './game/card.utils';
 import { seatingService } from './game/seating.service';
 import { logger } from './utils/logger';
@@ -162,6 +163,79 @@ tableManager.setNotifier(async (notice) => {
   });
 });
 
+/**
+ * AVISO DE INICIO DE FREEROLL
+ * ==========================
+ *
+ * Cuando el reloj arranca un freeroll, los apuntados reciben un mensaje con un boton para
+ * entrar. Sin esto, el jugador tiene que acordarse de abrir el bot a la hora exacta: en la
+ * practica, el torneo empieza con el humano ausente, el motor le pliega las manos y pierde
+ * el stack sin haber jugado.
+ *
+ * ------------------------------------------------------------------
+ * QUE PASA SI NO ENTRA
+ *
+ * Se le pliega por defecto cuando le toca (ver `checkTurnTimeout`): pasa si no hay apuesta,
+ * se pliega si la hay. Eso es lo correcto en un torneo: no se le puede regalar el turno ni
+ * dejar la mesa congelada esperandole.
+ *
+ * Si vuelve mas tarde, entra a la misma mesa desde el lobby. El registro tardio de 12
+ * minutos es para los que NO estaban apuntados, no para los que ya estaban: su asiento se
+ * conserva mientras les queden fichas.
+ * ------------------------------------------------------------------
+ */
+freerollManager.setAvisoInicio(async (field, jugadores) => {
+  if (SIN_TOKEN) return;
+
+  const inicio = field.scheduledStartAt
+    ? new Date(field.scheduledStartAt)
+    : null;
+
+  // Los slots caen en horas enteras. Se muestra en UTC, que para Cuba y Latinoamerica
+  // coincide con la hora local en punto (todos los husos van en horas enteras).
+  const hora = inicio
+    ? `${String(inicio.getUTCHours()).padStart(2, '0')}:00`
+    : '';
+
+  const premio = formatUnits(field.prizePoolUnits ?? 0);
+
+  for (const telegramId of jugadores) {
+    const user = await User.findOne({ telegramId });
+    const chatId = (user as any)?.chatId as number | undefined;
+    if (!chatId) continue;
+
+    const cuerpo = [
+      `🏆 *Tu freeroll de las ${hora} ya empezo*`,
+      '',
+      `Entra a tu mesa. Premio: *${premio} USDT* en saldo de promocion.`,
+      '',
+      'Si no entras, el motor juega por ti: pasa si no hay apuesta y se pliega si la hay.',
+      'Quedan 12 minutos de registro tardio para quien quiera entrar ahora.',
+    ].join('\n');
+
+    await bot
+      .sendMessage(chatId, cuerpo, {
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: '🎮 Entrar a mi mesa',
+                web_app: { url: `${process.env.MINI_APP_URL}/game` },
+              },
+            ],
+          ],
+        },
+      })
+      .catch((error: any) => {
+        logger.warn(
+          `Freeroll ${field.fieldId}: no se pudo avisar a ${telegramId}: ` +
+          `${error?.message ?? error}`,
+        );
+      });
+  }
+});
+
 if (USE_WEBHOOK) {
   // Verificacion de la firma del webhook. Sin esto, cualquiera podria enviar
   // updates falsos y hacerse pasar por Telegram.
@@ -279,7 +353,7 @@ bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
   const user = msg.from!;
 
-  await User.findOneAndUpdate(
+  const dbUser = await User.findOneAndUpdate(
     { telegramId: user.id },
     {
       // Se guarda `chatId` para poder avisar de turnos. Solo se registra si el
@@ -296,30 +370,28 @@ bot.onText(/\/start/, async (msg) => {
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
 
+  const saldoReal = formatUnits(dbUser?.balance?.real ?? 0);
+  const saldoPromo = formatUnits(dbUser?.balance?.play ?? 0);
+
   const welcomeMessage = `
-🃏 *Bienvenido a CubaPoker* ${user.first_name}!
+🃏 *Bienvenido a CubaPoker* ${user.first_name}
 
-La primera plataforma de poker con blockchain y métodos de pagos cubanos.
+Poker online en USDT. Sin bancos y sin intermediarios.
 
-💰 *Tu balance:*
-• Créditos: 0 CUP
-• USDT: 0.00
+💰 *Tu saldo:*
+• Retirable: *${saldoReal} USDT*
+• Promoción: *${saldoPromo} USDT*
 
-🎮 *Comandos disponibles:*
-/play - Jugar poker
-/tournaments - Ver torneos
-/vip - Comprar VIP
-/referrals - Ver referidos
-/achievements - Ver logros
-/deposit - Depositar fondos
-/withdraw - Retirar fondos
-/balance - Ver balance
+🎮 *Todo lo que puedes hacer:*
+/play - Abrir el lobby
+/tournaments - Torneos y freerolls (uno cada hora)
+/vip - Niveles VIP
+/referrals - Invita y gana
+/achievements - Logros
+/deposit - Depositar USDT
+/withdraw - Retirar USDT
+/balance - Ver saldo
 /help - Ayuda
-
-🇨🇺 *Métodos de pago:*
-• EnZona
-• QvaPay
-• USDT (TRC20)
   `;
 
   // Las URLs deben coincidir con las rutas que la Mini App resuelve en App.tsx.
@@ -328,7 +400,7 @@ La primera plataforma de poker con blockchain y métodos de pagos cubanos.
     inline_keyboard: [
       [
         { text: '🎮 Jugar', web_app: { url: `${app}/game` } },
-        { text: '🏆 Torneos', web_app: { url: `${app}/tournaments` } },
+        { text: '🏆 Freeroll', web_app: { url: `${app}/freeroll` } },
       ],
       [
         { text: '💰 Depositar', web_app: { url: `${app}/deposit` } },
@@ -739,6 +811,32 @@ const start = async () => {
   tableManager.setFieldCoordinator(() => fieldManager.tick());
 
   await tableManager.start();
+
+  // ------------------------------------------------------------------
+  // EL RELOJ DE LOS FREEROLLS
+  //
+  // Cada 30 segundos se mira si hay que abrir el siguiente slot, arrancar el que ya llego
+  // a su hora o cancelar el que se quedo atras. Se hace al arrancar tambien, no solo en el
+  // intervalo: si el servidor estuvo caido, el primer `procesar()` recupera el torneo que
+  // deberia estar en marcha (si aun esta dentro del registro tardio) o lo cancela.
+  //
+  // `unref()` para que este temporizador no impida que el proceso termine en un apagado
+  // ordenado; el servidor HTTP es el que mantiene vivo el proceso.
+  // ------------------------------------------------------------------
+  try {
+    const primera = await freerollManager.procesar();
+    logger.info(
+      `Freerolls: vuelta inicial (${primera.arrancados} arrancados, ` +
+      `${primera.cancelados} cancelados).`,
+    );
+  } catch (error) {
+    logger.error('Freerolls: fallo la vuelta inicial:', error);
+  }
+
+  const freerollTimer = setInterval(() => {
+    void freerollManager.procesar();
+  }, 30_000);
+  freerollTimer.unref();
 
   app.listen(PORT, () => {
     logger.info(`CubaPoker escuchando en el puerto ${PORT}`);

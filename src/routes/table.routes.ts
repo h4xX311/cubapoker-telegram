@@ -3,6 +3,7 @@ import { tableManager } from '../game/table.manager';
 import { seatingService, TableError } from '../game/seating.service';
 import { fieldManager, FieldError } from '../game/field.manager';
 import { centrollService, CentrollError } from '../game/centroll.service';
+import { freerollManager, FreerollError } from '../game/freeroll.service';
 import { Field, toPublicField } from '../models/Field';
 import { Table } from '../models/Table';
 import { requireTelegramAuth, getAuthedTelegramId } from '../middleware/telegramAuth';
@@ -197,6 +198,73 @@ router.get('/fields/:fieldId', async (req: Request, res: Response) => {
   }
 });
 
+// ======================================================================
+// FREEROLLS HORARIOS
+// ======================================================================
+
+/**
+ * El lobby de freerolls: el que esta abierto, los que estan en juego con registro tardio,
+ * los proximos slots y si el que pregunta ya esta apuntado.
+ *
+ * La cuenta atras la calcula la UI con `inicio`, que viene en ISO. El servidor no manda
+ * "faltan 12 minutos" porque ese numero caduca en cuanto sale de aqui.
+ */
+router.get('/freerolls', async (req: Request, res: Response) => {
+  try {
+    const telegramId = getAuthedTelegramId(req);
+    const estado = await freerollManager.estado(telegramId);
+    res.json({ success: true, ...estado });
+  } catch (error) {
+    res.status(500).json({
+      error: error instanceof Error ? error.message : 'Error al leer los freerolls',
+    });
+  }
+});
+
+/** Inscribirse. Es gratis: no se cobra nada. */
+router.post('/freerolls/register', async (req: Request, res: Response) => {
+  try {
+    const telegramId = getAuthedTelegramId(req);
+    const user = await User.findOne({ telegramId });
+    const fieldId = typeof req.body?.fieldId === 'string' ? req.body.fieldId : undefined;
+
+    const result = await freerollManager.registrar(
+      telegramId,
+      user?.firstName,
+      fieldId,
+    );
+
+    res.json({ success: true, ...result });
+  } catch (error) {
+    const status =
+      error instanceof FreerollError || error instanceof FieldError ? 400 : 500;
+    res.status(status).json({
+      error: error instanceof Error ? error.message : 'No se pudo inscribir',
+    });
+  }
+});
+
+/** Cancelar la inscripcion antes de que empiece. */
+router.post('/freerolls/leave', async (req: Request, res: Response) => {
+  try {
+    const telegramId = getAuthedTelegramId(req);
+    const fieldId = req.body?.fieldId;
+
+    if (typeof fieldId !== 'string') {
+      res.status(400).json({ error: 'Falta el freeroll' });
+      return;
+    }
+
+    const result = await freerollManager.salir(telegramId, fieldId);
+    res.json({ success: true, ...result });
+  } catch (error) {
+    const status = error instanceof FreerollError ? 400 : 500;
+    res.status(status).json({
+      error: error instanceof Error ? error.message : 'No se pudo cancelar',
+    });
+  }
+});
+
 /**
  * Campos abiertos ahora mismo, y EN CUAL DE ELLOS ESTA EL QUE PREGUNTA.
  *
@@ -214,7 +282,7 @@ router.get('/fields/:fieldId', async (req: Request, res: Response) => {
  * Por eso la ruta lleva autenticacion: sin ella no se puede saber de quien se trata.
  *
  * `puedeSalir` solo es true en `filling`. Una vez que el campo ha arrancado no se puede
- * salir (seria Steiner sus fichas al bote y quedarse con el premio sin jugar), y el boton
+ * salir (seria tirar sus fichas al bote y quedarse con el premio sin jugar), y el boton
  * tiene que decirlo en vez de fallar.
  * ------------------------------------------------------------------
  */
@@ -223,6 +291,13 @@ router.get('/fields', requireTelegramAuth, async (req: Request, res: Response) =
     const telegramId = getAuthedTelegramId(req);
 
     const fields = await Field.find({
+      // Solo cash. Los freerolls y el centroll tienen su propia pantalla y su propio
+      // ciclo de vida: si se colaran aqui, un jugador apuntado al freeroll veria "estas
+      // en un campo" en la pantalla de mesas cash y un boton para salirse del torneo.
+      //
+      // `kind` no existia en los primeros documentos. Un campo antiguo sin `kind` es cash:
+      // excluirlo dejaria la pantalla de mesas vacia tras desplegar.
+      $or: [{ kind: 'cash' }, { kind: { $exists: false } }],
       status: { $in: ['filling', 'running', 'final'] },
     })
       .sort({ createdAt: -1 })
@@ -405,39 +480,6 @@ router.get('/my-table', requireTelegramAuth, async (req: Request, res: Response)
     });
   } catch (error) {
     res.status(500).json({ error: 'Error' });
-  }
-});
-
-// ==========================================================================
-// Freerolls
-// ==========================================================================
-
-/** Lista de freerolls por escalon de premio. */
-router.get('/freerolls', async (_req: Request, res: Response) => {
-  try {
-    const freerolls = await seatingService.listFreerolls();
-    res.json({ success: true, freerolls });
-  } catch (error) {
-    logger.error('GET /game/freerolls:', error);
-    res.status(500).json({ error: 'Error obteniendo freerolls' });
-  }
-});
-
-/** Registrarse en un freeroll. */
-router.post('/freerolls/join', async (req: Request, res: Response) => {
-  try {
-    const telegramId = getAuthedTelegramId(req);
-    const result = await seatingService.joinFreeroll({
-      telegramId,
-      prizeTier: req.body.prizeTier ? Number(req.body.prizeTier) : undefined,
-      freerollId: req.body.freerollId,
-    });
-    res.json({ success: true, ...result });
-  } catch (error) {
-    const status = error instanceof TableError ? error.status : 500;
-    res.status(status).json({
-      error: error instanceof Error ? error.message : 'Error al registrarse',
-    });
   }
 });
 
