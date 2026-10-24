@@ -1,9 +1,9 @@
 /**
  * Tipos compartidos del Mini App.
  *
- * MONEDA: la unidad de la cuenta es USDT (ver `config/currency.ts`), no CUP.
- * CUP es solo la via de entrada/salida en Cuba y la referencia que el usuario
- * ve debajo del saldo.
+ * MONEDA: la unica moneda de la plataforma es USDT. Los importes de cuenta que
+ * llegan por la API ya estan en USDT; las unidades internas (1 USDT = 1000) no
+ * cruzan la frontera. Las fichas de una mesa son otra cosa: son chips de juego.
  */
 
 export const PAGES = [
@@ -78,22 +78,12 @@ export interface CashTier {
   id: string;
   label: string;
   description: string;
-  /** Participantes del campo (multi-mesa). NO son asientos. */
-  fieldSize: number;
-  /** Mesas de 7 que componen el campo. */
-  tables: number;
   /** Buy-in por jugador, en USDT. */
   buyIn: number;
+  /** Ciegas en USDT. */
   blinds: { small: number; big: number };
   /** Stack de referencia en ciegas grandes. */
   stackInBigBlinds: number;
-  /** Bote neto estimado a campo lleno (95% de lo que pone todo el mundo). */
-  estNetPot: number;
-  /** Premio estimado para el ganador. */
-  estFirstPrize: number;
-  /** Rake estimado del campo completo. */
-  estRake: number;
-  payout: PayoutEntry[];
 }
 
 /** Un freeroll en el lobby (abierto o en juego). */
@@ -150,7 +140,6 @@ export interface ProductConfig {
   freerollMaxField: number;
   centroll: {
     buyIn: number;
-    buyInCup: number;
     prizeMultiplier: number;
     targetField: number;
     maxField: number;
@@ -158,7 +147,6 @@ export interface ProductConfig {
   };
   unlock: UnlockInfo;
   withdrawals: WithdrawalLimits;
-  cupPerUsdt: number;
 }
 
 export interface TableSummary {
@@ -183,8 +171,6 @@ export interface TableSummary {
     fieldStatus: 'filling' | 'running' | 'final' | 'finished';
   };
   occupied: number;
-  humans: number;
-  bots: number;
   pot: number;
   phase: string;
   handNumber: number;
@@ -213,7 +199,6 @@ export interface FreerollSummary {
 
 export interface SeatView {
   index: number;
-  kind: 'human' | 'bot';
   displayName: string;
   chips: number;
   bet: number;
@@ -223,23 +208,19 @@ export interface SeatView {
   isBigBlind: boolean;
   lastAction?: string;
   isYou: boolean;
-  botStyle?: string;
 }
 
 export interface TableView {
   tableId: string;
-  kind: 'cash' | 'freeroll';
+  kind: 'cash' | 'freeroll' | 'centroll';
   tierId?: string;
   prizeTier?: number;
   status: string;
+  /** Ciegas en fichas de la mesa, no en USDT. */
   smallBlind: number;
   bigBlind: number;
-  minBuyIn: number;
-  guaranteedPrize: number;
   maxSeats: number;
   occupied: number;
-  humans: number;
-  bots: number;
   hand: {
     handNumber: number;
     phase: string;

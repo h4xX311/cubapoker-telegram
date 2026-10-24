@@ -18,13 +18,9 @@ import {
   CENTROLL,
   UNLOCK_RATES,
 } from '../config/product';
-import {
-  WITHDRAWALS,
-  CUP_PER_USDT,
-  usdtToCup,
-} from '../config/currency';
+import { WITHDRAWALS } from '../config/currency';
 import { unitsToUsdt } from '../config/units';
-import { fieldPayout, prizeDisclosure } from '../services/payout.service';
+import { prizeDisclosure } from '../services/payout.service';
 import { unlockService } from '../services/unlock.service';
 
 const router = Router();
@@ -34,40 +30,25 @@ router.use(requireTelegramAuth);
 router.get('/config', (_req: Request, res: Response) => {
   res.json({
     success: true,
-    // Asientos por mesa fisica. La UI debe mostrar "7-max" como formato, no
-    // "500 jugadores por mesa": el 500 es el field completo (multi-mesa).
+    // Asientos por mesa fisica. Las mesas cash son ring tables 7-max: el
+    // jugador entra, juega las manos que quiera y se levanta con sus fichas.
     seatsPerTable: SEATS_PER_TABLE,
 
-    cashTiers: TABLE_TIER_LIST.map(t => {
-      // El premio sale del bote del campo: sale multiplicando por 300
-      // participantes. `fieldPayout` trabaja en unidades internas, asi que se
-      // le pasa el buy-in en unidades y se convierte la salida a USDT.
-      const full = fieldPayout(t.buyInUnits, t.fieldSize);
-      const winner = full.entries.find(e => e.position === 1);
-
-      return {
-        id: t.id,
-        label: t.label,
-        description: t.description,
-        fieldSize: t.fieldSize,
-        tables: Math.ceil(t.fieldSize / SEATS_PER_TABLE),
-        buyIn: t.buyInUsdt,
-        blinds: {
-          small: unitsToUsdt(t.blinds.small),
-          big: unitsToUsdt(t.blinds.big),
-        },
-        stackInBigBlinds: t.stackInBigBlinds,
-        // Todo a USDT para la UI.
-        estNetPot: unitsToUsdt(full.netPot),
-        estFirstPrize: unitsToUsdt(winner?.amount ?? 0),
-        estRake: unitsToUsdt(full.rake),
-        payout: full.entries.map(e => ({
-          position: e.position,
-          percentage: e.percentage,
-          amount: unitsToUsdt(e.amount),
-        })),
-      };
-    }),
+    // Solo lo que necesita un lobby de cash. No se envian fieldSize, bote
+    // estimado ni premio al ganador: eso es el modelo de torneo, no el de una
+    // ring table, y mostrarlo aqui hacia creer que se compra una entrada a un
+    // campo de 300 personas.
+    cashTiers: TABLE_TIER_LIST.map(t => ({
+      id: t.id,
+      label: t.label,
+      description: t.description,
+      buyIn: t.buyInUsdt,
+      blinds: {
+        small: unitsToUsdt(t.blinds.small),
+        big: unitsToUsdt(t.blinds.big),
+      },
+      stackInBigBlinds: t.stackInBigBlinds,
+    })),
 
     // Texto de transparencia. La UI debe mostrarlo junto al premio: decir
     // "premio garantizado" sin explicar que sale del bote es publicidad
@@ -82,7 +63,6 @@ router.get('/config', (_req: Request, res: Response) => {
     // via por la que el dinero real entra al ciclo del freeroll.
     centroll: {
       buyIn: CENTROLL.buyInUsdt,
-      buyInCup: usdtToCup(CENTROLL.buyInUsdt),
       prizeMultiplier: CENTROLL.prizeMultiplier,
       targetField: CENTROLL.targetField,
       maxField: CENTROLL.maxField,
@@ -104,9 +84,6 @@ router.get('/config', (_req: Request, res: Response) => {
       defaultNetwork: WITHDRAWALS.defaultNetwork,
       networkFees: WITHDRAWALS.networkFees,
     },
-
-    // Equivalente en CUP, para que el usuario cubano razone en su moneda.
-    cupPerUsdt: CUP_PER_USDT,
   });
 });
 

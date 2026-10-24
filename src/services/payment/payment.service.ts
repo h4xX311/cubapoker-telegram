@@ -424,9 +424,15 @@ export class PaymentService {
 
     return {
       orderId: saved.orderId,
+      // `amount` y `commission`/`net` siguen en su escala historica (USDT lo pedido,
+      // unidades internas las comisiones). La interfaz usa los campos `*Usdt`, que no
+      // obligan a adivinar la unidad.
       amount,
+      amountUsdt: amount,
       net,
+      netUsdt: unitsToUsdt(net),
       commission,
+      commissionUsdt: unitsToUsdt(commission),
       chain: order.chain,
       status: 'pending' as const,
       simulated: SIMULATION_ENABLED,

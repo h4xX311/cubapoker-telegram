@@ -49,6 +49,32 @@ const LAST_ACTION_COLOR: Record<string, { bg: string; fg: string }> = {
   'all-in': { bg: 'rgba(0,210,106,0.2)', fg: '#00d26a' },
 };
 
+/**
+ * Color del avatar a partir del nombre.
+ *
+ * Todos los asientos usan el mismo criterio: no hay un color "de humano" y otro
+ * "de bot". El color es estable para el mismo nombre, como el avatar que una
+ * plataforma genera por defecto para cualquier jugador.
+ */
+const AVATAR_COLORS = [
+  '#2c3e50',
+  '#34495e',
+  '#7d3c98',
+  '#1f618d',
+  '#117a65',
+  '#a04000',
+  '#7b241c',
+  '#566573',
+];
+
+const avatarColor = (name: string): string => {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) {
+    hash = (hash * 31 + name.charCodeAt(i)) | 0;
+  }
+  return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length];
+};
+
 export function Table({ tableId, onBack, onBalanceChange }: Props) {
   const [view, setView] = useState<TableView | null>(null);
   const [acting, setActing] = useState(false);
@@ -232,7 +258,7 @@ export function Table({ tableId, onBack, onBalanceChange }: Props) {
 
   return (
     <div className="p-4 pb-10 animate-fadeIn">
-      <PageHeader title={view.guaranteedPrize > 0 ? `Premio ${view.guaranteedPrize} CUP` : 'Mesa'} onBack={leave} />
+      <PageHeader title={view.kind === 'freeroll' ? 'Freeroll' : 'Mesa'} onBack={leave} />
 
       {/* Estado */}
       <div
@@ -377,7 +403,7 @@ export function Table({ tableId, onBack, onBalanceChange }: Props) {
 
       {/* Asientos */}
       <SectionLabel>
-        Jugadores · {view.humans} humanos · {view.bots} bots
+        Jugadores · {view.seats.filter((s) => s.status !== 'out').length} en la mesa
       </SectionLabel>
       <div className="space-y-1.5 mb-4">
         {view.seats.slice(0, 20).map(seat => (
@@ -412,13 +438,8 @@ export function Table({ tableId, onBack, onBalanceChange }: Props) {
                 </span>
               )}
               <div
-                className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0"
-                style={{
-                  background:
-                    seat.kind === 'bot'
-                      ? 'linear-gradient(135deg,#2c3e50,#34495e)'
-                      : 'linear-gradient(135deg,#00d26a,#00b894)',
-                }}
+                className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0 border border-white/10"
+                style={{ background: avatarColor(seat.displayName) }}
               >
                 {seat.displayName.charAt(0).toUpperCase()}
               </div>
@@ -426,9 +447,6 @@ export function Table({ tableId, onBack, onBalanceChange }: Props) {
                 <p className="text-sm font-semibold text-white truncate">
                   {seat.displayName}
                   {seat.isYou && <span className="text-[#00d26a] ml-1">(tú)</span>}
-                  {seat.kind === 'bot' && (
-                    <span className="text-[9px] text-[#6c6c80] ml-1">bot</span>
-                  )}
                 </p>
                 <div className="flex gap-1 mt-0.5">
                   {seat.isDealer && <Tag label="D" tone="gold" />}

@@ -258,8 +258,6 @@ tableSchema.index({ kind: 1, status: 1, tierId: 1 });
  * pintar la interfaz. Las cartas de los demas no viajan nunca.
  */
 export const toPublicTable = (table: ITable, viewerSeat?: number) => {
-  const isFreeroll = table.kind === 'freeroll';
-
   return {
     tableId: table.tableId,
     kind: table.kind,
@@ -278,9 +276,9 @@ export const toPublicTable = (table: ITable, viewerSeat?: number) => {
     bigBlindUsdt: unitsToUsdt(table.bigBlind),
 
     maxSeats: table.maxSeats,
+    // Cuantos asientos estan ocupados, sin separar por tipo. La vista publica no
+    // distingue humanos de bots: para el jugador todos son rivales de la mesa.
     occupied: table.seats.length,
-    humans: table.seats.filter(s => s.kind === 'human').length,
-    bots: table.seats.filter(s => s.kind === 'bot').length,
 
     // Datos del campo multi-mesa para que la UI pueda mostrar
     // "mesa 23 de 72" y el progreso de inscripcion.
@@ -307,7 +305,6 @@ export const toPublicTable = (table: ITable, viewerSeat?: number) => {
 
     seats: table.seats.map(s => ({
       index: s.index,
-      kind: s.kind,
       displayName: s.displayName,
       chips: s.chips,
       bet: s.bet,
@@ -318,7 +315,6 @@ export const toPublicTable = (table: ITable, viewerSeat?: number) => {
       lastAction: s.lastAction,
       // Marca el asiento del espectador, para que la UI resalte su turno
       isYou: s.index === viewerSeat,
-      botStyle: s.kind === 'bot' ? s.botProfile?.style : undefined,
     })),
   };
 };

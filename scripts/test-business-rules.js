@@ -26,6 +26,7 @@ const {
 } = require('../dist/config/product');
 const {
   WITHDRAWALS,
+  DEPOSITS,
   CUP_PER_USDT,
   cupToUsdt,
   usdtToCup,
@@ -304,13 +305,12 @@ section('5. Centrolls: la via de ingresos del freeroll');
     bad('el centroll no puede ser gratis: es la via de ingresos');
   }
 
-  // El buy-in tiene que ser alcanzable con un deposito minimo de EnZona.
-  const minDeposit = 500; // CUP
-  const minDepositUsdt = cupToUsdt(minDeposit);
+  // El buy-in tiene que ser alcanzable con el deposito minimo real en USDT.
+  const minDepositUsdt = DEPOSITS.usdt.minUsdt;
   if (minDepositUsdt >= CENTROLL.buyInUsdt) {
     ok(
-      `un deposito minimo de ${minDeposit} CUP (${minDepositUsdt} USDT) alcanza ` +
-      `para ${Math.floor(minDepositUsdt / CENTROLL.buyInUsdt)} centrolls`,
+      `un deposito minimo de ${minDepositUsdt} USDT alcanza para ` +
+      `${Math.floor(minDepositUsdt / CENTROLL.buyInUsdt)} centrolls`,
     );
   } else {
     bad(
@@ -328,11 +328,14 @@ section('5. Centrolls: la via de ingresos del freeroll');
     bad(`el premio va a "${CENTROLL.prizeToBalance}", deberia ser "play"`);
   }
 
-  // El multiplicador tiene que ser mayor que 1 para que tenga sentido.
+  // El porcentaje del bote tiene que ser mayor que cero para que haya premio.
   if (CENTROLL.prizeMultiplier > 1) {
-    ok(`el premio es ${CENTROLL.prizeMultiplier}x el buy-in (fichas de promocion)`);
+    ok(
+      `el premio es ${CENTROLL.prizeMultiplier}% del bote ` +
+      '(30x el buy-in en un campo lleno de 100)',
+    );
   } else {
-    bad(`multiplicador ${CENTROLL.prizeMultiplier}x: no hay premio`);
+    bad(`porcentaje ${CENTROLL.prizeMultiplier}%: no hay premio`);
   }
 
   // El campo del centroll tiene que ser mas pequeno que el del freeroll: es un

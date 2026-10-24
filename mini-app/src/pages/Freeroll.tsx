@@ -1,8 +1,8 @@
-﻿import { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { api, ApiError } from '../lib/api';
 import type { FreerollCampo, FreerollSlot } from '../lib/types';
 import { PageHeader } from '../components/Layout';
-import { fmtUsdt } from '../components/Balance';
+import { fmtUsdt, fmtStake } from '../components/Balance';
 import { fmtCuenta, horaLocal, segundosHasta } from '../lib/tiempo';
 
 interface Props {
@@ -11,7 +11,7 @@ interface Props {
   onPlay: (tableId: string) => void;
 }
 
-const POSICIONES = ['1.Âº', '2.Âº', '3.Âº', '4.Âº', '5.Âº'];
+const POSICIONES = ['1.º', '2.º', '3.º', '4.º', '5.º'];
 
 /**
  * FREEROLLS HORARIOS
@@ -141,15 +141,15 @@ export function Freeroll({ onBack, onBalanceChange, onPlay }: Props) {
         }}
       >
         <div className="flex items-start gap-3">
-          <span className="text-2xl">ðŸŽ</span>
+          <span className="text-2xl">🎁</span>
           <div>
             <p className="text-sm font-bold text-[#ffd700] mb-1">
               Un torneo gratis cada hora
             </p>
             <p className="text-xs text-[#a0a0b0] leading-relaxed">
               Mesas de 7 hasta completar el campo. El premio es saldo de
-              promociÃ³n: se juega y se desbloquea 1 de cada 10 a saldo
-              retirable.
+              promoción: se juega y se desbloquea 1 USDT por cada 10 USDT
+              jugados a saldo retirable.
             </p>
           </div>
         </div>
@@ -196,13 +196,13 @@ export function Freeroll({ onBack, onBalanceChange, onPlay }: Props) {
                       Freeroll de las {campo.inicio ? horaLocal(campo.inicio) : ''}
                     </h3>
                     <p className="text-xs text-[#a0a0b0] mt-1">
-                      {campo.jugadoresVivos} jugadores vivos Â· premio{' '}
+                      {campo.jugadoresVivos} jugadores vivos · premio{' '}
                       {fmtUsdt(campo.premioUsdt)} USDT
                     </p>
                   </div>
                   <div className="text-right">
                     <p className="text-[9px] text-[#a0a0b0] uppercase">
-                      TardÃ­o cierra en
+                      Tardío cierra en
                     </p>
                     <p className="text-lg font-bold text-[#00d26a] tabular-nums">
                       {fmtCuenta(restante)}
@@ -224,8 +224,8 @@ export function Freeroll({ onBack, onBalanceChange, onPlay }: Props) {
                     className="w-full btn btn-primary py-2.5 text-sm disabled:opacity-50"
                   >
                     {ocupado === campo.fieldId
-                      ? 'Entrandoâ€¦'
-                      : 'Entrar ahora (registro tardÃ­o)'}
+                      ? 'Entrando…'
+                      : 'Entrar ahora (registro tardío)'}
                   </button>
                 )}
               </article>
@@ -236,7 +236,7 @@ export function Freeroll({ onBack, onBalanceChange, onPlay }: Props) {
           {datos?.proximos && datos.proximos.length > 0 && (
             <section>
               <h2 className="text-[#a0a0b0] text-xs uppercase tracking-wide mb-3">
-                PrÃ³ximas horas
+                Próximas horas
               </h2>
               <div className="space-y-2">
                 {datos.proximos.map((slot) => (
@@ -249,13 +249,13 @@ export function Freeroll({ onBack, onBalanceChange, onPlay }: Props) {
                     }}
                   >
                     <div className="flex items-center gap-3">
-                      <span className="text-lg">ðŸ•</span>
+                      <span className="text-lg">🕐</span>
                       <div>
                         <p className="text-sm font-semibold text-white">
                           {horaLocal(slot.inicio)}
                         </p>
                         <p className="text-[10px] text-[#a0a0b0]">
-                          Gratis Â· {fmtUsdt(slot.premioUsdt)} USDT de premio
+                          Gratis · {fmtUsdt(slot.premioUsdt)} USDT de premio
                         </p>
                       </div>
                     </div>
@@ -270,9 +270,9 @@ export function Freeroll({ onBack, onBalanceChange, onPlay }: Props) {
 
           {!datos?.abierto && !datos?.enJuego?.length && (
             <div className="card text-center py-8">
-              <p className="text-3xl mb-2">ðŸ•</p>
+              <p className="text-3xl mb-2">🕐</p>
               <p className="text-sm text-white font-semibold">
-                El prÃ³ximo freeroll se abre en un momento
+                El próximo freeroll se abre en un momento
               </p>
               <p className="text-xs text-[#a0a0b0] mt-1">
                 Uno cada hora, en punto.
@@ -317,13 +317,13 @@ function TarjetaProximo({
       <header className="relative flex items-start justify-between mb-4">
         <div>
           <p className="text-[10px] uppercase tracking-widest text-[#ffd700] font-bold">
-            PrÃ³ximo torneo
+            Próximo torneo
           </p>
           <h2 className="text-2xl font-bold text-white mt-1">
-            {campo.inicio ? horaLocal(campo.inicio) : 'â€”'}
+            {campo.inicio ? horaLocal(campo.inicio) : '—'}
           </h2>
           <p className="text-xs text-[#a0a0b0] mt-1">
-            {campo.inscritos} de {campo.tamanoMaximo} inscritos Â· mesas de{' '}
+            {campo.inscritos} de {campo.tamanoMaximo} inscritos · mesas de{' '}
             {campo.maxPorMesa}
           </p>
         </div>
@@ -360,10 +360,10 @@ function TarjetaProximo({
               style={{ background: 'rgba(255,255,255,0.04)' }}
             >
               <p className="text-[9px] text-[#a0a0b0]">
-                {POSICIONES[i] ?? `${i + 1}.Âº`}
+                {POSICIONES[i] ?? `${i + 1}.º`}
               </p>
               <p className="text-xs font-bold text-white">
-                {fmtUsdt(Math.floor((campo.premioUsdt * pct) / 100))}
+                {fmtStake((campo.premioUsdt * pct) / 100)}
               </p>
             </div>
           ))}
@@ -378,14 +378,14 @@ function TarjetaProximo({
               disabled={ocupado}
               className="flex-1 btn btn-outline py-2.5 text-sm disabled:opacity-50"
             >
-              {ocupado ? 'Cancelandoâ€¦' : 'Cancelar inscripciÃ³n'}
+              {ocupado ? 'Cancelando…' : 'Cancelar inscripción'}
             </button>
             <button
               onClick={onInscribir}
               disabled
               className="flex-1 btn btn-primary py-2.5 text-sm opacity-60"
             >
-              EstÃ¡s dentro
+              Estás dentro
             </button>
           </>
         ) : (
@@ -397,7 +397,7 @@ function TarjetaProximo({
             {lleno
               ? 'Campo completo'
               : ocupado
-                ? 'Inscribiendoâ€¦'
+                ? 'Inscribiendo…'
                 : 'Inscribirme gratis'}
           </button>
         )}

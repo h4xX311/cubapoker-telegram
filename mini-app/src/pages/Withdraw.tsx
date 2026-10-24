@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { api, ApiError, type ChainInfo } from '../lib/api';
 import { PageHeader, SectionLabel } from '../components/Layout';
+import { fmtUsdt } from '../components/Balance';
 
 interface Props {
   user: any;
@@ -8,24 +9,30 @@ interface Props {
   onBalanceChange?: () => void | Promise<any>;
 }
 
-type Provider = 'enzona' | 'qvapay' | 'usdt';
-
-const PROVIDERS: { id: Provider; icon: string; name: string; rate: string }[] = [
-  { id: 'enzona', icon: '🇨🇺', name: 'EnZona', rate: '3%' },
-  { id: 'qvapay', icon: '💳', name: 'QvaPay', rate: '3%' },
-  { id: 'usdt', icon: '₮', name: 'USDT', rate: '1%' },
-];
-
-const MINIMUMS: Record<Provider, number> = { enzona: 1000, qvapay: 1000, usdt: 10 };
+/**
+ * RETIROS EN USDT
+ * ===============
+ *
+ * La cuenta es USDT y el retiro tambien. Antes esta pantalla pedia "CUP" y
+ * ofrecia EnZona/QvaPay, dos vias de salida en moneda local que ya no forman
+ * parte del producto. Un jugador que veia "1000 CUP" en un campo cuyo saldo
+ * real era 10 USDT no sabia cuanto estaba retirando.
+ *
+ * El minimo y la comision son los mismos que valida el servidor
+ * (`config/currency.ts` y `withdrawal.rules.ts`).
+ */
+const MINIMO_USDT = 10;
+const COMISION = '1%';
 
 export function Withdraw({ user, onBack, onBalanceChange }: Props) {
-  const [provider, setProvider] = useState<Provider>('usdt');
   const [chains, setChains] = useState<ChainInfo[]>([]);
   const [chainId, setChainId] = useState('TRC20');
   const [amount, setAmount] = useState('');
   const [address, setAddress] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const [done, setDone] = useState<{ orderId: string; net: number } | null>(null);
+  const [done, setDone] = useState<{ orderId: string; netUsdt: number } | null>(
+    null,
+  );
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -43,23 +50,26 @@ export function Withdraw({ user, onBack, onBalanceChange }: Props) {
 
   const realBalance = user?.balance?.real ?? 0;
   const playBalance = user?.balance?.play ?? 0;
-  const numericAmount = Number(amount) || 0;
-  const minimum = MINIMUMS[provider];
-  const selectedChain = chains.find(c => c.id === chainId);
+  const numericAmount = Number(amount.replace(',', '.')) || 0;
+  const selectedChain = chains.find((c) => c.id === chainId);
 
   const invalidAddress =
-    provider === 'usdt' && address.length > 0 && !validateAddress(chainId, address);
+    address.length > 0 && !validateAddress(chainId, address);
 
   const validationError = (() => {
     if (!numericAmount) return '';
-    if (numericAmount < minimum) return `El mínimo es ${minimum} CUP.`;
+    if (numericAmount < MINIMO_USDT) {
+      return `El mínimo es ${MINIMO_USDT} USDT.`;
+    }
     if (numericAmount > realBalance) {
       return playBalance > 0
-        ? `Solo puedes retirar saldo real. Tienes ${realBalance} CUP retirables (tus ${playBalance} CUP de promoción no se retiran).`
+        ? `Solo puedes retirar saldo real. Tienes ${fmtUsdt(realBalance)} USDT retirables (tus ${fmtUsdt(playBalance)} USDT de promoción no se retiran).`
         : 'No tienes saldo suficiente.';
     }
-    if (provider === 'usdt' && !address) return 'Introduce tu dirección.';
-    if (invalidAddress) return `Dirección inválida para ${selectedChain?.name}.`;
+    if (!address) return 'Introduce tu dirección.';
+    if (invalidAddress) {
+      return `Dirección inválida para USDT · ${selectedChain?.id ?? chainId}.`;
+    }
     return '';
   })();
 
@@ -71,13 +81,13 @@ export function Withdraw({ user, onBack, onBalanceChange }: Props) {
     setError('');
     setSubmitting(true);
     try {
-      const res = await api.withdraw(
-        numericAmount,
-        provider,
-        provider === 'usdt' ? chainId : undefined,
-        provider === 'usdt' ? address : undefined,
-      );
-      setDone({ orderId: res.orderId, net: res.net });
+      const res = await api.withdraw(numericAmount, 'usdt', chainId, address);
+      setDone({
+        orderId: res.orderId,
+        // `netUsdt` es el neto despues de comision, ya en USDT. El respaldo
+        // mantiene compatibilidad con una respuesta antigua en unidades.
+        netUsdt: res.netUsdt ?? (res.net ?? 0) / 1000,
+      });
       await onBalanceChange?.();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'No se pudo solicitar el retiro.');
@@ -92,13 +102,17 @@ export function Withdraw({ user, onBack, onBalanceChange }: Props) {
           <span className="text-4xl">🕐</span>
         </div>
         <h1 className="text-xl font-bold text-[#ffd700] mb-2">Retiro solicitado</h1>
-        <p className="text-[#a0a0b0] mb-1">Recibirás {done.net} CUP</p>
-        <p className="text-xs text-[#6c6c80] mb-6 font-mono">{done.orderId.slice(0, 18)}…</p>
+        <p className="text-[#a0a0b0] mb-1">
+          Recibirás {fmtUsdt(done.netUsdt)} USDT
+        </p>
+        <p className="text-xs text-[#6c6c80] mb-6 font-mono">
+          {done.orderId.slice(0, 18)}…
+        </p>
 
         <div className="card text-left mb-5">
           <p className="text-xs text-[#a0a0b0] leading-relaxed">
-            Tu solicitud está en revisión. Verificamos el pago antes de enviarlo, por
-            eso el saldo se descuenta al liquidarse, no al solicitarlo.
+            Tu solicitud está en revisión. Verificamos el pago antes de enviarlo,
+            por eso el saldo se descuenta al liquidarse, no al solicitarlo.
           </p>
         </div>
 
@@ -120,106 +134,90 @@ export function Withdraw({ user, onBack, onBalanceChange }: Props) {
         <p className="text-[#a0a0b0] text-xs uppercase tracking-wide mb-1">
           Disponible para retirar
         </p>
-        <p className="text-3xl font-bold text-[#00d26a]">{realBalance} CUP</p>
+        <p className="text-3xl font-bold text-[#00d26a]">
+          {fmtUsdt(realBalance)}{' '}
+          <span className="text-sm font-semibold text-[#a0a0b0]">USDT</span>
+        </p>
         {playBalance > 0 && (
           <p className="text-[11px] text-[#ffd700] mt-2 leading-relaxed">
-            + {playBalance} CUP de promoción que {playBalance === 1 ? 'no es' : 'no son'}{' '}
-            retirables. Sirven para jugar en las mesas cash.
+            + {fmtUsdt(playBalance)} USDT de promoción que no{' '}
+            {playBalance === 1 ? 'es retirable' : 'son retirables'}. Sirven para
+            jugar en las mesas cash.
           </p>
         )}
       </div>
 
-      {/* Método */}
       <SectionLabel>Método de retiro</SectionLabel>
-      <div className="grid grid-cols-3 gap-2 mb-5">
-        {PROVIDERS.map(p => (
+      <div className="card p-3 flex items-center justify-between mb-5">
+        <div className="flex items-center gap-3">
+          <span className="text-xl">₮</span>
+          <div>
+            <p className="text-sm font-semibold text-white">USDT</p>
+            <p className="text-[10px] text-[#a0a0b0]">
+              Blockchain · comisión {COMISION}
+            </p>
+          </div>
+        </div>
+        <span className="badge badge-success">Único método</span>
+      </div>
+
+      <SectionLabel>Red de destino</SectionLabel>
+      <div className="flex flex-wrap gap-2 mb-4">
+        {chains.map((c) => (
           <button
-            key={p.id}
-            onClick={() => {
-              setProvider(p.id);
-              setError('');
-            }}
-            aria-pressed={provider === p.id}
-            className={`card p-3 flex flex-col items-center gap-1 transition-all ${
-              provider === p.id
-                ? 'border-[#00d26a] bg-[#00d26a]/10'
-                : 'hover:border-[#2a2a4a]'
+            key={c.id}
+            onClick={() => setChainId(c.id)}
+            aria-pressed={chainId === c.id}
+            className={`px-3 py-2 rounded-xl text-xs font-semibold transition-all ${
+              chainId === c.id ? 'btn-primary' : 'btn-outline'
             }`}
           >
-            <span className="text-xl">{p.icon}</span>
-            <span className="text-xs font-semibold text-white">{p.name}</span>
-            <span className="text-[10px] text-[#a0a0b0]">{p.rate} com.</span>
+            USDT · {c.id}
           </button>
         ))}
       </div>
 
-      {/* Red (solo USDT) */}
-      {provider === 'usdt' && (
-        <>
-          <SectionLabel>Red de destino</SectionLabel>
-          <div className="flex gap-2 mb-4 overflow-x-auto pb-1">
-            {chains.map(c => (
-              <button
-                key={c.id}
-                onClick={() => setChainId(c.id)}
-                aria-pressed={chainId === c.id}
-                className={`flex-shrink-0 px-3 py-2 rounded-xl text-xs font-semibold transition-all ${
-                  chainId === c.id ? 'btn-primary' : 'btn-outline'
-                }`}
-              >
-                {c.name}
-              </button>
-            ))}
-          </div>
-        </>
-      )}
-
-      {/* Monto */}
-      <SectionLabel>Monto (CUP)</SectionLabel>
+      <SectionLabel>Monto (USDT)</SectionLabel>
       <div className="relative mb-2">
         <input
-          type="number"
-          inputMode="numeric"
+          type="text"
+          inputMode="decimal"
           value={amount}
-          onChange={e => {
+          onChange={(e) => {
             setAmount(e.target.value);
             setError('');
           }}
-          placeholder="1000"
+          placeholder="10"
           className="input text-lg pr-20"
           aria-label="Monto a retirar"
         />
         <button
-          onClick={() => setAmount(String(realBalance))}
+          onClick={() => setAmount(String(realBalance).replace('.', ','))}
+          aria-label="Usar saldo máximo"
           className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-semibold text-[#00d26a]"
         >
           MÁX
         </button>
       </div>
-      <p className="text-xs text-[#a0a0b0] mb-5">Mínimo {minimum} CUP</p>
+      <p className="text-xs text-[#a0a0b0] mb-5">Mínimo {MINIMO_USDT} USDT</p>
 
-      {/* Dirección */}
-      {provider === 'usdt' && (
-        <>
-          <SectionLabel>
-            Dirección USDT ({selectedChain?.name ?? chainId})
-          </SectionLabel>
-          <input
-            type="text"
-            value={address}
-            onChange={e => {
-              setAddress(e.target.value);
-              setError('');
-            }}
-            placeholder={selectedChain?.addressExample ?? 'Dirección'}
-            className={`input font-mono text-xs ${invalidAddress ? 'border-[#ff4757]' : ''}`}
-            aria-label="Dirección USDT"
-          />
-          <p className="text-[10px] text-[#6c6c80] mt-2 mb-5 leading-relaxed">
-            Verifica red y dirección. Los envíos erróneos no se pueden revertir.
-          </p>
-        </>
-      )}
+      <SectionLabel>
+        Dirección USDT ({selectedChain?.id ?? chainId})
+      </SectionLabel>
+      <input
+        type="text"
+        value={address}
+        onChange={(e) => {
+          setAddress(e.target.value);
+          setError('');
+        }}
+        placeholder={selectedChain?.addressExample ?? 'Dirección'}
+        className={`input font-mono text-xs ${invalidAddress ? 'border-[#ff4757]' : ''}`}
+        aria-label="Dirección USDT"
+      />
+      <p className="text-[10px] text-[#6c6c80] mt-2 mb-5 leading-relaxed">
+        Verifica red y dirección. Los envíos erróneos no se pueden revertir.
+      </p>
 
       {(error || validationError) && (
         <div className="bg-[#ff4757]/15 border border-[#ff4757] rounded-xl p-3 mb-4">
@@ -237,8 +235,8 @@ export function Withdraw({ user, onBack, onBalanceChange }: Props) {
 
       <div className="mt-5 card">
         <p className="text-xs text-[#a0a0b0] leading-relaxed">
-          <span className="text-white font-semibold">Tiempo:</span> 24-48 h. Verificamos
-          cada retiro manualmente antes de enviarlo.
+          <span className="text-white font-semibold">Tiempo:</span> 24-48 h.
+          Verificamos cada retiro manualmente antes de enviarlo.
         </p>
       </div>
     </div>

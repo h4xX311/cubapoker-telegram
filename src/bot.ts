@@ -24,6 +24,9 @@ import { SUIT_SYMBOL } from './game/card.utils';
 import { seatingService } from './game/seating.service';
 import { logger } from './utils/logger';
 import { formatUnits } from './config/units';
+import { TABLE_TIER_LIST } from './config/product';
+import { monetizationConfig } from './config/monetization';
+import { premioHorarioUnits } from './config/freeroll';
 
 // ------------------------------------------------------------------
 // QUE HACE ESTA LINEA, Y POR QUE IMPORTA MAS DE LO QUE PARECE
@@ -136,13 +139,13 @@ tableManager.setNotifier(async (notice) => {
 
   const instruction = notice.toCall === 0
     ? 'Puedes pasar o subir.'
-    : `Debes poner *${notice.toCall} CUP* para continuar.`;
+    : `Debes poner *${notice.toCall} fichas* para continuar.`;
 
   const body = [
     `🎯 *Te toca* · ${phaseLabel}`,
     '',
     `🃏 ${cards}`,
-    `💰 Bote: ${notice.pot} CUP · tus fichas: ${notice.chips}`,
+    `💰 Bote: ${notice.pot} fichas · tus fichas: ${notice.chips}`,
     '',
     instruction,
     `⏱️ Tienes ${Math.round(notice.deadlineMs / 1000)} s. Si no respondes, el motor juega por ti.`,
@@ -432,11 +435,12 @@ bot.onText(/\/play/, async (msg) => {
   // Para jugar se usa el saldo total: el de promocion tambien sirve para
   // sentarse en mesas cash (es su proposito).
   const total = dbUser.balance.real + dbUser.balance.play;
+  const minBuyInUnits = TABLE_TIER_LIST[0]?.buyInUnits ?? 1000;
 
-  if (total < 200) {
+  if (total < minBuyInUnits) {
     bot.sendMessage(
       chatId,
-      '❌ Necesitas al menos 200 CUP para jugar.\n\n' +
+      `❌ Necesitas al menos ${formatUnits(minBuyInUnits)} USDT para jugar.\n\n` +
       'Tu saldo:\n' +
       `• Real (retirable): ${formatUnits(dbUser.balance.real)} USDT\n` +
       `• Promoción: ${formatUnits(dbUser.balance.play)} USDT\n\n` +
@@ -458,7 +462,8 @@ bot.onText(/\/play/, async (msg) => {
       `Saldo total: ${formatUnits(total)} USDT\n` +
       `• Real: ${formatUnits(dbUser.balance.real)} USDT\n` +
       `• Promoción: ${formatUnits(dbUser.balance.play)} USDT\n\n` +
-      'Mesas de 50 a 500 jugadores con premio garantizado.',
+      'Mesas cash 7-max: entras con ' +
+      `${formatUnits(minBuyInUnits)} USDT y juegas las manos que quieras.`,
     {
       parse_mode: 'Markdown',
       reply_markup: keyboard,
@@ -477,8 +482,8 @@ bot.onText(/\/freeroll/, async (msg) => {
 
   bot.sendMessage(
     chatId,
-    '🎁 *Freerolls gratuit\cos*\n\n' +
-      'Premios de 5 a 50 CUP sin buy-in.\n\n' +
+    '🎁 *Freerolls gratuitos*\n\n' +
+      `Premio de ${formatUnits(premioHorarioUnits())} USDT sin buy-in, cada hora.\n\n` +
       '⚠️ *Importante:* el saldo que ganas aqui es solo para jugar dentro de ' +
       'CubaPoker en cualquier mesa cash. No se puede retirar.',
     { parse_mode: 'Markdown', reply_markup: keyboard },
@@ -523,7 +528,7 @@ bot.onText(/\/vip/, async (msg) => {
   
   Object.entries(VIP_CONFIG).forEach(([key, config]) => {
     message += `*${config.name}*\n`;
-    message += `💰 Precio: ${config.price} CUP/mes\n`;
+    message += `💰 Precio: ${formatUnits(config.price)} USDT/mes\n`;
     message += `🎁 Beneficios:\n`;
     config.benefits.forEach(b => { message += `  • ${b}\n`; });
     message += `\n`;
@@ -553,13 +558,13 @@ bot.onText(/\/referrals/, async (msg) => {
 📊 *Tus estadísticas:*
 • Total referidos: ${stats.totalReferrals}
 • Referidos activos: ${stats.activeReferrals}
-• Comisión total: ${stats.totalCommission} CUP
+• Comisión total: ${formatUnits(stats.totalCommission)} USDT
 
 🎁 *Recompensas:*
 • 10% del rake de referidos directos
 • 5% del rake de segundo nivel
 • 2% del rake de tercer nivel
-• Bonus: 50 CUP por cada referido activo
+• Bonus: ${formatUnits(monetizationConfig.referrals.bonus)} USDT por cada referido activo
 
 📝 *Cómo funciona:*
 1. Comparte tu enlace de referido
@@ -600,7 +605,7 @@ bot.onText(/\/achievements/, async (msg) => {
     message += `\n\nAún no has desbloqueado logros. ¡Juega para ganar recompensas!`;
   } else {
     achievements.slice(0, 5).forEach(a => {
-      message += `\n• ${a.achievementId} - ${a.reward} CUP`;
+      message += `\n• ${a.achievementId} - ${formatUnits(a.reward)} USDT`;
     });
   }
 
@@ -719,51 +724,11 @@ bot.onText(/\/help/, (msg) => {
 // arbitrariamente con un simple curl.
 // ==========================================================================
 
-// Perfil del usuario autenticado + auto-registro si es su primera visita
-app.get('/api/me', requireTelegramAuth, async (req, res) => {
-  try {
-    const tgUser = (req as any).telegramUser;
-
-    const user = await User.findOneAndUpdate(
-      { telegramId: tgUser.id },
-      {
-        $set: {
-          telegramId: tgUser.id,
-          username: tgUser.username,
-          firstName: tgUser.first_name,
-          lastName: tgUser.last_name,
-        },
-      },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    ).select('-password');
-
-    const vipLevel = await monetizationService.getVIPLevel(tgUser.id);
-
-    res.json({
-      user: {
-        id: user._id,
-        telegramId: user.telegramId,
-        username: user.username,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        // La UI muestra los dos saldos por separado: `real` es el unico
-        // retirable y `play` es saldo de promocion.
-        balance: {
-          real: user.balance.real,
-          play: user.balance.play,
-          total: user.balance.real + user.balance.play,
-          withdrawable: user.balance.real,
-        },
-        stats: user.stats,
-        activeTableId: user.activeTableId,
-        vip: vipLevel,
-      },
-    });
-  } catch (error: any) {
-    console.error('GET /api/me error:', error);
-    res.status(500).json({ error: 'No se pudo cargar el perfil' });
-  }
-});
+// Perfil del usuario autenticado: lo sirve `routes/user.routes.ts`, montado en
+// `/api` mas arriba. Se elimino la copia que habia aqui porque quedaba tapada
+// por el router y devolvia el saldo en unidades internas, no en USDT. Tener dos
+// versiones de la misma ruta es una trampa: el dia que cambie el orden de
+// montaje, la interfaz empieza a mostrar 1000 veces menos dinero.
 
 // Nota: los endpoints /api/deposit y /api/withdraw conackers directos se
 // eliminaron a proposito. Acreditar saldo sin una orden pagada era un agujero:

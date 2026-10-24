@@ -7,9 +7,21 @@ import { Achievement } from '../models/Achievement';
 import { Streak } from '../models/Achievement';
 import { VIP_CONFIG, VIPLevel } from '../models/VIP';
 import { monetizationConfig } from '../config/monetization';
+import { unitsToUsdt } from '../config/units';
 import { requireTelegramAuth, getAuthedTelegramId } from '../middleware/telegramAuth';
 
 const router = Router();
+
+/**
+ * Vista publica de un plan VIP.
+ *
+ * `VIP_CONFIG.price` esta en unidades internas (500 = 0,50 USDT). La interfaz
+ * compara precios contra un saldo que ya viene en USDT, asi que la conversion
+ * se hace aqui y el cliente recibe `priceUsdt`. Se conserva `price` para los
+ * consumidores internos que sigan trabajando en unidades.
+ */
+const vipPublico = (cfg: any) =>
+  cfg ? { ...cfg, priceUsdt: unitsToUsdt(cfg.price ?? 0) } : null;
 
 // Toda la monetizacion exige identidad verificada de Telegram.
 router.use(requireTelegramAuth);
@@ -25,7 +37,7 @@ router.get('/vip', async (req: Request, res: Response) => {
     res.json({
       success: true,
       level,
-      config: level ? VIP_CONFIG[level] : null,
+      config: vipPublico(level ? VIP_CONFIG[level] : null),
     });
   } catch (error) {
     console.error('Get VIP error:', error);
@@ -64,7 +76,9 @@ router.get('/vip/config', async (req: Request, res: Response) => {
   try {
     res.json({
       success: true,
-      config: VIP_CONFIG,
+      config: Object.fromEntries(
+        Object.entries(VIP_CONFIG).map(([nivel, cfg]) => [nivel, vipPublico(cfg)]),
+      ),
     });
   } catch (error) {
     res.status(500).json({ error: 'Error al obtener configuración' });
@@ -82,6 +96,18 @@ router.get('/referrals', async (req: Request, res: Response) => {
     res.json({
       success: true,
       ...stats,
+      // Las comisiones se acumulan en unidades porque nacen del rake, que tambien
+      // esta en unidades. La interfaz solo necesita USDT.
+      totalCommissionUsdt: unitsToUsdt(stats.totalCommission ?? 0),
+      bonusUsdt: unitsToUsdt(monetizationConfig.referrals.bonus ?? 0),
+      referrals: stats.referrals.map((r: any) => {
+        const referral = typeof r.toObject === 'function' ? r.toObject() : r;
+        return {
+          ...referral,
+          commissionUsdt: unitsToUsdt(referral.commission ?? 0),
+          totalRakeUsdt: unitsToUsdt(referral.totalRake ?? 0),
+        };
+      }),
     });
   } catch (error) {
     console.error('Get referrals error:', error);
@@ -131,7 +157,13 @@ router.get('/achievements', async (req: Request, res: Response) => {
 
     res.json({
       success: true,
-      achievements,
+      achievements: achievements.map((a: any) => {
+        const logro = typeof a.toObject === 'function' ? a.toObject() : a;
+        return {
+          ...logro,
+          rewardUsdt: unitsToUsdt(logro.reward ?? 0),
+        };
+      }),
     });
   } catch (error) {
     console.error('Get achievements error:', error);

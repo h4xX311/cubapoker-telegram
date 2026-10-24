@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { api, ApiError } from '../lib/api';
 import type { CashTier, TableSummary } from '../lib/types';
 import { PageHeader, SectionLabel } from '../components/Layout';
-import { fmtUsdt } from '../components/Balance';
+import { fmtUsdt, fmtStake } from '../components/Balance';
 
 interface Props {
   user: any;
@@ -11,47 +11,55 @@ interface Props {
   onPlay: (tableId: string) => void;
 }
 
+/**
+ * LOBBY DE CASH (RING TABLES)
+ * ===========================
+ *
+ * Cash no es un torneo de 300 personas: es una mesa 7-max en la que entras con
+ * un buy-in, juegas las manos que quieras y te levantas con tus fichas. Por eso
+ * esta pantalla no muestra bote, premio al ganador ni reparto por posiciones:
+ * esos numeros pertenecen a los torneos, no al cash.
+ *
+ * La pantalla resuelve tres cosas:
+ *   1. Cuanto cuesta sentarse y con que ciegas.
+ *   2. Si ya estas sentado en alguna mesa (para no cobrarte dos buy-ins).
+ *   3. Si hay mesas abiertas a las que entrar sin esperar.
+ */
 export function Tables({
   user,
   onBack,
   onBalanceChange,
   onPlay,
 }: Props) {
-  const [tables, setTables] = useState<TableSummary[]>([]);
   const [tiers, setTiers] = useState<CashTier[]>([]);
+  const [tables, setTables] = useState<TableSummary[]>([]);
   const [seatsPerTable, setSeatsPerTable] = useState(7);
-  const [disclosure, setDisclosure] = useState('');
   const [unlockRatio, setUnlockRatio] = useState('1:10');
+  const [miMesa, setMiMesa] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState('');
-  /**
-   * Campo en el que esta sentado este usuario, si esta en alguno.
-   *
-   * Sin esto no hay forma de ni avisar ni dejarle salir, y quedarse dentro sin salida es el
-   * peor estado posible: buy-in cobrado, asiento ocupado y ninguna accion posible.
-   */
-  const [miCampo, setMiCampo] = useState<{
-    fieldId: string;
-    tableId: string;
-    status: string;
-  } | null>(null);
 
   const load = async () => {
     try {
-      const [listRes, cfg, camposRes] = await Promise.all([
-        api.listTables(),
+      const [cfg, list, mine] = await Promise.all([
         api.gameConfig(),
-        api.fields(),
+        api.listTables(),
+        api.myTable(),
       ]);
-      setTables(listRes.tables || []);
-      setMiCampo((camposRes as any)?.miCampo ?? null);
-      setTiers(cfg.cashTiers || []);
-      if (cfg.seatsPerTable) setSeatsPerTable(cfg.seatsPerTable);
-      if (cfg.prizeDisclosure) setDisclosure(cfg.prizeDisclosure);
-      if (cfg.unlock?.ratioLabel) setUnlockRatio(cfg.unlock.ratioLabel);
+
+      setTiers(cfg?.cashTiers ?? []);
+      if (cfg?.seatsPerTable) setSeatsPerTable(cfg.seatsPerTable);
+      if (cfg?.unlock?.ratioLabel) setUnlockRatio(cfg.unlock.ratioLabel);
+
+      // Solo mesas sueltas. Las mesas que pertenecen a un campo multi-mesa
+      // (torneo, freeroll o centroll) se juegan desde su propia pantalla.
+      setTables((list?.tables ?? []).filter((t: TableSummary) => !t.field));
+      setMiMesa(mine?.tableId ?? null);
     } catch {
-      setTables([]);
+      // Si falla una carga puntual no se borra lo que ya se veia: el polling
+      // vuelve a intentarlo en unos segundos.
+      setError('No se pudieron cargar las mesas. Reintentando…');
     } finally {
       setLoading(false);
     }
@@ -59,127 +67,43 @@ export function Tables({
 
   useEffect(() => {
     load();
-    const timer = setInterval(load, 5000);
+    const timer = setInterval(load, 8000);
     return () => clearInterval(timer);
   }, []);
 
-  /**
-   * Entrar a un CAMPO, no a una mesa.
-   *
-   * La API correcta es `/fields/:tierId/register`, no `/game/sit`. El campo se
-   * encarga de la cola, el reparto por mesas y la contabilidad de posiciones.
-   * Sentarse en una mesa suelta saltaria las tres cosas.
-   *
-   * La respuesta no trae `tableId` porque el jugador entra en una COLA: el campo
-   * le asigna mesa cuando haya sitio. Por eso, tras registrarse, hay que
-   * preguntar al campo cual es su mesa en vez de asumirla.
-   */
-  const register = async (tierId: string) => {
-    setBusy(tierId);
+  const entrar = async (destino: { tierId?: string; tableId?: string }) => {
+    const clave = destino.tableId ?? destino.tierId ?? '';
+    setBusy(clave);
     setError('');
+
     try {
-      const res = await api.registerToField(tierId);
-      await onBalanceChange?.();
-
-      if (res.seated) {
-        // Le asignaron mesa: abrirla.
-        const status = await api.fieldStatus(res.fieldId);
-        const myTable = status?.tables?.[0]?.tableId;
-        if (myTable) {
-          onPlay(myTable);
-          return;
-        }
-      }
-
-      // Entra en cola. Se informa y se vuelve al lobby.
-      setError(
-        res.seated
-          ? 'Te hemos sentado. Vuelve a la lista para ver tu mesa.'
-          : `Registrado en la cola (#${res.position}). Te asignaremos mesa cuando haya sitio.`,
-      );
-      await load();
-    } catch (err) {
-      setError(
-        err instanceof ApiError ? err.message : 'No se pudo entrar al campo.',
-      );
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  /**
-   * Salir del campo antes de que arranque, con devolucion del buy-in.
-   *
-   * El boton solo sale cuando el campo esta en `filling`: despues ya no se puede, y
-   * decirlo es mejor que dejar que falle con un error.
-   */
-  const leaveField = async () => {
-    if (!miCampo) return;
-    setBusy('leave');
-    setError('');
-    try {
-      const r = await api.leaveField(miCampo.fieldId);
-      await onBalanceChange?.();
-      setMiCampo(null);
-      setError(
-        `Has salido del campo. ` +
-          (r?.refunded
-            ? `Se te han devuelto ${r.refunded} unidades de tu buy-in.`
-            : 'Tu buy-in te ha sido devuelto.'),
-      );
-      await load();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'No se pudo salir del campo.');
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  /**
-   * Sentarse ahora mismo en una mesa cash suelta, contra bots.
-   *
-   * Es la via que faltaba: la unica que no depende de que 300 personas se apunten. Se Cobra
-   * el buy-in, los bots rellenan y se juega.
-   *
-   * Las fichas que se ganan aqui son DE LA MESA, no del jugador: en una mesa cash suelta
-   * no hay bote ni posiciones, y al levantarse el saldo se devuelve. Eso se dice en la
-   * pantalla, antes de comprar la entrada, y no escondido en una nota al pie.
-   */
-  const jugarAhora = async (tierId: string) => {
-    setBusy('sit');
-    setError('');
-    try {
-      // ------------------------------------------------------------------
-      // PRIMERO: DONDE ESTOY YA SENTADO
-      //
-      // Si se pulsa este boton con la sesion ya sentada, `sit` responde "Ya estas sentado
-      // en otra mesa. Sal de ella primero." y el boton de salir, que vive en la VISTA DE
-      // MESA, no se llega a ver nunca. El mensaje pide una salida desde una pantalla a la
-      // que no deja entrar: un callejon sin salida.
-      //
-      // Asi que antes de sentarse se pregunta donde se esta. Si hay mesa, se abre. Asi el
-      // "sal de ella primero" deja de ser un bucle cerrado, porque la aplicacion te lleva
-      // justo a donde puedes salir.
-      //
-      // Y no se cobra el buy-in dos veces: no se llama a `sit` si ya hay mesa.
-      // ------------------------------------------------------------------
-      const donde = await api.myTable();
-      if (donde?.tableId) {
-        setBusy(null);
-        onPlay(donde.tableId);
+      // Si ya hay una mesa abierta, se abre esa. El servidor rechazaria un
+      // segundo asiento y el jugador no tendria forma de volver a la primera.
+      if (miMesa) {
+        onPlay(miMesa);
         return;
       }
 
-      const res = await api.sit({ tierId });
+      const res = await api.sit(destino);
       await onBalanceChange?.();
+
       if (res?.tableId) {
         onPlay(res.tableId);
         return;
       }
+
+      const mine = await api.myTable();
+      if (mine?.tableId) {
+        onPlay(mine.tableId);
+        return;
+      }
+
       setError('Te has sentado. Vuelve a entrar para ver tu mesa.');
       await load();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'No se pudo sentar en la mesa.');
+      setError(
+        err instanceof ApiError ? err.message : 'No se pudo entrar en la mesa.',
+      );
     } finally {
       setBusy(null);
     }
@@ -189,22 +113,23 @@ export function Tables({
 
   return (
     <div className="p-4 pb-10 animate-fadeIn">
-      <PageHeader title="Campos cash" onBack={onBack} />
+      <PageHeader title="Mesas cash" onBack={onBack} />
 
+      {/* Saldo disponible para jugar */}
       <div
         className="rounded-2xl p-4 mb-5 flex items-center justify-between"
         style={{ background: '#16213e', border: '1px solid #2a2a4a' }}
       >
         <div>
-          <p className="text-[#a0a0b0] text-xs">Tu saldo</p>
-          <p className="text-2xl font-bold text-[#00d26a]">{fmtUsdt(balance)} USDT</p>
-          <p className="text-[10px] text-[#a0a0b0] mt-0.5">
-             CUP
+          <p className="text-[#a0a0b0] text-xs">Saldo disponible</p>
+          <p className="text-2xl font-bold text-[#00d26a]">
+            {fmtUsdt(balance)}{' '}
+            <span className="text-xs font-semibold text-[#a0a0b0]">USDT</span>
           </p>
         </div>
         <div className="text-right text-[10px] text-[#a0a0b0] leading-relaxed">
-          <p>Retirable: {fmtUsdt(user?.balance?.real ?? 0)}</p>
-          <p>Promoción: {fmtUsdt(user?.balance?.play ?? 0)}</p>
+          <p>Retirable: {fmtUsdt(user?.balance?.real ?? 0)} USDT</p>
+          <p>Promoción: {fmtUsdt(user?.balance?.play ?? 0)} USDT</p>
         </div>
       </div>
 
@@ -214,136 +139,57 @@ export function Tables({
         </div>
       )}
 
-      {/* ------------------------------------------------------------------
-          ESTAS DENTRO DE UN CAMPO
-
-          Este panel es la diferencia entre "estoy esperando" y "estoy atrapado". Sin el,
-          un usuario que entra en un campo que no se llena ve su buy-in cobrado, su
-          asiento ocupado, y el siguiente intento le dice "Ya estas jugando en un campo"
-          sin explicar nada ni ofrecer nada.
-
-          Con el, sabe cuanto falta, por que no arranca, y puede salir con el buy-in
-          entero. Que es lo que hace cualquiera antes de que haya liquidez.
-      ------------------------------------------------------------------ */}
-      {/* ------------------------------------------------------------------
-          JUGAR AHORA, CONTRA BOTS
-
-          Esta es la via rapida, y no sustituye al campo: es otro producto. El campo es de
-          300 personas con un bote y un ganador, y es de donde sale el rake. Esto es una
-          mesa suelta para jugar sin esperar a que se llene nada, que es lo que mantiene a
-          alguien abierto en un producto que empieza.
-
-          Y sin esto, la aplicacion no tenia NINGUNA forma de jugar: todo pasaba por campos
-          que necesitan 300 registros.
-      ------------------------------------------------------------------ */}
-      {!miCampo && tiers.length > 0 && (
+      {/* Ya sentado: no se ofrece comprar otra entrada */}
+      {miMesa && (
         <div
           className="rounded-2xl p-4 mb-5"
-          style={{ background: '#16213e', border: '1px solid #00d26a' }}
+          style={{ background: '#12241c', border: '1px solid #00d26a' }}
         >
           <div className="flex items-start gap-3">
-            <div className="text-2xl">🃏</div>
+            <span className="relative flex h-3 w-3 mt-1 shrink-0">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#00d26a] opacity-60" />
+              <span className="relative inline-flex rounded-full h-3 w-3 bg-[#00d26a]" />
+            </span>
             <div className="flex-1 min-w-0">
-              <p className="font-bold text-white text-sm">Jugar ahora, contra bots</p>
+              <p className="font-bold text-white text-sm">Ya estás en una mesa</p>
               <p className="text-xs text-[#a0a0b0] mt-1">
-                Entra en una mesa ahora mismo. No hace falta esperar a que se llene nada.
-              </p>
-              <p className="text-[11px] text-[#6c6c80] mt-1.5">
-                Las fichas de esta mesa son de la mesa: al levantarte se te devuelve el
-                saldo, pero no te llevas nada. Para ganar de verdad, usa los campos de
-                abajo, que reparten bote y posiciones.
+                Vuelve a ella para seguir jugando. No hace falta comprar otra
+                entrada.
               </p>
             </div>
           </div>
-
-          <div className="grid grid-cols-2 gap-2 mt-3">
-            {tiers.map((tier) => (
-              <button
-                key={tier.id}
-                onClick={() => jugarAhora(tier.id)}
-                disabled={busy === 'sit' || balance < tier.buyIn}
-                className="btn btn-primary py-2.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {busy === 'sit'
-                  ? 'Sentando…'
-                  : balance < tier.buyIn
-                  ? `Necesitas ${tier.buyIn} USDT`
-                  : `${tier.buyIn} USDT`}
-              </button>
-            ))}
-          </div>
-
-          <p className="text-[10px] text-[#6c6c80] mt-2 text-center">
-            Las manos van lentas: una mesa tarda un buen rato en terminar.
-          </p>
+          <button
+            onClick={() => onPlay(miMesa)}
+            className="w-full btn btn-primary py-2.5 text-sm mt-3"
+          >
+            Volver a mi mesa
+          </button>
         </div>
       )}
 
-      {miCampo && (
-        <div
-          className="rounded-2xl p-4 mb-5"
-          style={{ background: '#16213e', border: '1px solid #00d26a' }}
-        >
-          <div className="flex items-start gap-3">
-            <div className="text-2xl">🎯</div>
-            <div className="flex-1 min-w-0">
-              <p className="font-bold text-white text-sm">
-                {miCampo.status === 'filling'
-                  ? 'Estas esperando a que se llene el campo'
-                  : 'Tu campo ha arrancado'}
-              </p>
-              <p className="text-xs text-[#a0a0b0] mt-1">
-                {miCampo.status === 'filling'
-                  ? 'Tu buy-in esta reservado. Cuando se llene el campo te reparten mesa ' +
-                    'y empieza la partida. Si te arrepientes, puedes salir y te lo devuelven.'
-                  : 'Ya no se puede salir: estas jugando. Suerte.'}
-              </p>
-            </div>
-          </div>
-
-          {miCampo.status === 'filling' && (
-            <button
-              onClick={leaveField}
-              disabled={busy === 'leave'}
-              className="w-full btn btn-outline py-2.5 text-sm mt-3 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {busy === 'leave' ? 'Saliendo…' : 'Salir del campo y recuperar mi buy-in'}
-            </button>
-          )}
-
-          {miCampo.status !== 'filling' && miCampo.tableId && (
-            <button
-              onClick={() => onPlay(miCampo.tableId)}
-              className="w-full btn btn-primary py-2.5 text-sm mt-3"
-            >
-              Ir a mi mesa
-            </button>
-          )}
-        </div>
-      )}
-
-      {loading ? (
+      {loading && tiers.length === 0 ? (
         <div className="text-center py-12">
           <div className="spinner mx-auto" />
         </div>
       ) : tiers.length === 0 ? (
         <div className="card text-center py-10">
-          <div className="text-4xl mb-3">🃏</div>
-          <p className="text-sm text-white font-semibold mb-1">No hay campos abiertos</p>
-          <p className="text-xs text-[#a0a0b0]">Se abrirán en un momento.</p>
+          <div className="text-4xl mb-3">♠</div>
+          <p className="text-sm text-white font-semibold mb-1">
+            No hay mesas disponibles
+          </p>
+          <p className="text-xs text-[#a0a0b0]">
+            Se abrirán en un momento. Vuelve a intentarlo.
+          </p>
         </div>
       ) : (
         <>
+          {!miMesa && (
+            <>
           <SectionLabel>Elige tu nivel</SectionLabel>
-          <div className="space-y-3">
+          <div className="space-y-3 mb-6">
             {tiers.map((tier, i) => {
-              const fieldTables = tables.filter(t => t.tierId === tier.id);
-              const registered = fieldTables.reduce((n, t) => n + t.occupied, 0);
               const canAfford = balance >= tier.buyIn;
-              const pct = Math.min(
-                100,
-                Math.round((registered / tier.fieldSize) * 100),
-              );
+              const sentando = busy === tier.id;
 
               return (
                 <article
@@ -351,131 +197,111 @@ export function Tables({
                   className="card animate-slideUp"
                   style={{ animationDelay: `${i * 40}ms` }}
                 >
-                  <header className="flex items-start justify-between mb-3">
-                    <div>
-                      <h3 className="font-bold text-white">{tier.label}</h3>
-                      <p className="text-xs text-[#a0a0b0] mt-0.5">
-                        {tier.buyIn} USDT · {tier.stackInBigBlinds} BB · ciegas{' '}
-                        {fmtUsdt(tier.blinds.small)}/{fmtUsdt(tier.blinds.big)}
-                      </p>
-                      <p className="text-[10px] text-[#6c6c80] mt-0.5">
-                        {tier.tables} mesas
+                  <header className="flex items-start justify-between mb-3 gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <h3 className="font-bold text-white">{tier.label}</h3>
+                        <span className="badge badge-success">
+                          {seatsPerTable}-max
+                        </span>
+                      </div>
+                      <p className="text-xs text-[#a0a0b0] mt-1">
+                        Ciegas {fmtStake(tier.blinds.small)}/
+                        {fmtStake(tier.blinds.big)} · {tier.stackInBigBlinds} BB
                       </p>
                     </div>
-                    <div className="text-right">
-                      <p className="text-[10px] text-[#a0a0b0] uppercase tracking-wide">
-                        1º lugar
+
+                    <div className="text-right shrink-0">
+                      <p className="text-[9px] text-[#a0a0b0] uppercase tracking-wide">
+                        Buy-in
                       </p>
-                      <p className="text-lg font-bold text-[#ffd700] leading-none">
-                        {fmtUsdt(tier.estFirstPrize)}
+                      <p className="text-lg font-bold text-white leading-none">
+                        {fmtUsdt(tier.buyIn)}
                       </p>
                       <p className="text-[9px] text-[#a0a0b0] mt-0.5">USDT</p>
                     </div>
                   </header>
 
-                  {/* Inscripcion */}
-                  <div className="mb-3">
-                    <div className="flex justify-between text-[11px] mb-1">
-                      <span className="text-[#a0a0b0]">
-                        Inscritos <strong className="text-white">{registered}</strong> /{' '}
-                        {tier.fieldSize}
-                      </span>
-                      <span className="text-[#a0a0b0]">{pct}%</span>
-                    </div>
-                    <div className="progress-bar">
-                      <div className="progress-bar-fill" style={{ width: `${pct}%` }} />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-3 gap-2 mb-3 text-center">
-                    <Metric label="Bote" value={fmtUsdt(tier.estNetPot)} unit="USDT" gold />
-                    <Metric label="Rake" value={fmtUsdt(tier.estRake)} unit="USDT" />
-                    <Metric label="Jugadores" value={String(tier.fieldSize)} />
-                  </div>
-
-                  {tier.payout.length > 0 && (
-                    <div className="mb-3">
-                      <p className="text-[10px] text-[#a0a0b0] uppercase tracking-wide mb-1.5">
-                        Reparto del bote
-                      </p>
-                      <div className="flex gap-1.5">
-                        {tier.payout.map((e) => (
-                          <div
-                            key={e.position}
-                            className="flex-1 text-center p-1.5 rounded-lg"
-                            style={{ background: '#0f0f1a' }}
-                          >
-                            <p className="text-[9px] text-[#a0a0b0]">{e.position}º</p>
-                            <p className="text-[11px] font-bold text-[#ffd700]">
-                              {fmtUsdt(e.amount)}
-                            </p>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
                   <button
-                    onClick={() => register(tier.id)}
-                    disabled={busy === tier.id || !canAfford}
+                    onClick={() => entrar({ tierId: tier.id })}
+                    disabled={sentando || (!miMesa && !canAfford)}
                     className="w-full btn btn-primary py-2.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    {busy === tier.id
-                      ? 'Registrando…'
+                    {sentando
+                      ? 'Sentando…'
+                      : miMesa
+                      ? 'Volver a mi mesa'
                       : !canAfford
-                      ? `Necesitas ${tier.buyIn} USDT`
-                      : `Jugar · ${tier.buyIn} USDT`}
+                      ? `Te faltan ${fmtUsdt(tier.buyIn - balance)} USDT`
+                      : `Jugar ahora · ${fmtUsdt(tier.buyIn)} USDT`}
                   </button>
                 </article>
               );
             })}
           </div>
+
+          {/* Mesas que ya existen: entrar sin crear otra */}
+          {tables.length > 0 && (
+            <>
+              <SectionLabel>Mesas abiertas</SectionLabel>
+              <div className="space-y-2 mb-6">
+                {tables.map((t) => {
+                  const label =
+                    tiers.find((tier) => tier.id === t.tierId)?.label ?? 'Cash';
+                  const sentando = busy === t.tableId;
+                  const llena = t.occupied >= t.maxSeats;
+
+                  return (
+                    <div
+                      key={t.tableId}
+                      className="rounded-xl p-3 flex items-center justify-between gap-3"
+                      style={{ background: '#151525', border: '1px solid #2a2a4a' }}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <span
+                          className="w-2 h-2 rounded-full shrink-0"
+                          style={{
+                            background:
+                              t.status === 'running' ? '#00d26a' : '#ffd700',
+                          }}
+                        />
+                        <div className="min-w-0">
+                          <p className="text-sm font-semibold text-white truncate">
+                            {label} · {fmtStake(t.smallBlind)}/
+                            {fmtStake(t.bigBlind)}
+                          </p>
+                          <p className="text-[10px] text-[#a0a0b0]">
+                            {t.occupied}/{t.maxSeats} jugadores ·{' '}
+                            {t.status === 'running' ? 'en juego' : 'esperando'}
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => entrar({ tableId: t.tableId })}
+                        disabled={sentando || llena}
+                        className="btn btn-outline px-3 py-1.5 text-xs shrink-0 disabled:opacity-50"
+                      >
+                        {llena ? 'Llena' : sentando ? '…' : 'Entrar'}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+            </>
+          )}
+
+          <div className="card">
+            <p className="text-xs text-[#a0a0b0] leading-relaxed">
+              <span className="text-white font-semibold">Cómo funciona:</span> cada
+              mesa es {seatsPerTable}-max. Entras con el buy-in, juegas con tus
+              fichas y, cuando te levantas, vuelven a tu saldo. El saldo de
+              promoción se desbloquea {unlockRatio} al usarlo.
+            </p>
+          </div>
         </>
       )}
-
-      {disclosure && (
-        <div
-          className="mt-5 rounded-2xl p-4"
-          style={{ background: 'rgba(255,215,0,0.07)', border: '1px solid rgba(255,215,0,0.25)' }}
-        >
-          <div className="flex items-start gap-2.5">
-            <span className="text-sm">💡</span>
-            <p className="text-[11px] text-[#a0a0b0] leading-relaxed">{disclosure}</p>
-          </div>
-        </div>
-      )}
-
-      <div className="mt-5 card">
-        <p className="text-xs text-[#a0a0b0] leading-relaxed">
-          <span className="text-white font-semibold">Cómo funciona:</span> cada campo es de{' '}
-          {tiers[0]?.fieldSize ?? 300} jugadores repartidos en {seatsPerTable} mesas de{' '}
-          {seatsPerTable}. Las mesas se fusionan mano a mano hasta que queda una mesa
-          final, y el bote se reparte entre las primeras posiciones. Tu saldo de
-          promoción se desbloquea {unlockRatio} al usarlo.
-        </p>
-      </div>
-    </div>
-  );
-}
-
-function Metric({
-  label,
-  value,
-  unit,
-  gold,
-}: {
-  label: string;
-  value: string;
-  unit?: string;
-  gold?: boolean;
-}) {
-  return (
-    <div>
-      <p className="text-[10px] text-[#a0a0b0] uppercase tracking-wide">{label}</p>
-      <p className={`text-sm font-bold ${gold ? 'text-[#ffd700]' : 'text-white'}`}>
-        {value}
-        {unit && <span className="text-[9px] text-[#a0a0b0] ml-0.5">{unit}</span>}
-      </p>
     </div>
   );
 }

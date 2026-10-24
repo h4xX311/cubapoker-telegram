@@ -18,6 +18,25 @@ export const fmtUsdt = (n: number): string => {
 };
 
 /**
+ * Formatea una ciega o un precio con la precision que necesita el nivel micro.
+ *
+ * `fmtUsdt` redondea a dos decimales porque es dinero de cuenta. Una ciega de
+ * 0,005 USDT redondeada a dos decimales se convierte en 0,01, y entonces la
+ * pequena y la grande se ven iguales. Aqui se permiten tres decimales, sin
+ * rellenar con ceros de mas.
+ */
+export const fmtStake = (n: number): string => {
+  const v = Math.round((n ?? 0) * 1000) / 1000;
+  if (Math.abs(v) >= 1000) {
+    return v.toLocaleString('es-ES', { maximumFractionDigits: 0 });
+  }
+  return v.toLocaleString('es-ES', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 3,
+  });
+};
+
+/**
  * Como se ve el saldo en la cabecera.
  *
  * ------------------------------------------------------------------
@@ -28,9 +47,9 @@ export const fmtUsdt = (n: number): string => {
  * que arriesga son USDT, y es lo unico que se muestra.
  *
  * Ademas era una conversion sin cotizacion real (un numero fijo guardado en el codigo), y
- * mostrado junto a un saldo con centavos假的 da precision que no existe: 0,003 USDT son "0
- * CUP" o "1 CUP" segun como redondee. Un numero inventado al lado del dinero real invite a
- * la desconfianza.
+ * mostrado junto a un saldo con centavos falsos da precision que no existe: 0,003 USDT son
+ * "0 CUP" o "1 CUP" segun como redondee. Un numero inventado al lado del dinero real invita
+ * a la desconfianza.
  *
  * CoinPoker tiene una sola moneda en pantalla por la misma razon, y sin referencia secundaria.
  */
@@ -69,12 +88,12 @@ export const PromoBalanceNote = ({
     <span className="text-sm">💡</span>
     <p className="text-[11px] text-[#a0a0b0] leading-relaxed">
       Tienes <strong className="text-[#ffd700]">{fmtUsdt(play)} USDT</strong> de
-      promoción. Sirven para jugar en cualquier campo, pero no se retiran
+      promoción. Sirven para jugar en las mesas cash, pero no se retiran
       directamente: al usarlos se desbloquea{' '}
-      <strong className="text-white">1 de cada 10</strong> a saldo retirable. Si
-      los juegas todos, podrías extraer{' '}
-      <strong className="text-white">{fmtUsdt(maxExtractable)} USDT</strong> (y
-      perderías el resto por el camino).
+      <strong className="text-white">1 USDT por cada 10 USDT jugados</strong> a
+      saldo retirable. Si juegas los {fmtUsdt(play)}, podrías convertir{' '}
+      <strong className="text-white">{fmtUsdt(maxExtractable)} USDT</strong> en
+      saldo retirable; el resto se consume jugando.
     </p>
   </div>
 );

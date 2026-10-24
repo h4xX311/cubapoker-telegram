@@ -8,6 +8,7 @@ import {
   UNLOCK_RATES,
   FREEROLL_PAYOUT,
   SEATS_PER_TABLE,
+  centrollPrizeUnits,
 } from '../config/product';
 import { usdtToUnits, unitsToUsdt, formatUnits, blindsFor } from '../config/units';
 import { logger } from '../utils/logger';
@@ -20,7 +21,8 @@ import { withFieldLock } from './field.manager';
 const LOCK_CENTROLL = 'centroll';
 
 /**
- * Centrolls: buy-in de 0,01 USDT que consume saldo REAL y paga fichas.
+ * Centrolls: buy-in de 0,01 USDT que consume saldo REAL y paga saldo de
+ * promocion.
  *
  * ------------------------------------------------------------------
  * QUE RESUELVE
@@ -32,29 +34,19 @@ const LOCK_CENTROLL = 'centroll';
  *   "CoinPoker Centrolls: $0.01 Buy-Ins"
  *   "These events require you to have a real money balance of at least $0.01"
  *
- * El bucle es: deposito -> centroll -> fichas de promocion -> centroll o
+ * El bucle es: deposito -> centroll -> saldo de promocion -> centroll o
  * freeroll. El centroll es el punto por el que entra el dinero real, y el
- * freeroll es el que lo devuelve como fichas.
+ * freeroll es el que lo devuelve como saldo de promocion.
  *
  * ------------------------------------------------------------------
- * POR QUE 1 USDT Y NO 0,01
+ * POR QUE 0,01 USDT
  *
- * El buy-in de CoinPoker es de un centavo. Aqui son 1000 unidades internas
- * (1 USDT = 1000 unidades, ver `config/units.ts`), que es 1,20 CUP al tipo
- * oficial. Dos razones:
+ * El buy-in de CoinPoker es de un centavo y aqui tambien: 0,01 USDT = 10
+ * unidades internas (1 USDT = 1000), un entero. Las fichas de mesa son
+ * enteras, pero el buy-in se cobra en unidades de saldo, no en fichas; por eso
+ * 10 unidades es representable y el motor no redondea a cero.
  *
- *  1. ARITMETICA ENTERA. Con buy-in de 0,01 USDT y un field de 100, cada
- *     jugador empezaria con 0,0001 USDT de fichas, que en unidades internas es
- *     0,1: no es un entero. El motor entero no puede repartir eso, y
- *     `Math.floor` lo convertiria en 0 fichas. Un buy-in que no se puede
- *     representar no es un buy-in.
- *
- *  2. ACCESIBILIDAD EN CUBA. 1,20 CUP es pagable con cualquier recarga movil.
- *     Un centavo es mas barato pero con el no se puede jugar de verdad.
- *
- * La consecuencia de que sea 1 USDT y no 0,01 es que el centroll cuesta 100
- * veces mas: es una entrada de verdad, no una jugada de prueba. Para el
- * jugador,proto.
+ * El premio se paga en `balance.play` (tickets), no en saldo retirable.
  */
 
 export class CentrollError extends Error {
@@ -73,10 +65,10 @@ export const centrollService = {
    *
    * A diferencia del freeroll, consume saldo REAL: el buy-in sale de
    * `balance.real` directamente. No pasa por `play` ni por el desbloqueo, porque
-   * un centroll es de pago y el jugador ha paid con dinero real.
+   * un centroll es de pago y el jugador ha pagado con dinero real.
    *
    * El PREMIO, en cambio, va a `balance.play`. Es la misma logica de CoinPoker:
-   * en un centroll no se gana dinero, se ganan tickets (aquí, fichas de
+   * en un centroll no se gana dinero, se ganan tickets (aqui, saldo de
    * promocion).
    */
   async register(
@@ -247,10 +239,11 @@ export const centrollService = {
 
     const fieldId = `centroll-${Date.now().toString(36)}`;
     const buyIn = usdtToUnits(CENTROLL.buyInUsdt);
-    // Las fichas iniciales son la parte del premio de cada jugador. Con
-    // premio de 30 USDT sobre 100 jugadores, cada uno entra con 0,3 USDT de
-    // fichas: suficiente para jugar unas 150 ciegas antes de quedarse corto.
-    const { small, big } = blindsFor(unitsToUsdt(buyIn) * 1.5);
+    // Las fichas del centroll son FIJAS, no la parte del premio: el buy-in es
+    // dinero (0,01 USDT) y las fichas son de torneo (1.000). Con ciegas 5/10
+    // son 100 ciegas grandes; con el stack atado al buy-in serian 5 BB y todo
+    // el mundo se iria all-in preflop.
+    const { small, big } = blindsFor(unitsToUsdt(CENTROLL.startingChips));
 
     // ------------------------------------------------------------------
     // TRES ARREGLOS QUE HACIAN QUE ESTO NO FUNCIONARA NUNCA
@@ -321,8 +314,6 @@ export const centrollService = {
     const queue = queues.get(field.fieldId) ?? [];
     if (queue.length === 0) return false;
 
-    const buyIn = usdtToUnits(CENTROLL.buyInUsdt);
-
     // Asegurar mesas.
     const wanted = Math.ceil(queue.length / SEATS_PER_TABLE);
     const live = field.tables.filter(t => !t.mergedInto);
@@ -349,7 +340,7 @@ export const centrollService = {
         kind: 'human',
         playerId: String(player.telegramId),
         displayName: player.username || `Jugador ${player.telegramId}`,
-        chips: buyIn,
+        chips: CENTROLL.startingChips,
         bet: 0,
         totalBet: 0,
         status: 'active',
@@ -358,7 +349,7 @@ export const centrollService = {
         isBigBlind: false,
         handsPlayed: 0,
         handsWon: 0,
-        netChips: buyIn,
+        netChips: CENTROLL.startingChips,
         joinedAt: new Date(),
       };
 
@@ -416,7 +407,7 @@ export const centrollService = {
   /** Crea una mesa de 7 para el centroll. */
   async createTable(field: IField, tableNumber: number): Promise<ITable> {
     const buyIn = usdtToUnits(CENTROLL.buyInUsdt);
-    const { small, big } = blindsFor(unitsToUsdt(buyIn) * 1.5);
+    const { small, big } = blindsFor(unitsToUsdt(CENTROLL.startingChips));
 
     const tableId = `centroll-${field.fieldId}-t${tableNumber}`;
 
@@ -498,10 +489,10 @@ export const centrollService = {
   /**
    * Estado del centroll para la API.
    *
-   * El premio se calcula con el multiplicador: 30x el buy-in repartido 50/30/20.
-   * Con buy-in de 1 USDT, el campo de 100 cobra 100 USDT y paga 30 USDT de
-   * fichas. Es un giveaway del 30% con entrada de pago: el operador gana el 70%
-   * en rake menos el rake del 5%: de ahi sale el margen.
+   * El premio es el 30% del bote (`buyInsCollected`), repartido 50/30/20, y va
+   * a `balance.play`. Con buy-in de 0,01 USDT y 100 jugadores el campo cobra
+   * 1 USDT y paga 0,30 USDT de promocion: el operador se queda el 70%. No hay
+   * rake por mano ademas de eso.
    */
   async status() {
     const field = await Field.findOne({
@@ -513,7 +504,6 @@ export const centrollService = {
       return {
         open: false,
         buyIn: CENTROLL.buyInUsdt,
-        buyInCup: Math.ceil(CENTROLL.buyInUsdt * 120),
         prizeMultiplier: CENTROLL.prizeMultiplier,
         targetField: CENTROLL.targetField,
         maxField: CENTROLL.maxField,
@@ -529,8 +519,10 @@ export const centrollService = {
 
     // El bote del campo: lo que puso todo el mundo.
     const pot = field.buyInsCollected;
-    // El premio: una fraccion del bote, segun el multiplicador.
-    const prize = Math.floor(pot * CENTROLL.prizeMultiplier) / 100;
+    // El premio: el porcentaje del bote, en unidades enteras. Misma cuenta que
+    // la liquidacion real (`fieldManager.settleField`), para que la UI no
+    // prometa algo distinto de lo que se paga.
+    const prize = centrollPrizeUnits(pot);
     const shares = splitPrize(prize, FREEROLL_PAYOUT);
 
     return {
@@ -538,7 +530,6 @@ export const centrollService = {
       fieldId: field.fieldId,
       status: field.status,
       buyIn: CENTROLL.buyInUsdt,
-      buyInCup: Math.ceil(CENTROLL.buyInUsdt * 120),
       prizeMultiplier: CENTROLL.prizeMultiplier,
       targetField: field.targetField,
       maxField: CENTROLL.maxField,
@@ -559,7 +550,7 @@ export const centrollService = {
         seated: t.seats.filter(s => s.status === 'active' && s.chips > 0).length,
         maxSeats: t.maxSeats,
       })),
-      // El premio va a fichas de promocion: no es dinero retirable.
+      // El premio va a saldo de promocion: no es dinero retirable.
       prizeWithdrawable: false,
       unlockRatio: `1:${Math.round(1 / UNLOCK_RATES.centroll)}`,
     };

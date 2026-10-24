@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { api, ApiError } from '../lib/api';
 import { PageHeader, SectionLabel } from '../components/Layout';
+import { fmtUsdt } from '../components/Balance';
 
 interface Props {
   user: any;
@@ -95,7 +96,10 @@ export function VIP({ user, onBack, onBalanceChange }: Props) {
               const cfg = configs[level];
               const meta = LEVELS[level];
               const owned = currentLevel === level;
-              const canAfford = realBalance >= cfg.price;
+              // El servidor envia `priceUsdt`. El respaldo divide por 1000 solo
+              // si la respuesta es de una version anterior, que mandaba unidades.
+              const price = cfg.priceUsdt ?? (cfg.price ?? 0) / 1000;
+              const canAfford = realBalance >= price;
 
               return (
                 <article
@@ -119,9 +123,9 @@ export function VIP({ user, onBack, onBalanceChange }: Props) {
                   </header>
 
                   <p className="text-2xl font-bold text-white mb-3 relative">
-                    {cfg.price}{' '}
+                    {fmtUsdt(price)}{' '}
                     <span className="text-xs font-normal text-[#a0a0b0]">
-                      CUP / {cfg.duration} días
+                      USDT / {cfg.duration} días
                     </span>
                   </p>
 
@@ -146,7 +150,7 @@ export function VIP({ user, onBack, onBalanceChange }: Props) {
                       : busy === level
                       ? 'Procesando…'
                       : !canAfford
-                      ? `Te faltan ${cfg.price - realBalance} CUP`
+                      ? `Te faltan ${fmtUsdt(price - realBalance)} USDT`
                       : 'Activar'}
                   </button>
                 </article>

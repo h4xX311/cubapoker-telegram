@@ -157,3 +157,61 @@ no hay a quién entretener.
 **El premio de 1 USDT por hora.** Son 24 USDT al día de la casa si se juegan todos los slots.
 Es una decisión de producto y de presupuesto, no técnica: se cambia con
 `FREEROLL_HOURLY_PRIZE_USDT` sin tocar código.
+
+---
+
+## 5 · Los centrolls
+
+**Decisión:** un centroll de 0,01 USDT que consume saldo real y paga el premio entero a
+**saldo de promoción**. Es la vía de ingresos que hace sostenible el freeroll: el jugador
+compra con dinero real lo que en el freeroll ganaba gratis.
+
+### Reglas
+
+| | |
+|---|---|
+| Entrada | 0,01 USDT de `balance.real` (10 unidades internas). Solo saldo retirable |
+| Fichas | 1.000 por jugador, ciegas 5/10 (100 ciegas grandes) |
+| Campo objetivo | 100 jugadores; techo duro 300 |
+| Reentradas | Hasta 5 por jugador, cada una a 0,01 USDT |
+| Premio | 30 % del bote, reparto 50/30/20 |
+| Destino | `balance.play` (promoción). No retirable directamente |
+| Rake aparte | No: el margen de la casa es el 70 % del bote que no se reparte |
+
+### Por qué 0,01 USDT
+
+El buy-in de CoinPoker es de un centavo. Con `1 USDT = 1000` unidades internas, 0,01 USDT
+son **10 unidades**, un entero: el motor no redondea a cero. El valor anterior de 1 USDT
+venía de una conversión a CUP mal planteada y dejaba el centroll 100 veces más caro que el
+modelo de referencia.
+
+### Por qué las fichas no salen del buy-in
+
+El buy-in es dinero; las fichas son de torneo. Si el stack saliera del buy-in (10 unidades),
+las ciegas derivadas del stack serían 1/2 y cada jugador entraría con **5 ciegas grandes**:
+todo el mundo all-in preflop. Con 1.000 fichas fijas y ciegas 5/10 el centroll es un torneo
+de 100 BB. Las fichas no tocan el bote: el premio se calcula sobre `buyInsCollected`.
+
+### Por qué el premio se muestra como porcentaje del bote
+
+`prizeMultiplier = 30` es un **porcentaje**, no un multiplicador del buy-in: en un campo
+lleno de 100 jugadores coincide con 30 veces la entrada, pero con el campo a medio llenar el
+multiplicador real es menor. La UI muestra "30 % del bote" para que el número sea cierto en
+cualquier momento del registro.
+
+### La liquidación también es del centroll
+
+`fieldManager.tick()` liquida todos los campos, y `settleField` solo distinguía `freeroll`
+de todo lo demás. Un centroll caía en la rama de cash: rake del 5 %, reparto 45/25/15/9/6 y
+pago a `balance.real`. Medido con `test-centroll-liquidacion.js`: un bote de 100 unidades
+repartía 95 retirables y la casa se quedaba 5, cuando la regla es 30 a promoción y 70 de
+margen. Ahora `settleField` tiene una rama `centroll` y el premio sale de la misma función
+que muestra `centrollService.status()` (`centrollPrizeUnits`), para que la UI y el pago no
+puedan divergir.
+
+### Lo que falta decidir
+
+**El arranque.** Hoy el centroll exige 100 inscritos (`seated >= targetField`) y nadie lo
+rellena con bots, así que con pocos jugadores reales no arranca nunca. El freeroll sí se
+rellena con bots hasta el mínimo. Falta decidir si el centroll se rellena con bots (y con
+qué regla para sus premios) o si arranca por tiempo con los inscritos que haya.

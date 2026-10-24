@@ -47,6 +47,7 @@ import { Router, Request, Response } from 'express';
 import { User } from '../models/User';
 import { getAuthedTelegramId, requireTelegramAuth } from '../middleware/telegramAuth';
 import { unitsToUsdt } from '../config/units';
+import { monetizationService } from '../services/monetization.service';
 import { logger } from '../utils/logger';
 
 const router = Router();
@@ -183,6 +184,9 @@ router.get('/me', requireTelegramAuth, async (req: Request, res: Response) => {
     // Se convierte al salir, no al entrar: si el servidor recibiera USDT habria que
     // convertir en cada operacion de dinero, que es donde ya se colaron estos errores.
     // ------------------------------------------------------------------
+    const vipLevel = await monetizationService.getVIPLevel(user.telegramId);
+    const stats = user.stats;
+
     res.json({
       success: true,
       user: {
@@ -199,13 +203,23 @@ router.get('/me', requireTelegramAuth, async (req: Request, res: Response) => {
         },
         /** Las cifras crudas, en unidades, para lo que necesite la aritmetica exacta. */
         balanceUnits: { real, play, total: real + play },
-        stats: user.stats,
+        // Las estadisticas de dinero se guardan en unidades (rake pagado, premios de
+        // freeroll). Se convierten aqui, en la misma frontera que el saldo, para que la
+        // interfaz no tenga que saber que existe una unidad interna de 1/1000 USDT.
+        stats: {
+          handsPlayed: stats.handsPlayed ?? 0,
+          handsWon: stats.handsWon ?? 0,
+          tablesJoined: stats.tablesJoined ?? 0,
+          freerollsPlayed: stats.freerollsPlayed ?? 0,
+          totalRakePaid: unitsToUsdt(stats.totalRakePaid ?? 0),
+          totalFreerollWon: unitsToUsdt(stats.totalFreerollWon ?? 0),
+        },
         // `activeTableId` no es la fuente de verdad de donde esta el jugador (eso son los
         // asientos, y lo que hace `GET /game/my-table`), pero se devuelve para que la
         // pantalla pueda mostrar un aviso de "tienes una partida en curso" sin preguntar
         // otra vez. Si los dos no coinciden, manda el asiento.
         activeTableId: user.activeTableId ?? null,
-        vip: null,
+        vip: vipLevel,
       },
     });
   } catch (error) {

@@ -137,38 +137,30 @@ export const PAID_POSITIONS = FIELD_PAYOUT.length;
  * Campos cash en USDT.
  *
  * ------------------------------------------------------------------
- * LOS CUATRO NIVELES ESCALAN EN BUY-IN, NO EN TAMANO DE CAMPO
+ * LOS CUATRO NIVELES ESCALAN EN BUY-IN
  *
- * Antes los cuatro tenian el mismo buy-in por jugador (2000 CUP el mas alto) y
- * lo que variaba era `fieldSize` (50/100/300/500). Eso hacia que el campo de 50
- * y el de 500 fueran el mismo juego con distinta duracion: el jugador no tenia
- * motivo para elegir uno u otro, y el campo de 500 tardaba horas en llenarse con
- * una base de usuarios pequeña.
+ * El cash es una ring table 7-max: el jugador entra con un buy-in, juega las
+ * manos que quiera y se levanta con sus fichas. Los niveles cambian el tamano
+ * de la apuesta, no el numero de participantes.
  *
- * Ahora los cuatro escalan en buy-in y TODOS son de 300 participantes (43 mesas
- * de 7). El jugador elige cuanto arriesga, y el tiempo de espera es siempre el
- * mismo.
+ *   nivel      buy-in    ciegas (USDT)     stack
+ *   micro      1 USDT    0,005 / 0,01      100 BB
+ *   bajo       5 USDT    0,025 / 0,05      100 BB
+ *   medio     25 USDT    0,125 / 0,25      100 BB
+ *   alto     100 USDT    0,50 / 1,00       100 BB
  *
- * ------------------------------------------------------------------
- * LOS STAKES EN USDT, CON SU EQUIVALENTE EN CUP
+ * `fieldSize` se conserva para los campos multi-mesa de torneo (freeroll,
+ * centroll), que no son cash. El lobby de cash ya no lo muestra.
  *
- *   nivel      buy-in    CUP       stack    bote bruto    rake    1o lugar
- *   micro      1 USDT    120 CUP   50 BB      300 USDT     15       128 USDT
- *   bajo       5 USDT    600 CUP   50 BB    1 500 USDT     75       641 USDT
- *   medio     25 USDT  3 000 CUP  100 BB    7 500 USDT    375     3 206 USDT
- *   alto     100 USDT 12 000 CUP  100 BB   30 000 USDT  1 500    12 825 USDT
- *
- * El micro a 1 USDT (120 CUP) es el nivel de entrada real: el deposito minimo de
- * EnZona es de 500 CUP, o sea 4,17 USDT, con lo que se pueden comprar cuatro
- * entradas. Sin ese nivel, un usuario|clubbersano que entra con 500 CUP no
- * tiene nada que jugar.
- *
- * Los 100 USDT del nivel alto son un stack de poker serio. El rake de ese
- * campo son 1 500 USDT por evento, que es lo que paga la infraestructura.
+ * Los 100 USDT del nivel alto son un stack de poker serio. El rake de una mesa
+ * de ese nivel es lo que paga la infraestructura.
  */
 export interface TableTier {
   id: TableTierId;
-  /** Participantes del campo (multi-mesa). 300 en los cuatro niveles. */
+  /**
+   * Participantes del campo (multi-mesa), 300 en los cuatro niveles.
+   * Solo lo usan los campos de torneo; una ring table cash no tiene fieldSize.
+   */
   fieldSize: number;
   /**
    * Buy-in por jugador, en UNIDADES INTERNAS (1/1000 de USDT).
@@ -224,7 +216,7 @@ const tier = (
     usdtToUnits(buyInUsdt) / blindsFor(buyInUsdt).big,
   ),
   label,
-  description: `300 participantes · buy-in ${buyInUsdt} USDT`,
+  description: `Ring table 7-max · buy-in ${buyInUsdt} USDT`,
 });
 
 export const TABLE_TIERS: Record<TableTierId, TableTier> = {
@@ -308,17 +300,27 @@ export const FREEROLL_PAYOUT = [50, 30, 20] as const;
  *   "CoinPoker Centrolls: $0.01 Buy-Ins"
  *   "These events require you to have a real money balance of at least $0.01"
  *
- * El bucle es: deposito -> centroll -> fichas de promocion -> centroll o
+ * El bucle es: deposito -> centroll -> saldo de promocion -> centroll o
  * freeroll. El centroll es el punto por el que entra el dinero real, y el
- * freeroll es el que lo devuelve como fichas.
+ * freeroll es el que lo devuelve como saldo de promocion.
  *
- * Con el cambio a USDT, 0,01 USDT son 1,2 CUP: accesible para un usuario
- * cubano, y sin una fraccion tan pequena que el sistema de fichas enteros no
- * pueda representarla. Ese es el limite real: las fichas son enteras.
+ * Con el cambio a USDT, 0,01 USDT = 10 unidades internas (1 USDT = 1000).
+ * Cabe en el ledger sin redondear y es accesible para un usuario cubano.
  */
 export const CENTROLL = {
-  /** Buy-in en USDT. Con fichas enteras, 0,01 no es representable: ver abajo. */
-  buyInUsdt: 1,
+  /** Buy-in en USDT. 0,01 = 10 unidades internas. */
+  buyInUsdt: 0.01,
+
+  /**
+   * Fichas iniciales de cada jugador del centroll.
+   *
+   * NO salen del buy-in: el buy-in es dinero de la casa (0,01 USDT) y las
+   * fichas son de torneo. Con 1.000 fichas y las ciegas derivadas del stack
+   * (5/10) el centroll es un torneo de 100 ciegas grandes; si el stack saliera
+   * del buy-in serian 10 fichas y ciegas 1/2, o sea all-in preflop. Las fichas
+   * no tocan el bote: el premio se calcula sobre `buyInsCollected`.
+   */
+  startingChips: 1000,
 
   /**
    * TICKETS, no fichas.
@@ -334,7 +336,13 @@ export const CENTROLL = {
    */
   prizeToBalance: 'play' as const,
 
-  /** Multiplicador del premio sobre el buy-in. 30x es conservador para empezar. */
+  /**
+   * Porcentaje del bote que se reparte como premio. 30 = 30%.
+   *
+   * En un campo lleno de 100 jugadores, 30% del bote equivale a 30 veces el
+   * buy-in; por eso el nombre historico `prizeMultiplier`. La UI lo muestra
+   * como porcentaje para que siga siendo correcto con campos a medio llenar.
+   */
   prizeMultiplier: 30,
 
   /** Campo objetivo del centroll. Mas pequeno que el freeroll: es un bucle rapido. */
@@ -343,9 +351,20 @@ export const CENTROLL = {
   /** Techo duro. Mas bajo que el del freeroll: son mucho mas frecuentes. */
   maxField: 300,
 
-  /** Cuantas veces se puede reentrar por $0,01, como CoinPoker. */
+  /** Cuantas veces se puede reentrar por 0,01 USDT, como CoinPoker. */
   maxRebuys: 5,
 } as const;
+
+/**
+ * Premio del centroll a partir del bote recaudado, en unidades enteras.
+ *
+ * Es la UNICA formula del premio. La usan `centrollService.status()` (lo que
+ * ve el jugador) y `fieldManager.settleField()` (lo que se paga de verdad).
+ * Estaban separadas y no lo estaban: la liquidacion trataba el centroll como
+ * un campo de cash y repartia el 95 % del bote a `balance.real`.
+ */
+export const centrollPrizeUnits = (potUnits: number): number =>
+  Math.max(0, Math.floor((potUnits * CENTROLL.prizeMultiplier) / 100));
 
 /**
  * Rates de desbloqueo de `balance.play` a saldo retirable.
@@ -384,13 +403,12 @@ export type UnlockContext = keyof typeof UNLOCK_RATES;
  * REGLAS DE SALDO
  * ------------------------------------------------------------------
  * El saldo ganado en freeroll entra a `balance.play`, que NO es retirable.
- * Solo `balance.real` (CUP de verdad) puede retirarse. Esta distincion es la
+ * Solo `balance.real` (USDT de verdad) puede retirarse. Esta distincion es la
  * que hace que los freerolls sirvan de gancho sin generar obligaciones de pago.
  */
 export const BALANCE = {
   /** En mesas cash se consume primero el saldo play */
   playFirstOnCashTables: true,
-  minBuyInCUP: 200,
 } as const;
 
 /**
@@ -421,13 +439,30 @@ export const BOT_CONFIG = {
   botRatio: 0.6,
   /** Cada cuanto el gestor revisa y rellena las mesas */
   tickMs: 2000,
-  /** Nombres para bots (neutros, sin acentos para evitar problemas de encoding) */
+  /**
+   * Nombres base de los bots. Mezcla nombres de pila y nicks de poker, como en
+   * cualquier sala: no todos los jugadores se llaman igual ni todos usan un alias.
+   * Sin acentos para evitar problemas de encoding.
+   */
   names: [
     'ElPro', 'Marta', 'CubanKing', 'LaEstrena', 'ReyDeOros', 'Nube',
     'Coco', 'Yeni', 'ElGato', 'Solares', 'Trinidad', 'Habana',
     'Vega', 'Punto', 'Cauto', 'Zafiro', 'Bermuda', 'Coral',
     'Cobre', 'Duna', 'Guaro', 'Isla', 'Jabeque', 'Canales',
     'Tropico', 'Cafetal', 'Guarapo', 'Malecon', 'Almendron', 'Cimarron',
+  ] as readonly string[],
+  /**
+   * Sufijos para los nombres repetidos. Un nick de poker real usa anos, ciudades
+   * o apodos ("Marta79", "ElGatoHabana"), no un contador ("Marta2"), que es la
+   * senal mas obvia de que el rival es un bot. Las cadenas vacias permiten que
+   * el nombre base aparezca solo.
+   */
+  nickSuffixes: [
+    '', '', '',
+    '79', '88', '90', '92', '95', '99', '07', '10', '21', '23',
+    'Cuba', 'Habana', 'Cubano', 'Cubana', 'delSol', 'delMar',
+    'Trinidad', 'Matanzas', 'Holguin', 'Camaguey', 'Cienfuegos',
+    'Varadero', 'Pinar', 'Tropic', 'Cayo', 'Palma', 'Caney',
   ] as readonly string[],
 } as const;
 

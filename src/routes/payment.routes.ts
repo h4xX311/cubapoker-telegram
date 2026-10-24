@@ -44,7 +44,10 @@ router.post('/deposit/order', async (req: Request, res: Response) => {
     const provider = req.body.provider;
     const chain = req.body.chain;
 
-    if (!['enzona', 'qvapay', 'usdt'].includes(provider)) {
+    // La plataforma opera solo en USDT. Las pasarelas de CUP siguen en el
+    // codigo por si se recuperan mas adelante, pero no se aceptan ordenes
+    // nuevas en otra moneda.
+    if (!['usdt'].includes(provider)) {
       throw new MoneyError('Metodo de pago no valido.');
     }
     if (provider === 'usdt' && chain && !isValidChain(chain)) {
@@ -109,7 +112,9 @@ router.post('/withdraw', async (req: Request, res: Response) => {
     const chain = req.body.chain;
     const walletAddress = req.body.walletAddress;
 
-    if (!['enzona', 'qvapay', 'usdt'].includes(provider)) {
+    // Solo USDT. Un retiro en CUP obligaria a fijar un tipo de cambio y a
+    // exponer al jugador a una moneda que la cuenta no usa.
+    if (!['usdt'].includes(provider)) {
       throw new MoneyError('Metodo de retiro no valido.');
     }
     if (provider === 'usdt' && chain && !isValidChain(chain)) {

@@ -13,6 +13,7 @@ import { Freeroll } from './pages/Freeroll';
 import { Profile } from './pages/Profile';
 import { SimulatePay } from './pages/SimulatePay';
 import { api, ApiError, type DepositOrder } from './lib/api';
+import { fmtUsdt } from './components/Balance';
 import { pageFromPath as resolvePage, type Page, type Session } from './lib/types';
 
 export default function App() {
@@ -368,7 +369,15 @@ export default function App() {
             className="flex items-center gap-2 font-bold"
             aria-label="Ir al inicio"
           >
-            <span className="text-xl">🃏</span>
+            <span
+              className="w-7 h-7 rounded-lg flex items-center justify-center text-black text-base font-bold"
+              style={{
+                background: 'linear-gradient(135deg, #00d26a 0%, #00b894 100%)',
+              }}
+              aria-hidden="true"
+            >
+              ♠
+            </span>
             <span className="text-[#ffd700]">CubaPoker</span>
           </button>
 
@@ -394,7 +403,7 @@ export default function App() {
               title="Real + promoción"
             >
               <span className="text-sm font-bold text-[#00d26a]">
-                {user?.balance.total ?? 0}
+                {fmtUsdt(user?.balance.total ?? 0)}
               </span>
               <span className="text-[10px] text-[#a0a0b0]">USDT</span>
             </button>

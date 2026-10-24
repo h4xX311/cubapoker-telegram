@@ -5,6 +5,19 @@ import { VIP, VIP_CONFIG, VIPLevel } from '../models/VIP';
 import { Achievement, Streak, ACHIEVEMENTS, STREAK_REWARDS } from '../models/Achievement';
 import { monetizationConfig, calculateRake, calculateCommission } from '../config/monetization';
 
+/**
+ * UNIDADES INTERNAS
+ * ================
+ *
+ * Los importes de este servicio (rake, precio VIP, comisiones de referidos) se
+ * guardan en unidades internas: 1 USDT = 1000 unidades. La etiqueta historica
+ * `currency: 'CUP'` en `Transaction` identifica esas unidades, NO una moneda
+ * visible. Las rutas publicas convierten a USDT antes de responder.
+ *
+ * No cambiar la etiqueta a 'USDT' sin convertir tambien el importe: quedaria un
+ * ledger que dice USDT pero suma unidades y cualquier informe de dinero saldria
+ * 1000 veces mas grande.
+ */
 export class MonetizationService {
   
   // === RAKE ===

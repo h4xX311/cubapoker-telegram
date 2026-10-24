@@ -7,7 +7,7 @@ import type {
   Page,
   Session,
 } from '../lib/types';
-import { fmtUsdt, PromoBalanceNote } from '../components/Balance';
+import { fmtUsdt, fmtStake, PromoBalanceNote } from '../components/Balance';
 import { fmtCuenta, horaLocal, segundosHasta } from '../lib/tiempo';
 
 interface HomeProps {
@@ -134,6 +134,7 @@ export function Home({ user, onNavigate, onPlay }: HomeProps) {
   // El freeroll que exige accion AHORA: el que esta en juego con registro tardio. Si no hay
   // ninguno, el proximo que se puede jugar.
   const urgente: FreerollCampo | null = enJuego[0] ?? abierto;
+  const enCurso = enJuego.length > 0;
 
   return (
     <div className="p-4 pb-10 animate-fadeIn">
@@ -146,9 +147,6 @@ export function Home({ user, onNavigate, onPlay }: HomeProps) {
           </h1>
         </div>
         <div className="flex items-center gap-2">
-          {user?.vip && (
-            <span className="badge badge-warning">{user.vip}</span>
-          )}
           <button
             onClick={() => onNavigate('profile')}
             className="w-10 h-10 rounded-full flex items-center justify-center font-bold text-black transition-transform active:scale-95"
@@ -218,25 +216,31 @@ export function Home({ user, onNavigate, onPlay }: HomeProps) {
         </div>
       )}
 
-      {/* ---------------- Accion inmediata ---------------- */}
-      <button
-        onClick={volverAMiMesa}
-        className="card w-full flex items-center gap-3 mb-3 text-left hover:border-[#00d26a] transition-all"
-      >
-        <span className="relative flex h-3 w-3 shrink-0">
-          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#00d26a] opacity-60" />
-          <span className="relative inline-flex rounded-full h-3 w-3 bg-[#00d26a]" />
-        </span>
-        <span className="flex-1">
-          <span className="block text-sm font-semibold text-white">
-            Continuar jugando
+      {/* ---------------- Accion inmediata ----------------
+          Solo aparece si de verdad hay una mesa abierta. Un boton permanente de
+          "continuar jugando" que muchas veces no lleva a ninguna parte es peor
+          que no tenerlo: el jugador pulsa, no pasa nada, y deja de confiar en
+          los accesos rapidos del lobby. */}
+      {miMesa && (
+        <button
+          onClick={volverAMiMesa}
+          className="card w-full flex items-center gap-3 mb-3 text-left hover:border-[#00d26a] transition-all"
+        >
+          <span className="relative flex h-3 w-3 shrink-0">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#00d26a] opacity-60" />
+            <span className="relative inline-flex rounded-full h-3 w-3 bg-[#00d26a]" />
           </span>
-          <span className="block text-[11px] text-[#a0a0b0]">
-            {miMesa ? 'Tienes una mesa abierta' : 'Comprueba si tienes turno pendiente'}
+          <span className="flex-1">
+            <span className="block text-sm font-semibold text-white">
+              Continuar jugando
+            </span>
+            <span className="block text-[11px] text-[#a0a0b0]">
+              Tienes una mesa abierta
+            </span>
           </span>
-        </span>
-        <span className="text-[#a0a0b0]">→</span>
-      </button>
+          <span className="text-[#a0a0b0]">→</span>
+        </button>
+      )}
 
       {/* ---------------- Freeroll del momento ---------------- */}
       {urgente && (
@@ -252,7 +256,7 @@ export function Home({ user, onNavigate, onPlay }: HomeProps) {
             <span className="text-3xl">🎁</span>
             <div className="flex-1 min-w-0">
               <p className="text-[10px] uppercase tracking-widest text-[#ffd700] font-bold">
-                {enJuego.length > 0 ? 'Freeroll en juego' : 'Próximo freeroll'}
+                {enCurso ? 'Freeroll en juego' : 'Próximo freeroll'}
               </p>
               <p className="text-sm font-semibold text-white truncate">
                 {urgente.inicio ? `A las ${horaLocal(urgente.inicio)}` : 'En punto'} ·{' '}
@@ -260,16 +264,17 @@ export function Home({ user, onNavigate, onPlay }: HomeProps) {
               </p>
               <p className="text-[11px] text-[#a0a0b0]">
                 {urgente.inscritos} inscritos · gratis
+                {enCurso ? ' · registro tardío' : ''}
               </p>
             </div>
 
             <div className="text-right shrink-0">
               {urgente.inscrito ? (
                 <button
-                  onClick={volverAMiMesa}
+                  onClick={() => onNavigate('freeroll')}
                   className="btn btn-primary px-3 py-2 text-xs"
                 >
-                  Entrar
+                  Ver
                 </button>
               ) : (
                 <button
@@ -277,12 +282,15 @@ export function Home({ user, onNavigate, onPlay }: HomeProps) {
                   disabled={ocupado}
                   className="btn btn-gold px-3 py-2 text-xs disabled:opacity-50"
                 >
-                  {ocupado ? '…' : 'Gratis'}
+                  {ocupado ? '…' : 'Inscribirme'}
                 </button>
               )}
-              <p className="text-lg font-bold text-[#ffd700] tabular-nums mt-1">
+              <p className="text-[9px] text-[#a0a0b0] uppercase tracking-wide mt-1">
+                {enCurso ? 'Cierra en' : 'Empieza en'}
+              </p>
+              <p className="text-lg font-bold text-[#ffd700] tabular-nums">
                 {fmtCuenta(segundosHasta(
-                  enJuego.length > 0 ? urgente.finRegistro : urgente.inicio,
+                  enCurso ? urgente.finRegistro : urgente.inicio,
                   ahora,
                 ))}
               </p>
@@ -344,38 +352,40 @@ export function Home({ user, onNavigate, onPlay }: HomeProps) {
               className="card w-full flex items-center gap-4 text-left hover:border-[#00d26a] transition-all"
             >
               <div
-                className="w-12 h-12 rounded-xl flex items-center justify-center shrink-0 font-bold text-black text-sm"
+                className="w-12 h-12 rounded-xl flex flex-col items-center justify-center shrink-0 text-black"
                 style={{
                   background:
                     'linear-gradient(135deg, #00d26a 0%, #00b894 100%)',
                 }}
               >
-                {fmtUsdt(tier.buyIn)}
+                <span className="font-bold text-sm leading-none">
+                  {fmtUsdt(tier.buyIn)}
+                </span>
+                <span className="text-[8px] font-semibold opacity-75 mt-0.5">
+                  USDT
+                </span>
               </div>
 
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-semibold text-white truncate">
-                  {tier.label}
+                  {tier.label} · 7-max
                 </p>
                 <p className="text-[11px] text-[#a0a0b0]">
-                  Ciegas {fmtUsdt(tier.blinds.small)}/{fmtUsdt(tier.blinds.big)} ·{' '}
-                  {tier.fieldSize} jugadores · 7-max
+                  Ciegas {fmtStake(tier.blinds.small)}/{fmtStake(tier.blinds.big)} ·{' '}
+                  {tier.stackInBigBlinds} BB
                 </p>
               </div>
 
               <div className="text-right shrink-0">
-                <p className="text-[9px] text-[#a0a0b0] uppercase">Ganador</p>
-                <p className="text-sm font-bold text-[#ffd700]">
-                  {fmtUsdt(tier.estFirstPrize)}
-                </p>
+                <p className="text-[11px] font-semibold text-[#00d26a]">Jugar</p>
+                <p className="text-[10px] text-[#a0a0b0]">Elegir mesa</p>
               </div>
             </button>
           ))}
 
           {tiers.length > 0 && (
             <p className="text-[10px] text-[#6c6c80] text-center pt-1">
-              El premio sale del bote de todos los buy-in (5% de rake). No es
-              dinero garantizado por la casa.
+              Ring table: juegas con tu saldo y te lo llevas al salir. Sin esperas.
             </p>
           )}
         </div>

@@ -372,17 +372,19 @@ async function main() {
   if (saldosTrasSegunda === saldosDespues) ok('los saldos no cambian al liquidar por segunda vez');
   else bad(`los saldos cambiaron al repetir la liquidacion: ${saldosDespues} -> ${saldosTrasSegunda}`);
 
-  // --- 4.7: el premio va a `balance.play`, no a `balance.real` -----------
+  // --- 4.7: el premio de un campo de CASH va a `balance.real` ------------
+  // El dinero salio de los buy-ins de los demas: es del jugador y se puede
+  // retirar. Solo freerolls y centrolls pagan a `balance.play` (promocion).
   const ganadorDoc = await User.findOne({ telegramId: IDS[0] });
   const enReal = ganadorDoc.balance.real;
   const enPlay = ganadorDoc.balance.play;
 
-  if (enPlay >= repartido && enReal === 5000) {
-    ok(`el premio (${repartido}) esta en \`balance.play\`, y \`balance.real\` intacto (${enReal})`);
+  if (enReal === 5000 + repartido && enPlay === 0) {
+    ok(`el premio (${repartido}) esta en \`balance.real\` y \`balance.play\` sigue intacto`);
   } else {
     bad(
-      `el premio no esta donde debe: real=${enReal} (esperado 5000), play=${enPlay} ` +
-      `(esperado al menos ${repartido})`,
+      `el premio no esta donde debe: real=${enReal} (esperado ${5000 + repartido}), play=${enPlay} ` +
+      '(esperado 0)',
     );
   }
 

@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { api, ApiError } from '../lib/api';
 import { PageHeader } from '../components/Layout';
-import { fmtUsdt } from '../components/Balance';
+import { fmtUsdt, fmtStake } from '../components/Balance';
 
 interface Props {
   user: any;
@@ -12,12 +12,12 @@ interface Props {
 }
 
 /**
- * Centroll: buy-in de pago, premio en fichas de promocion.
+ * Centroll: buy-in de pago, premio en saldo de promocion.
  *
- * Es la pieza que hace el freeroll sostenible: por 1 USDT el jugador entra en
- * un campo de 100 y compite por 30 USDT de fichas. El operador cobra entrada
- * y paga fichas; el jugador compra con dinero real lo que en el freeroll
- * ganaba gratis.
+ * Es la pieza que hace el freeroll sostenible: por 0,01 USDT el jugador entra
+ * en un campo de 300 y compite por saldo de promocion. El operador cobra
+ * entrada y paga saldo de promocion; el jugador compra con dinero real lo que
+ * en el freeroll ganaba gratis.
  *
  * Modelo de CoinPoker: "CoinPoker Centrolls: $0.01 Buy-Ins... require you to
  * have a real money balance of at least $0.01".
@@ -68,7 +68,7 @@ export function Centroll({
   };
 
   const real = user?.balance?.real ?? 0;
-  const canAfford = real >= (info?.buyIn ?? 1);
+  const canAfford = real >= (info?.buyIn ?? 0.01);
   const registered = info?.registered ?? 0;
   const target = info?.targetField ?? 100;
   const pct = Math.min(100, Math.round((registered / target) * 100));
@@ -89,14 +89,14 @@ export function Centroll({
           <span className="text-xl">⚡</span>
           <div>
             <p className="text-sm font-bold text-[#e67e22] mb-1">
-              Entrada de pago, premio en fichas
+              Entrada de pago, premio en promoción
             </p>
             <p className="text-xs text-[#a0a0b0] leading-relaxed">
-              Pagas {fmtUsdt(info?.buyIn ?? 1)} USDT de tu saldo real y compites en
-              un campo de {target} jugadores. El premio son fichas de promoción:
-              sirven para jugar en cualquier campo y desbloquean{' '}
-              <strong className="text-white">1 de cada 10</strong> a saldo
-              retirable, pero no se retiran directo.
+              Pagas {fmtUsdt(info?.buyIn ?? 0.01)} USDT de tu saldo real y compites en
+              un campo de {target} jugadores. El premio es saldo de promoción:
+              sirve para jugar en las mesas cash y desbloquea{' '}
+              <strong className="text-white">1 USDT por cada 10 USDT jugados</strong>{' '}
+              a saldo retirable. No se retira directamente.
             </p>
           </div>
         </div>
@@ -122,19 +122,19 @@ export function Centroll({
                   Bote del campo
                 </p>
                 <p className="text-xl font-bold text-white">
-                  {fmtUsdt(info?.potUsdt ?? 0)}
+                  {fmtStake(info?.potUsdt ?? 0)}
                 </p>
                 <p className="text-[9px] text-[#a0a0b0]">USDT</p>
               </div>
               <div>
                 <p className="text-[10px] text-[#a0a0b0] uppercase tracking-wide">
-                  Premio en fichas
+                  Premio en promoción
                 </p>
                 <p className="text-xl font-bold text-[#ffd700]">
-                  {fmtUsdt(info?.prizeUsdt ?? 0)}
+                  {fmtStake(info?.prizeUsdt ?? 0)}
                 </p>
                 <p className="text-[9px] text-[#a0a0b0]">
-                  {info?.prizeMultiplier}x la entrada
+                  {info?.prizeMultiplier}% del bote
                 </p>
               </div>
             </div>
@@ -150,7 +150,7 @@ export function Centroll({
                   >
                     <p className="text-[9px] text-[#a0a0b0]">{p.position}º</p>
                     <p className="text-sm font-bold text-[#ffd700]">
-                      {fmtUsdt(p.amountUsdt)}
+                      {fmtStake(p.amountUsdt)}
                     </p>
                   </div>
                 ))}
@@ -183,8 +183,8 @@ export function Centroll({
             {busy
               ? 'Entrando…'
               : !canAfford
-              ? `Necesitas ${fmtUsdt(info?.buyIn ?? 1)} USDT reales`
-              : `Entrar · ${fmtUsdt(info?.buyIn ?? 1)} USDT ($ CUP)`}
+              ? `Necesitas ${fmtUsdt(info?.buyIn ?? 0.01)} USDT reales`
+              : `Entrar · ${fmtUsdt(info?.buyIn ?? 0.01)} USDT`}
           </button>
 
           {/* Por que exige saldo real */}
@@ -193,9 +193,9 @@ export function Centroll({
               <span className="text-white font-semibold">Por qué saldo real:</span> el
               centroll solo acepta saldo retirable, igual que en CoinPoker. El saldo
               de promoción sirve para jugar, no para comprar entradas: si pudiera,
-              un jugador podría conseguir fichas jugando al centroll, gastarlas en
-              otra entrada y convertirlas poco a poco en saldo retirable, y el
-              freeroll dejaría de ser un giveaway.
+              un jugador podría conseguir saldo de promoción jugando al centroll,
+              gastarlo en otra entrada y convertirlo poco a poco en saldo
+              retirable, y el freeroll dejaría de ser un gancho.
             </p>
           </div>
         </>

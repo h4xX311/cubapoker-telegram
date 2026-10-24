@@ -48,25 +48,48 @@ const STYLES: Record<BotStyle, Omit<BotProfile, 'id' | 'name' | 'winRate'>> = {
 
 const STYLE_KEYS: BotStyle[] = ['tight', 'aggressive', 'calling', 'loose', 'rock'];
 
-/** Genera perfiles de bot con nombres unicos. */
+/**
+ * Genera perfiles de bot con nombres que parecen de jugadores reales.
+ *
+ * La unicidad se limita a la mesa (`taken`), no al proceso entero: un nick de
+ * poker se repite entre mesas distintas todo el tiempo, y mantener un registro
+ * global acabaria agotando el repertorio y volviendo a los contadores tipo
+ * "Marta2". Dentro de una misma mesa no se repite ninguno.
+ */
 export class BotFactory {
-  private usedNames = new Set<string>();
   private counter = 0;
 
-  create(seed?: number): BotProfile {
+  /**
+   * @param seed  Semilla opcional para pruebas deterministicas.
+   * @param taken Nombres ya sentados en la mesa; el nuevo no puede coincidir.
+   */
+  create(seed?: number, taken: Set<string> = new Set()): BotProfile {
     const rng = seed !== undefined ? mulberry32(seed) : Math.random;
+    const nombres = BOT_CONFIG.names;
+    const sufijos = BOT_CONFIG.nickSuffixes;
 
-    const nameIndex = Math.floor(rng() * BOT_CONFIG.names.length);
-    let baseName = BOT_CONFIG.names[nameIndex];
-
-    // Evita nombres duplicados: "Marta" y "Marta2" rompen la ilusion de que
-    // son jugadores distintos.
-    if (this.usedNames.has(baseName)) {
-      let suffix = 2;
-      while (this.usedNames.has(`${baseName}${suffix}`)) suffix++;
-      baseName = `${baseName}${suffix}`;
+    let baseName = '';
+    for (let intento = 0; intento < 120; intento++) {
+      const base = nombres[Math.floor(rng() * nombres.length)];
+      const sufijo = sufijos[Math.floor(rng() * sufijos.length)];
+      const candidato = `${base}${sufijo}`;
+      if (!taken.has(candidato)) {
+        baseName = candidato;
+        break;
+      }
     }
-    this.usedNames.add(baseName);
+
+    // Red de seguridad: 30 bases x 32 sufijos son ~960 combinaciones, mas que
+    // cualquier mesa. Si aun asi se agotaran, un numero de tres cifras sigue
+    // pareciendo un nick real ("Marta317"), no un contador ("Marta2").
+    if (!baseName) {
+      const base = nombres[Math.floor(rng() * nombres.length)];
+      let numero = 100 + Math.floor(rng() * 900);
+      while (taken.has(`${base}${numero}`)) {
+        numero = 100 + Math.floor(rng() * 900);
+      }
+      baseName = `${base}${numero}`;
+    }
 
     const style = STYLE_KEYS[Math.floor(rng() * STYLE_KEYS.length)];
     const base = STYLES[style];
@@ -88,12 +111,7 @@ export class BotFactory {
     };
   }
 
-  release(botId: string): void {
-    // Reservado para cuando los bots salgan de la mesa
-  }
-
   reset(): void {
-    this.usedNames.clear();
     this.counter = 0;
   }
 }

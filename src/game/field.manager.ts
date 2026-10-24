@@ -11,6 +11,7 @@ import {
   PAID_POSITIONS,
   FREEROLL_TARGET_FIELD,
   getTier,
+  centrollPrizeUnits,
   type TableTierId,
 } from '../config/product';
 import {
@@ -2560,12 +2561,33 @@ export const fieldManager = {
     // calcular el premio.
     // ------------------------------------------------------------------
     const esFreeroll = field.kind === 'freeroll';
+    const esCentroll = field.kind === 'centroll';
     const premioCasa = Math.max(0, field.prizePoolUnits ?? 0);
 
+    // ------------------------------------------------------------------
+    // EL CENTROLL NO ES UN CAMPO DE CASH
+    //
+    // Antes esta funcion solo distinguia `freeroll` de todo lo demas, asi que
+    // un centroll caia en la rama de cash: rake del 5 %, reparto 45/25/15/9/6
+    // y pago a `balance.real`. Medido con `test-centroll-liquidacion.js`:
+    // bote de 100 unidades repartia 95 retirables y la casa se quedaba 5.
+    //
+    // La regla del producto es otra: premio del 30 % del bote, reparto
+    // 50/30/20 y pago a `balance.play` (no retirable). El margen de la casa es
+    // el 70 % que no se reparte, no un rake por mano.
+    // ------------------------------------------------------------------
+    const premioCentroll = esCentroll
+      ? centrollPrizeUnits(field.buyInsCollected)
+      : 0;
+
     const grossPot = esFreeroll ? premioCasa : field.buyInsCollected;
-    const rakeObjetivo = esFreeroll ? 0 : rakeOfField(grossPot);
-    let rake = esFreeroll ? 0 : Math.max(field.rakeCollected, rakeObjetivo);
-    const netPot = esFreeroll ? premioCasa : Math.max(0, grossPot - rake);
+    const rakeObjetivo = esFreeroll || esCentroll ? 0 : rakeOfField(grossPot);
+    let rake = esFreeroll || esCentroll ? 0 : Math.max(field.rakeCollected, rakeObjetivo);
+    const netPot = esFreeroll
+      ? premioCasa
+      : esCentroll
+        ? premioCentroll
+        : Math.max(0, grossPot - rake);
 
     // ------------------------------------------------------------------
     // CUANTO SE REPARTE: NUNCA MAS DE `grossPot - rake`
@@ -2582,9 +2604,13 @@ export const fieldManager = {
     // suman exactamente el 5% del campo. Repartir el minimo hace que el error sea
     // hacia el lado conservador: la plataforma retiene la diferencia en vez de
     // regalarla.
-    const distributable = esFreeroll ? premioCasa : Math.min(swept, netPot);
-    const withheld = esFreeroll ? 0 : swept - distributable;
-    const faltan = esFreeroll ? 0 : netPot - swept;
+    const distributable = esFreeroll
+      ? premioCasa
+      : esCentroll
+        ? Math.min(swept, premioCentroll)
+        : Math.min(swept, netPot);
+    const withheld = esFreeroll || esCentroll ? 0 : swept - distributable;
+    const faltan = esFreeroll || esCentroll ? 0 : netPot - swept;
 
     if (faltan > 0) {
       // ------------------------------------------------------------------
@@ -2669,7 +2695,7 @@ export const fieldManager = {
     // distintos y el numero de plazas pagadas no tiene por que coincidir.
     const shares = splitPrize(
       distributable,
-      esFreeroll ? FREEROLL_PAYOUT : FIELD_PAYOUT,
+      esFreeroll || esCentroll ? FREEROLL_PAYOUT : FIELD_PAYOUT,
     );
 
     // Las posiciones ya adjudicadas durante el campo (las de `collectEliminations`).
@@ -2720,7 +2746,7 @@ export const fieldManager = {
         telegramId,
         amount,
         position,
-        esFreeroll ? 'play' : 'real',
+        esFreeroll || esCentroll ? 'play' : 'real',
       );
       paid.push({ position, telegramId, username, amount, tableId });
     }
@@ -2733,7 +2759,7 @@ export const fieldManager = {
           winnerId,
           remainder,
           1,
-          esFreeroll ? 'play' : 'real',
+          esFreeroll || esCentroll ? 'play' : 'real',
         );
         logger.info(
           `Campo ${field.fieldId}: ${formatUnits(remainder)} USDT de posiciones sin ` +
@@ -2754,7 +2780,7 @@ export const fieldManager = {
       { fieldId: field.fieldId, status: { $ne: 'finished' } },
       {
         $set: { status: 'finished', finishedAt: new Date() },
-        $inc: { paidPositionsLeft: -PAID_POSITIONS },
+        $inc: { paidPositionsLeft: -(esCentroll ? FREEROLL_PAYOUT.length : PAID_POSITIONS) },
       },
       { new: true },
     );
@@ -2794,7 +2820,8 @@ export const fieldManager = {
     logger.info(
       `Campo ${field.fieldId} liquidado: bote ${formatUnits(grossPot)} USDT, ` +
       `rake ${formatUnits(rake)} USDT, repartido ${formatUnits(totalPaid)} USDT ` +
-      `de promocion, reembolsos ${formatUnits(refunded)} USDT`,
+      `(${esFreeroll || esCentroll ? 'promocion' : 'retirable'}), ` +
+      `reembolsos ${formatUnits(refunded)} USDT`,
     );
 
     return { paid, totalPaid, refunded };
@@ -3063,8 +3090,8 @@ export const fieldManager = {
       );
 
       logger.info(
-        `Freeroll: ${telegramId} cobra ${formatUnits(amount)} USDT de promocion ` +
-        `por la posicion ${position}`,
+        `Promocion: ${telegramId} cobra ${formatUnits(amount)} USDT de saldo de ` +
+        `promocion por la posicion ${position}`,
       );
       return;
     }

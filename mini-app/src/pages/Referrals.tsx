@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { api } from '../lib/api';
 import { PageHeader, SectionLabel } from '../components/Layout';
+import { fmtUsdt } from '../components/Balance';
 
 interface Props {
   user: any;
@@ -26,7 +27,13 @@ export function Referrals({ user, onBack }: Props) {
         const res = await api.referrals();
         setStats(res);
       } catch {
-        setStats({ totalReferrals: 0, activeReferrals: 0, totalCommission: 0, referrals: [] });
+        setStats({
+          totalReferrals: 0,
+          activeReferrals: 0,
+          totalCommissionUsdt: 0,
+          bonusUsdt: 0,
+          referrals: [],
+        });
       } finally {
         setLoading(false);
       }
@@ -63,7 +70,11 @@ export function Referrals({ user, onBack }: Props) {
           </button>
         </div>
         <p className="text-[10px] text-[#a0a0b0] mt-2">
-          Ganas 50 CUP de bienvenida por cada amigo que se registra.
+          {stats ? (
+            <>Ganas {fmtUsdt(stats.bonusUsdt ?? 0)} USDT de bienvenida por cada amigo que se registra.</>
+          ) : (
+            <>Ganas un bono de bienvenida en USDT por cada amigo que se registra.</>
+          )}
         </p>
       </div>
 
@@ -71,7 +82,7 @@ export function Referrals({ user, onBack }: Props) {
       <div className="grid grid-cols-3 gap-2 mb-5">
         <Metric label="Total" value={stats?.totalReferrals ?? 0} color="#ffffff" />
         <Metric label="Activos" value={stats?.activeReferrals ?? 0} color="#ffd700" />
-        <Metric label="Ganado" value={stats?.totalCommission ?? 0} unit="CUP" color="#00d26a" />
+        <Metric label="Ganado" value={fmtUsdt(stats?.totalCommissionUsdt ?? 0)} unit="USDT" color="#00d26a" />
       </div>
 
       {/* Estructura */}
@@ -123,8 +134,12 @@ export function Referrals({ user, onBack }: Props) {
                   <span className="text-sm text-white">Nivel {r.level}</span>
                 </div>
                 <div className="text-right">
-                  <p className="text-sm font-bold text-[#00d26a]">{r.commission} CUP</p>
-                  <p className="text-[10px] text-[#a0a0b0]">{r.totalRake} CUP rake</p>
+                  <p className="text-sm font-bold text-[#00d26a]">
+                    {fmtUsdt(r.commissionUsdt ?? 0)} USDT
+                  </p>
+                  <p className="text-[10px] text-[#a0a0b0]">
+                    {fmtUsdt(r.totalRakeUsdt ?? 0)} USDT de rake
+                  </p>
                 </div>
               </div>
             ))}
@@ -143,7 +158,7 @@ export function Referrals({ user, onBack }: Props) {
   );
 }
 
-function Metric({ label, value, unit, color }: { label: string; value: number; unit?: string; color: string }) {
+function Metric({ label, value, unit, color }: { label: string; value: number | string; unit?: string; color: string }) {
   return (
     <div className="card text-center p-3">
       <p className="text-2xl font-bold" style={{ color }}>

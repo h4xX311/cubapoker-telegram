@@ -9,7 +9,7 @@ import { paymentService, MoneyError } from '../services/payment/payment.service'
 import { SIMULATION_ENABLED } from '../services/payment/gateway';
 import { logger } from '../utils/logger';
 import { unitsToUsdt } from '../config/units';
-import { WITHDRAWALS, CUP_PER_USDT } from '../config/currency';
+import { WITHDRAWALS } from '../config/currency';
 
 /**
  * Panel de operador.
@@ -187,11 +187,11 @@ router.get('/withdrawals', async (req: Request, res: Response) => {
           username: user?.username,
           firstName: user?.firstName,
           provider: o.provider,
-          // Los importes son unidades internas en el modelo.
-          amountUsdt: unitsToUsdt(o.amount),
+          // `amount` es lo que pidio el jugador, en USDT. `commission` y
+          // `creditedAmount` (el neto) estan en unidades internas.
+          amountUsdt: o.amount,
           commissionUsdt: unitsToUsdt(o.commission),
-          netUsdt: unitsToUsdt(o.amount - o.commission),
-          amountCup: Math.round(unitsToUsdt(o.amount) * CUP_PER_USDT),
+          netUsdt: unitsToUsdt(o.creditedAmount ?? 0),
           walletAddress: o.walletAddress,
           chain: o.chain,
           status: o.status,
@@ -234,7 +234,7 @@ router.post('/withdrawals/:orderId/approve', async (req: Request, res: Response)
     const order = await PaymentOrder.findOne({ orderId });
 
     logger.info(
-      `Retiro ${orderId} aprobado: ${unitsToUsdt(order.amount)} USDT ` +
+      `Retiro ${orderId} aprobado: ${order.amount} USDT ` +
       `(${order.provider}${order.chain ? '/' + order.chain : ''}) por el operador`,
     );
 
@@ -257,7 +257,8 @@ router.post('/withdrawals/:orderId/approve', async (req: Request, res: Response)
           'Comprueba que el pago se ha realizado de verdad.',
       orderId,
       txHash: order.txHash,
-      amountUsdt: unitsToUsdt(order.amount),
+      // `order.amount` es lo que pidio el jugador, en USDT.
+      amountUsdt: order.amount,
       simulado,
     });
   } catch (error) {
@@ -333,7 +334,8 @@ router.get('/deposits', async (req: Request, res: Response) => {
         telegramId: o.telegramId,
         provider: o.provider,
         chain: o.chain,
-        amountUsdt: unitsToUsdt(o.amount),
+        // En una orden de deposito, `amount` ya esta en USDT.
+        amountUsdt: o.amount,
         status: o.status,
         simulated: o.simulated,
         createdAt: o.createdAt,
@@ -402,7 +404,7 @@ router.get('/users/:telegramId', async (req: Request, res: Response) => {
         orderId: d.orderId,
         provider: d.provider,
         chain: d.chain,
-        amountUsdt: unitsToUsdt(d.amount),
+        amountUsdt: d.amount,
         status: d.status,
         createdAt: d.createdAt,
       })),
@@ -410,7 +412,7 @@ router.get('/users/:telegramId', async (req: Request, res: Response) => {
         orderId: w.orderId,
         provider: w.provider,
         chain: w.chain,
-        amountUsdt: unitsToUsdt(w.amount),
+        amountUsdt: w.amount,
         status: w.status,
         walletAddress: w.walletAddress,
         txHash: w.txHash,
@@ -512,9 +514,10 @@ router.get('/paused-tables', async (_req: Request, res: Response) => {
 /**
  * Cifras de negocio.
  *
- * En USDT, que es la unidad de la cuenta. El equivalente en CUP se calcula con el
- * tipo de referencia, que es una estimacion: el CUP se deprecia y el tipo de
- * cambio es una decision del operador, no un dato de mercado en tiempo real.
+ * Ojo con las unidades, porque aqui conviven dos:
+ *   - `PaymentOrder.amount` (depositos y retiros) ya esta en USDT.
+ *   - `rakeCollected` y `commission` se guardan en unidades internas (1 USDT =
+ *     1000) y se convierten a USDT al salir.
  */
 router.get('/finance', async (req: Request, res: Response) => {
   try {
@@ -554,14 +557,12 @@ router.get('/finance', async (req: Request, res: Response) => {
       periodoDias: days,
       desde: since,
       nota:
-        'Las cifras estan en UNIDADES INTERNAS en la base de datos y se ' +
-        'convierten a USDT aqui. El equivalente en CUP usa un tipo de cambio de ' +
-        `referencia de ${CUP_PER_USDT} CUP por USDT, que es una estimacion ` +
-        'administrativa, no un tipo de mercado.',
+        'Los depositos y retiros ya estan en USDT. El rake y las comisiones se ' +
+        'guardan en unidades internas y se convierten a USDT aqui. No hay ' +
+        'equivalente en CUP: la plataforma opera solo en USDT.',
       ingresos: {
         rake: {
           usdt: toUsdt(rakeCollected),
-          cup: Math.round(toUsdt(rakeCollected) * CUP_PER_USDT),
         },
         comisiones: fees.reduce(
           (acc: Record<string, number>, f: any) => ({
@@ -572,10 +573,10 @@ router.get('/finance', async (req: Request, res: Response) => {
         ),
       },
       volumen: {
-        depositado: { usdt: toUsdt(deposited), count: deposits[0]?.count ?? 0 },
-        retirado: { usdt: toUsdt(withdrawn), count: withdrawals[0]?.count ?? 0 },
+        depositado: { usdt: deposited, count: deposits[0]?.count ?? 0 },
+        retirado: { usdt: withdrawn, count: withdrawals[0]?.count ?? 0 },
         /** Depositado menos lo retirado: el saldo que el operador tiene en el banco. */
-        neto: { usdt: toUsdt(deposited - withdrawn) },
+        neto: { usdt: deposited - withdrawn },
       },
       usuariosActivos: activeUsers,
       limitesRetiro: {

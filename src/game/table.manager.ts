@@ -743,7 +743,7 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
    */
   private async abandonHand(table: ITable): Promise<void> {
     // El motor de la mano se tira: sin humanos no hay mano que terminar, y dejarlo puesto
-    // haria que la siguiente� Starts Hand se encontrara un motor con estado viejo.
+    // haria que el siguiente arranque de mano se encontrara un motor con estado viejo.
     this.engines.delete(table.tableId);
 
     let devuelto = 0;
@@ -806,7 +806,10 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
 
   /** Anade un asiento de bot con buy-in coherente con la mesa. */
   private addBotSeat(table: ITable, buyIn: number): ISeat {
-    const profile: BotProfile = botFactory.create();
+    // El nombre solo tiene que ser unico DENTRO de la mesa. Pasamos los que ya
+    // estan sentados para no repetir rival en la misma pantalla.
+    const nombresEnMesa = new Set(table.seats.map((s) => s.displayName));
+    const profile: BotProfile = botFactory.create(undefined, nombresEnMesa);
 
     // ------------------------------------------------------------------
     // EL INDICE TIENE QUE SER UN HUECO LIBRE, NO `seats.length`
@@ -1158,9 +1161,18 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
     }
 
     if (seat.kind === 'bot') {
-      const delay =
+      const baseDelay =
         BOT_CONFIG.minThinkMs +
         Math.random() * (BOT_CONFIG.maxThinkMs - BOT_CONFIG.minThinkMs);
+
+      // Un pequeno porcentaje de las decisiones se toma su tiempo, como un
+      // jugador que duda con una mano dificil. Un retardo uniforme en cada
+      // accion es una firma de maquina; los humanos no juegan con metronomo.
+      // Los tests ponen maxThinkMs a 0 y siguen jugando en el acto.
+      const delay =
+        BOT_CONFIG.maxThinkMs > 1000 && Math.random() < 0.06
+          ? baseDelay + 1200 + Math.random() * 2400
+          : baseDelay;
 
       // ------------------------------------------------------------------
       // EL TURNO DEL BOT TAMBIEN VA CON CERROJO
@@ -1822,9 +1834,8 @@ if (this.isFieldTable(table)) {
       bigBlind: unitsToUsdt(t.bigBlind),
       buyIn: unitsToUsdt(t.buyInUnits),
       maxSeats: t.maxSeats,
+      // Sin desglose humano/bot: el lobby publico solo necesita saber si hay sitio.
       occupied: t.seats.length,
-      humans: t.seats.filter(s => s.kind === 'human').length,
-      bots: t.seats.filter(s => s.kind === 'bot').length,
       pot: t.hand.pot,
       phase: t.hand.phase,
       handNumber: t.hand.handNumber,

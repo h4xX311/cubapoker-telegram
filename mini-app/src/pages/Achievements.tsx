@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { api } from '../lib/api';
 import { PageHeader, SectionLabel } from '../components/Layout';
+import { fmtUsdt } from '../components/Balance';
 
 interface Props {
   onBack: () => void;
@@ -28,11 +29,14 @@ const ACHIEVEMENT_META: Record<string, { name: string; icon: string }> = {
   deposit_10000: { name: 'Depósito 10000', icon: '💰' },
 };
 
+// Premios de racha en USDT. En la base se guardan en unidades (1 USDT = 1000),
+// pero esta tabla es de presentacion: se escribe directamente en la moneda que
+// ve el jugador para que no haya una segunda conversion escondida.
 const STREAK_MILESTONES = [
-  { days: 3, reward: 50 },
-  { days: 7, reward: 200 },
-  { days: 14, reward: 500 },
-  { days: 30, reward: 1500 },
+  { days: 3, rewardUsdt: 0.05 },
+  { days: 7, rewardUsdt: 0.2 },
+  { days: 14, rewardUsdt: 0.5 },
+  { days: 30, rewardUsdt: 1.5 },
 ];
 
 export function Achievements({ onBack }: Props) {
@@ -54,7 +58,10 @@ export function Achievements({ onBack }: Props) {
     })();
   }, []);
 
-  const totalRewards = achievements.reduce((sum, a) => sum + (a.reward ?? 0), 0);
+  const totalRewards = achievements.reduce(
+    (sum, a) => sum + (a.rewardUsdt ?? (a.reward ?? 0) / 1000),
+    0,
+  );
 
   return (
     <div className="p-4 pb-10 animate-fadeIn">
@@ -94,8 +101,9 @@ export function Achievements({ onBack }: Props) {
               >
                 <p className="text-[10px] text-[#a0a0b0]">{m.days}d</p>
                 <p className={`text-xs font-bold ${reached ? 'text-[#ffd700]' : 'text-[#a0a0b0]'}`}>
-                  {m.reward}
+                  {fmtUsdt(m.rewardUsdt)}
                 </p>
+                <p className="text-[8px] text-[#6c6c80]">USDT</p>
               </div>
             );
           })}
@@ -109,7 +117,7 @@ export function Achievements({ onBack }: Props) {
           <p className="text-[10px] text-[#a0a0b0]">Desbloqueados</p>
         </div>
         <div className="card text-center p-4">
-          <p className="text-2xl font-bold text-[#ffd700]">{totalRewards}</p>
+          <p className="text-2xl font-bold text-[#ffd700]">{fmtUsdt(totalRewards)}</p>
           <p className="text-[10px] text-[#a0a0b0]">USDT ganados</p>
         </div>
       </div>
@@ -152,7 +160,7 @@ export function Achievements({ onBack }: Props) {
                   </div>
                 </div>
                 <p className="text-sm font-bold text-[#ffd700] flex-shrink-0">
-                  +{a.reward}
+                  +{fmtUsdt(a.rewardUsdt ?? (a.reward ?? 0) / 1000)}
                 </p>
               </div>
             );
