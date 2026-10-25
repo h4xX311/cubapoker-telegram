@@ -23,6 +23,7 @@ const {
   BOT_CONFIG,
   RAKE,
   ECONOMY,
+  botsForTable,
 } = require('../dist/config/product');
 const {
   WITHDRAWALS,
@@ -458,6 +459,28 @@ section('8. Bots: no pueden vaciar la plataforma');
 
   if (BOT_CONFIG.botRatio <= 1) ok(`proporcion de bots: ${BOT_CONFIG.botRatio}`);
   else bad(`botRatio fuera de rango: ${BOT_CONFIG.botRatio}`);
+
+  // Una mesa HU que se llena de bots antes de que llegue un humano aparece en
+  // el lobby pero es imposible de jugar. El último asiento no se ocupa nunca.
+  const huVacia = botsForTable(2, 0);
+  if (huVacia === 1) ok('HU vacia: 1 bot y 1 asiento libre para el humano');
+  else bad(`HU vacia tendria ${huVacia} bots: debe quedar un asiento libre`);
+
+  const huConHumano = botsForTable(2, 1);
+  if (huConHumano === 1) ok('HU con un humano: 1 bot y mesa completa');
+  else bad(`HU con un humano tendria ${huConHumano} bots`);
+
+  if (botsForTable(7, 0) === 4) ok('7-max vacia: 4 bots, quedan 3 asientos');
+  else bad(`7-max vacia tendria ${botsForTable(7, 0)} bots`);
+
+  if (botsForTable(6, 0) === 4) ok('6-max vacia: 4 bots, quedan 2 asientos');
+  else bad(`6-max vacia tendria ${botsForTable(6, 0)} bots`);
+
+  if (botsForTable(2, 0) <= botsForTable(7, 0)) {
+    ok('la mesa mas pequena no recibe mas bots que la grande');
+  } else {
+    bad('la mesa HU recibiria mas bots que una mesa de 7');
+  }
 }
 
 // =========================================================================

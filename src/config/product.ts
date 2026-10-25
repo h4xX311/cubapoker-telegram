@@ -626,6 +626,32 @@ export const BOT_CONFIG = {
 } as const;
 
 /**
+ * Cuántos bots debe tener una mesa.
+ *
+ * La regla importante: **nunca se ocupa el último asiento**. En una mesa
+ * Heads-Up de 2 asientos, rellenar con bots hasta el tope la deja llena antes
+ * de que llegue un humano, y la sala aparece en el lobby pero es imposible
+ * entrar. El cuarto bot de una mesa de 7-max es ambiente; el segundo bot de una
+ * HU es un bug de producto.
+ *
+ * Con humanos presentes se mantiene la proporción y se reserva sitio para que
+ * entren más. Sin humanos se ponen cuatro bots de ambiente, también sin llenar
+ * la mesa.
+ */
+export const botsForTable = (maxSeats: number, humans: number): number => {
+  const asientos = Math.max(1, Math.floor(maxSeats));
+  const humanos = Math.max(0, Math.floor(humans));
+  const objetivo =
+    Math.floor(humanos * BOT_CONFIG.botRatio) + (humanos === 0 ? 4 : 2);
+
+  // `asientos - 1`: el último hueco es siempre para un humano.
+  return Math.max(
+    0,
+    Math.min(BOT_CONFIG.maxBotsPerTable, asientos - 1, objetivo),
+  );
+};
+
+/**
  * Rake por tipo de mesa.
  *
  * `cashMax` es solo el tope de seguridad heredado para un tier sin topes

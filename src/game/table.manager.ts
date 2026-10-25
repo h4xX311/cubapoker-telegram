@@ -4,7 +4,16 @@ import { unitsToUsdt, formatUnits } from '../config/units';
 import { User } from '../models/User';
 import { PokerGame } from './game.state';
 import { botFactory, BotProfile, decideAction, mulberry32 } from './bot.engine';
-import { TABLE_TIERS, TABLE_TIER_LIST, BOT_CONFIG, RAKE, TURN_TIMER, getTier, rakeCapFor } from '../config/product';
+import {
+  TABLE_TIERS,
+  TABLE_TIER_LIST,
+  BOT_CONFIG,
+  RAKE,
+  TURN_TIMER,
+  getTier,
+  rakeCapFor,
+  botsForTable,
+} from '../config/product';
 import { markShuttingDown, shutdownFieldManager } from './field.manager';
 import { rakebackService } from '../services/rakeback.service';
 import { logger } from '../utils/logger';
@@ -579,10 +588,10 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
       this.isFieldTable(table) &&
       (table.field?.fieldStatus === 'running' || table.field?.fieldStatus === 'final');
 
-    const desiredBots = Math.min(
-      BOT_CONFIG.maxBotsPerTable,
-      Math.floor(humans * BOT_CONFIG.botRatio) + (humans === 0 ? 4 : 2),
-    );
+    // Nunca llena la mesa: el último asiento queda para un humano. En una HU
+    // de 2 asientos esto es la diferencia entre una sala accesible y una sala
+    // que el lobby muestra llena de bots y en la que nadie puede sentarse.
+    const desiredBots = botsForTable(maxSeats, humans);
 
     const needBots =
       !esCampoArrancado &&
@@ -590,7 +599,12 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
       bots < Math.min(desiredBots, maxSeats - occupied);
 
     if (needBots) {
-      const toAdd = Math.min(2, maxSeats - occupied); // gradual, no de golpe
+      // Gradual y sin pasarse del objetivo: si `toAdd` solo mirara los huecos,
+      // una HU añadiría dos bots de golpe y volvería a llenar la mesa.
+      const toAdd = Math.max(
+        0,
+        Math.min(2, maxSeats - occupied, desiredBots - bots),
+      );
       // El bot entra con el mismo buy-in que la mesa, en unidades internas. Si
       // el bot tuviera mas fichas que los humanos, ganaria por stack depth y no
       // por juego, y el rake de la mesa se distorsionaria hacia el operador
