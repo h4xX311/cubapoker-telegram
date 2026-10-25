@@ -17,6 +17,7 @@ import {
   FREEROLL_MAX_FIELD,
   CENTROLL,
   UNLOCK_RATES,
+  CASH_FORMAT_LIST,
 } from '../config/product';
 import { WITHDRAWALS } from '../config/currency';
 import { unitsToUsdt } from '../config/units';
@@ -48,6 +49,17 @@ router.get('/config', (_req: Request, res: Response) => {
         big: unitsToUsdt(t.blinds.big),
       },
       stackInBigBlinds: t.stackInBigBlinds,
+      vipArena: Boolean(t.vipArena),
+      arenaProfitSharePercent: t.arenaProfitSharePercent ?? 0,
+    })),
+
+    // Formatos disponibles en cada sala. El motor solo juega NLH; estos son
+    // formatos de Hold'em, no variantes que no existan todavia.
+    cashFormats: CASH_FORMAT_LIST.map(f => ({
+      id: f.id,
+      label: f.label,
+      shortLabel: f.shortLabel,
+      maxSeats: f.maxSeats,
     })),
 
     // Texto de transparencia. La UI debe mostrarlo junto al premio: decir
@@ -81,7 +93,10 @@ router.get('/config', (_req: Request, res: Response) => {
       min: WITHDRAWALS.min,
       maxPerTransaction: WITHDRAWALS.maxPerTransaction,
       monthlyWinCap: WITHDRAWALS.monthlyWinCap,
+      fixedFee: WITHDRAWALS.fixedFeeUsdt,
       defaultNetwork: WITHDRAWALS.defaultNetwork,
+      // Coste interno de red, no lo que paga el jugador. Se conserva la clave
+      // `networkFees` por compatibilidad con la UI; el fee publico es `fixedFee`.
       networkFees: WITHDRAWALS.networkFees,
     },
   });
@@ -107,6 +122,7 @@ router.post('/sit', async (req: Request, res: Response) => {
       telegramId,
       tableId: req.body.tableId,
       tierId: req.body.tierId,
+      formatId: req.body.formatId,
       buyIn: req.body.buyIn ? Number(req.body.buyIn) : undefined,
     });
     res.json({ success: true, ...result });

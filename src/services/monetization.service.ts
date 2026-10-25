@@ -4,6 +4,7 @@ import { Referral } from '../models/Referral';
 import { VIP, VIP_CONFIG, VIPLevel } from '../models/VIP';
 import { Achievement, Streak, ACHIEVEMENTS, STREAK_REWARDS } from '../models/Achievement';
 import { monetizationConfig, calculateRake, calculateCommission } from '../config/monetization';
+import { rakebackService } from './rakeback.service';
 
 /**
  * UNIDADES INTERNAS
@@ -74,7 +75,9 @@ export class MonetizationService {
       type: 'deposit',
       paymentMethod: method,
       amount: netAmount,
-      currency: method === 'usdt' ? 'USDT' : 'CUP',
+      // `netAmount` está en unidades internas, también cuando el método es
+      // USDT. La moneda visible se deriva al convertir el importe.
+      currency: 'CUP',
       status: 'completed',
       commission,
       commissionRate: monetizationConfig.commissions.deposit[method],
@@ -114,7 +117,8 @@ export class MonetizationService {
       type: 'withdrawal',
       paymentMethod: method,
       amount: netAmount,
-      currency: method === 'usdt' ? 'USDT' : 'CUP',
+      // `netAmount` está en unidades internas. Ver la cabecera del servicio.
+      currency: 'CUP',
       status: 'pending',
       commission,
       commissionRate: monetizationConfig.commissions.withdrawal[method],
@@ -132,48 +136,129 @@ export class MonetizationService {
   async purchaseVIP(telegramId: number, level: VIPLevel): Promise<boolean> {
     const config = VIP_CONFIG[level];
     if (!config) return false;
-    
+
     const user = await User.findOne({ telegramId });
     if (!user) return false;
-    
-    if (user.balance.real < config.price) {
+
+    const ahora = new Date();
+    const duracionMs = config.duration * 86_400_000;
+
+    // Si la membresía anterior ya venció, se liquida la semana cerrada ANTES
+    // de reiniciar `startDate`. Si se reiniciara primero, el jugador perdería
+    // el rakeback de la última semana por una compra hecha el lunes. El pago
+    // es idempotente; si ya se pagó, no hace nada.
+    const vipAnterior = await VIP.findOne({ telegramId });
+    if (vipAnterior && vipAnterior.endDate < ahora) {
+      await rakebackService.payWeeklyRakeback(telegramId, ahora);
+    }
+
+    // Cobro atómico: la condición de saldo y el descuento van en la misma
+    // operación. Antes se leía el saldo, se descontaba después y dos compras
+    // simultáneas podían dejar el saldo en negativo.
+    const pagado = await User.findOneAndUpdate(
+      { telegramId, 'balance.real': { $gte: config.price } },
+      { $inc: { 'balance.real': -config.price } },
+      { new: true },
+    );
+
+    if (!pagado) {
       throw new Error('Saldo insuficiente para comprar VIP');
     }
-    
-    // Descontar del balance
-    await User.findOneAndUpdate(
-      { telegramId },
-      { $inc: { 'balance.real': -config.price } }
-    );
-    
-    // Crear o actualizar suscripción
-    const endDate = new Date();
-    endDate.setDate(endDate.getDate() + config.duration);
-    
-    await VIP.findOneAndUpdate(
-      { telegramId },
+
+    // La renovación también es atómica. Si dos compras llegan a la vez, las
+    // dos tienen que sumar sus 30 días; leer el `endDate`, sumarle en Node y
+    // escribirlo hacía que la segunda pisara a la primera y el jugador pagara
+    // dos veces por un solo periodo. El pipeline calcula el nuevo final sobre
+    // el valor que hay en Mongo en ese instante.
+    const pipeline = [
       {
-        telegramId,
-        level,
-        startDate: new Date(),
-        endDate,
-        rakeDiscount: config.rakeDiscount,
-        tournamentDiscount: config.tournamentDiscount,
+        $set: {
+          telegramId,
+          level,
+          startDate: {
+            $cond: [
+              { $gt: [{ $ifNull: ['$endDate', new Date(0)] }, ahora] },
+              { $ifNull: ['$startDate', ahora] },
+              ahora,
+            ],
+          },
+          endDate: {
+            $add: [
+              { $max: [{ $ifNull: ['$endDate', ahora] }, ahora] },
+              duracionMs,
+            ],
+          },
+          rakebackPercent: config.rakebackPercent,
+          tournamentDiscount: config.tournamentDiscount,
+          powerUpsPerMonth: config.powerUpsPerMonth,
+          // Campo legado. El beneficio real es el rakeback semanal.
+          rakeDiscount: 0,
+          updatedAt: ahora,
+        },
       },
-      { upsert: true, new: true }
-    );
-    
-    // Registrar transacción
-    await Transaction.create({
-      telegramId,
-      type: 'vip_purchase',
-      paymentMethod: 'credits',
-      amount: config.price,
-      currency: 'CUP',
-      status: 'completed',
-      metadata: { level, duration: config.duration },
-    });
-    
+    ];
+
+    let vipActualizado;
+    try {
+      vipActualizado = await VIP.findOneAndUpdate(
+        { telegramId },
+        pipeline as any,
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+      );
+    } catch (error: any) {
+      // Dos compras simultáneas de un jugador que todavía no tenía membresía
+      // pueden intentar insertar el mismo `telegramId`. Una gana y la otra
+      // recibe 11000. La segunda NO debe devolver el cobro: el jugador pagó
+      // por 30 días y tiene que recibirlos. Se reintenta como actualización
+      // sobre el documento que acaba de crear la otra compra.
+      if (error?.code === 11000 || error?.code === 11001) {
+        try {
+          vipActualizado = await VIP.findOneAndUpdate(
+            { telegramId },
+            pipeline as any,
+            { new: true },
+          );
+        } catch (retryError) {
+          await User.updateOne(
+            { telegramId },
+            { $inc: { 'balance.real': config.price } },
+          );
+          throw retryError;
+        }
+      } else {
+        // Si no se pudo crear la membresía, se devuelve el cobro. Es la única
+        // escritura que puede fallar después de haber tocado el saldo.
+        await User.updateOne(
+          { telegramId },
+          { $inc: { 'balance.real': config.price } },
+        );
+        throw error;
+      }
+    }
+
+    // El libro es para el operador. Un fallo aquí no invalida la compra.
+    try {
+      await Transaction.create({
+        telegramId,
+        type: 'vip_purchase',
+        paymentMethod: 'credits',
+        amount: config.price,
+        // Unidades internas, no USDT. La etiqueta 'CUP' es histórica: ver la
+        // cabecera del servicio. Cambiarla a 'USDT' dejaría un libro que dice
+        // 35.000 USDT por una compra de 35 USDT.
+        currency: 'CUP',
+        status: 'completed',
+        metadata: {
+          level,
+          duration: config.duration,
+          rakebackPercent: config.rakebackPercent,
+          endDate: vipActualizado?.endDate ?? null,
+        },
+      });
+    } catch (error) {
+      console.error('VIP comprado pero no se pudo registrar la transacción:', error);
+    }
+
     return true;
   }
   
@@ -184,9 +269,10 @@ export class MonetizationService {
     const vip = await VIP.findOne({ telegramId });
     if (!vip) return null;
     
-    // Verificar si está activo
+    // Verificar si está activo. No se borra el documento al vencer: conserva
+    // el histórico que necesita el rakeback de la última semana. Un jugador que
+    // venció ayer todavía tiene derecho al pago del lunes.
     if (new Date() > vip.endDate) {
-      await VIP.deleteOne({ telegramId });
       return null;
     }
     

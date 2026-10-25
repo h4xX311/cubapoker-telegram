@@ -99,17 +99,15 @@ export const splitPrize = (
 };
 
 /**
- * Rake de UN BOTE DE MANO, con el tope por mano.
+ * Helper histórico: rake de UN BOTE DE MANO con el tope global antiguo.
  *
- * `Math.floor` y no un porcentaje exacto: las fichas son enteras. Por debajo de
- * 20 CUP de bote el rake se trunca a 0, lo cual solo importa con buy-ins
- * miserables (con buy-in de 1 CUP, el rake seria siempre 0).
+ * NO usar para una mesa real. El tope de una ring table depende de la sala y
+ * del número de jugadores; eso lo resuelve `rakeCapFor()` en `config/product`.
+ * Este helper se conserva para las pruebas de la fórmula del 5 % y para no
+ * romper consumidores antiguos. El tope global de 100 unidades (0,10 USDT) era
+ * el de la micro y dejaba sin rake a las mesas altas.
  *
- * IMPORTANTE: el tope de `RAKE.cashMax` es POR MANO, no por campo. No se puede
- * aplicar aqui a un bote de campo entero, porque un campo no es una mano: son
- * cientos de manos. Usar `rakeOf(1 000 000)` dariia 100 CUP, cuando el rake
- * real de un campo de 500 con buy-in de 2000 es 50 000.
- * Para el rake de un campo usa `fieldPayout`, que aplica el porcentaje sin tope.
+ * `Math.floor` y no un porcentaje exacto: las fichas son enteras.
  */
 export const rakeOf = (pot: number): number => {
   if (pot < RAKE.minPot) return 0;
@@ -181,7 +179,9 @@ export const tierRtp = (buyIn: number, players: number): number => {
 
 /** RTP de todos los tiers, para el informe. */
 export const allTiersRtp = () =>
-  TABLE_TIER_LIST.map(t => ({
+  // VIP Arena es una ring table, no un campo de torneo. Incluirla aquí
+  // calcularía un RTP de premio que no existe para esa sala.
+  TABLE_TIER_LIST.filter(t => !t.vipArena).map(t => ({
     id: t.id,
     fieldSize: t.fieldSize,
     buyIn: t.buyInUnits,

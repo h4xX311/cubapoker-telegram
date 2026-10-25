@@ -3,17 +3,18 @@
  * Todas las tasas, comisiones y recompensas en un solo lugar
  */
 
+import { WITHDRAWALS } from './currency';
+import { usdtToUnits } from './units';
+
 export const monetizationConfig = {
   // === RAKE ===
   rake: {
     percentage: 5,           // 5% del pote
     maxRake: 100,            // Máximo 100 CUP por mano
     minPot: 10,              // Mínimo 10 CUP para aplicar rake
-    vipDiscount: {           // Descuento por nivel VIP
-      basic: 2,              // VIP Basic: 3% (5% - 2%)
-      premium: 3,            // VIP Premium: 2% (5% - 3%)
-      elite: 5,              // VIP Elite: 0% (5% - 5%)
-    },
+    // El VIP no descuenta rake. El beneficio es el rakeback semanal: descontar
+    // rake en la mesa reduciría el bote que se reparte y el ingreso de la casa
+    // en cada mano. `calculateRake` ignora el nivel a propósito.
   },
 
   // === COMISIONES ===
@@ -49,51 +50,6 @@ export const monetizationConfig = {
       usdt: 1, // 1%
       min: 20, // 20 unidades = 0,02 USDT
       max: 1000, // 1000 unidades = 1 USDT
-    },
-  },
-
-  // === VIP ===
-  vip: {
-    basic: {
-      name: 'VIP Básico',
-      price: 500,
-      duration: 30,          // días
-      rakeDiscount: 2,       // 2% de descuento
-      tournamentDiscount: 5, // 5% de descuento
-      benefits: [
-        'Rake reducido (3% en lugar de 5%)',
-        'Acceso a torneos VIP',
-        'Badge especial en el juego',
-      ],
-    },
-    premium: {
-      name: 'VIP Premium',
-      price: 2000,
-      duration: 30,
-      rakeDiscount: 3,
-      tournamentDiscount: 10,
-      benefits: [
-        'Rake reducido (2% en lugar de 5%)',
-        'Acceso a torneos exclusivos',
-        'Badge dorado especial',
-        'Retiros prioritarios',
-        'Soporte prioritario',
-      ],
-    },
-    elite: {
-      name: 'VIP Elite',
-      price: 5000,
-      duration: 30,
-      rakeDiscount: 5,
-      tournamentDiscount: 20,
-      benefits: [
-        'Rake 0% (sin comisión)',
-        'Acceso a todos los torneos',
-        'Badge legendario',
-        'Retiros instantáneos',
-        'Gestor de cuenta dedicado',
-        'Torneos privados',
-      ],
     },
   },
 
@@ -190,18 +146,20 @@ export const monetizationConfig = {
   },
 };
 
-// Función para calcular rake con descuento VIP
-export const calculateRake = (pot: number, vipLevel?: 'basic' | 'premium' | 'elite'): number => {
-  const { percentage, maxRake, minPot, vipDiscount } = monetizationConfig.rake;
-  
+/**
+ * Rake de una mano.
+ *
+ * `_vipLevel` se conserva para no romper llamadas antiguas, pero NO cambia el
+ * porcentaje. El VIP de CubaPoker reparte rake a fin de semana; no lo descuenta
+ * en la mesa. Un descuento por nivel haría que dos jugadores en la misma mano
+ * pagaran rake distinto y complicaría la contabilidad sin dar más ingresos.
+ */
+export const calculateRake = (pot: number, _vipLevel?: string): number => {
+  const { percentage, maxRake, minPot } = monetizationConfig.rake;
+
   if (pot < minPot) return 0;
-  
-  let finalPercentage = percentage;
-  if (vipLevel && vipDiscount[vipLevel]) {
-    finalPercentage = percentage - vipDiscount[vipLevel];
-  }
-  
-  const rake = Math.floor((pot * finalPercentage) / 100);
+
+  const rake = Math.floor((pot * percentage) / 100);
   return Math.min(rake, maxRake);
 };
 
@@ -247,6 +205,20 @@ export const calculateCommission = (
   // numero negativo a un saldo, que es la forma mas rapida de corromper el dinero de
   // alguien. Se devuelve 0 y el error real lo detecta el llamante que valida el importe.
   if (!Number.isFinite(amount) || amount <= 0) return 0;
+
+  // ------------------------------------------------------------------
+  // RETIRO USDT: COMISION FIJA DE 5 USDT
+  //
+  // Decision de producto, copiada de CoinPoker: el jugador paga 5 USDT por
+  // retiro, no un porcentaje ni un fee distinto por red. El coste real de la
+  // red se cubre con esos 5 USDT; lo que sobre se queda la casa. No se aplica
+  // el minimo/maximo de la tabla de comisiones porque el fee ya es el importe
+  // fijo, y nunca puede superar lo que se retira.
+  // ------------------------------------------------------------------
+  if (type === 'withdrawal' && method === 'usdt') {
+    const fixed = usdtToUnits(WITHDRAWALS.fixedFeeUsdt);
+    return Math.min(amount, fixed);
+  }
 
   const rate = config[method] || 0;
   const commission = Math.floor((amount * rate) / 100);

@@ -20,6 +20,8 @@ import { SIMULATION_ENABLED, pruneSimulatedOrders } from './services/payment/gat
 import { tableManager, shutdownEngine } from './game/table.manager';
 import { fieldManager } from './game/field.manager';
 import { freerollManager } from './game/freeroll.service';
+import { centrollService } from './game/centroll.service';
+import { rakebackService } from './services/rakeback.service';
 import { SUIT_SYMBOL } from './game/card.utils';
 import { seatingService } from './game/seating.service';
 import { logger } from './utils/logger';
@@ -802,6 +804,32 @@ const start = async () => {
     void freerollManager.procesar();
   }, 30_000);
   freerollTimer.unref();
+
+  // Red de seguridad del centroll: si un jugador quedo sentado y el proceso se
+  // reinicio antes de arrancar, esta vuelta completa la mesa con bots y la
+  // arranca. Es idempotente: con el campo ya en running no hace nada.
+  const centrollTimer = setInterval(() => {
+    void centrollService.ensureRunning();
+  }, 5_000);
+  centrollTimer.unref();
+
+  // Rakeback del 3-Bet Club y profit share de VIP Arena. Se paga la semana
+  // cerrada y los índices únicos de `RakebackPayout` y `ArenaPayout` impiden
+  // pagar dos veces, aunque el proceso se reinicie o corran dos instancias. La
+  // primera vuelta se retrasa un minuto para no retrasar el arranque.
+  const rakebackTimer = setInterval(() => {
+    void rakebackService.payAllDuePayouts().catch((error) => {
+      logger.error('Rakeback: fallo la vuelta periódica:', error);
+    });
+  }, 6 * 60 * 60 * 1000);
+  rakebackTimer.unref();
+
+  const firstRakeback = setTimeout(() => {
+    void rakebackService.payAllDuePayouts().catch((error) => {
+      logger.error('Rakeback: fallo la vuelta inicial:', error);
+    });
+  }, 60_000);
+  firstRakeback.unref();
 
   app.listen(PORT, () => {
     logger.info(`CubaPoker escuchando en el puerto ${PORT}`);

@@ -19,10 +19,13 @@ interface Props {
  * real era 10 USDT no sabia cuanto estaba retirando.
  *
  * El minimo y la comision son los mismos que valida el servidor
- * (`config/currency.ts` y `withdrawal.rules.ts`).
+ * (`config/currency.ts` y `withdrawal.rules.ts`). La comision es FIJA de 5
+ * USDT, como CoinPoker: no depende del monto ni de la red. El coste real de la
+ * red se cubre con esos 5 USDT; lo que sobre se queda la casa.
  */
 const MINIMO_USDT = 10;
-const COMISION = '1%';
+const COMISION_FIJA = 5;
+const COMISION = `${COMISION_FIJA} USDT`;
 
 export function Withdraw({ user, onBack, onBalanceChange }: Props) {
   const [chains, setChains] = useState<ChainInfo[]>([]);
@@ -51,6 +54,7 @@ export function Withdraw({ user, onBack, onBalanceChange }: Props) {
   const realBalance = user?.balance?.real ?? 0;
   const playBalance = user?.balance?.play ?? 0;
   const numericAmount = Number(amount.replace(',', '.')) || 0;
+  const netAmount = Math.max(0, numericAmount - COMISION_FIJA);
   const selectedChain = chains.find((c) => c.id === chainId);
 
   const invalidAddress =
@@ -199,7 +203,22 @@ export function Withdraw({ user, onBack, onBalanceChange }: Props) {
           MÁX
         </button>
       </div>
-      <p className="text-xs text-[#a0a0b0] mb-5">Mínimo {MINIMO_USDT} USDT</p>
+      <p className="text-xs text-[#a0a0b0] mb-3">Mínimo {MINIMO_USDT} USDT</p>
+
+      {numericAmount > 0 && (
+        <div className="card p-3 mb-5">
+          <div className="flex items-center justify-between text-xs mb-2">
+            <span className="text-[#a0a0b0]">Comisión fija</span>
+            <span className="text-white font-semibold">{COMISION_FIJA} USDT</span>
+          </div>
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-[#a0a0b0]">Recibirás</span>
+            <span className="text-[#00d26a] font-bold">
+              {fmtUsdt(netAmount)} USDT
+            </span>
+          </div>
+        </div>
+      )}
 
       <SectionLabel>
         Dirección USDT ({selectedChain?.id ?? chainId})

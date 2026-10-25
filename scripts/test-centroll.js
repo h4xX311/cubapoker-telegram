@@ -1,39 +1,29 @@
 /**
- * EL CENTROLL COBRA UNA VEZ, ANOTA A QUIEN, Y DEVUELVE SI NO ARRANCA.
+ * EL CENTROLL COBRA UNA VEZ, ARRANCA CON BOTS Y DEVUELVE SI NO ARRANCA.
  *
  * ------------------------------------------------------------------
- * LO QUE ESTABA ROTO, Y NO SE VEIA
+ * LO QUE CAMBIO
  *
- * `centroll.service.ts` creaba el campo asi:
+ * El centroll ya no espera a 100 humanos. Cada mesa que tenga al menos un
+ * humano se completa con bots hasta `CENTROLL.minPlayersPerTable` (2) y
+ * arranca. Los bots no pagan buy-in; si ganan una posicion, su premio se queda
+ * en la casa.
  *
- *     return Field.create({ kind: 'centroll', buyIn, ... });
+ * Esto cambia el modelo de concurrencia que comprobaba el test anterior:
+ * antes, 10 personas que pulsaban JUGAR a la vez compartian un solo campo de
+ * 100. Ahora cada una tiene su propio centroll instantaneo contra un bot. Lo
+ * que sigue siendo obligatorio es que el dinero cuadre: 10 cobros, 10 entradas,
+ * 10 botes de 10 unidades.
  *
- * Y el esquema decia:
+ * Se comprueba:
  *
- *     kind: { type: String, enum: ['cash', 'freeroll'] }
- *     buyInUnits: { type: Number, required: true }
- *
- * O sea: `centroll` no era un `kind` valido, y `buyIn` no era una clave del esquema (la
- * buena es `buyInUnits`, que ademas era obligatoria). Mongoose no avisa de las claves que
- * sobran, solo del enum y del required.
- *
- * Resultado: **el centroll no se podia abrir nunca.** El jugador pulsaba y veia "no se pudo".
- *
- * Comprobado antes de arreglarlo, con `scripts/test-centroll-creable.js`:
- *
- *     kind=cash      -> creado
- *     kind=centroll  -> FALLA: `centroll` is not a valid enum value for path `kind`
- *
- * ------------------------------------------------------------------
- * LO QUE SE COMPRUEBA AQUI
- *
- * 1. Se abre y se puede entrar: el jugador paga y queda anotado.
- * 2. El bote es exactamente lo cobrado (sin el bug de escrituras perdidas).
- * 3. Pulsar JUGAR dos veces NO cobra dos veces.
- * 4. Si el centroll no arranca, se devuelve el buy-in. Y solo una vez.
+ *   1. Un humano cobra una vez y arranca contra un bot con stack completo.
+ *   2. Pulsar JUGAR dos veces NO cobra dos veces.
+ *   3. Si un campo se queda en `filling`, se devuelve el buy-in. Y solo una vez.
+ *   4. Diez a la vez: cada uno tiene su campo, pero el dinero total cuadra.
  *
  * Ejecutar (Mongo local esta en WSL):
- *     cd "$HOME/cp" && npm run build
+ *     npm run build
  *     MONGODB_URI=mongodb://127.0.0.1:37017/cubapoker_centroll \
  *       node scripts/test-centroll.js
  */
@@ -41,8 +31,9 @@ require('dotenv').config();
 const mongoose = require('mongoose');
 const { centrollService } = require('../dist/game/centroll.service');
 const { Field } = require('../dist/models/Field');
+const { Table } = require('../dist/models/Table');
 const { User } = require('../dist/models/User');
-const { CENTROLL } = require('../dist/config/product');
+const { CENTROLL, FREEROLL_PAYOUT } = require('../dist/config/product');
 const { usdtToUnits, formatUnits } = require('../dist/config/units');
 
 let ok = 0;
@@ -75,6 +66,8 @@ const crearJugador = (id, saldo) =>
     activeTableId: null,
   });
 
+const mesasDe = (fieldId) => Table.find({ 'field.fieldId': fieldId });
+
 (async () => {
   await mongoose.connect(process.env.MONGODB_URI);
   const db = mongoose.connection.db;
@@ -91,50 +84,70 @@ const crearJugador = (id, saldo) =>
   console.log(`Buy-in del centroll: ${formatUnits(buyIn)} USDT (${buyIn} unidades)\n`);
 
   // ==================================================================
-  // 1. ABRIR Y ENTRAR
+  // 1. UN HUMANO ARRANCA CONTRA UN BOT
   // ==================================================================
-  console.log('=== 1. Se puede entrar en un centroll ===\n');
+  console.log('=== 1. Un humano arranca contra un bot ===\n');
 
-  let campoId = null;
-  for (const id of IDS) {
-    try {
-      const r = await centrollService.register(id, 'C' + String(id).slice(-3));
-      campoId = r.fieldId;
-      console.log(`  ${id} entro en ${r.fieldId} (${r.queued ? 'en cola' : 'sentado'})`);
-    } catch (e) {
-      console.log(`\x1b[31m  ${id} NO pudo entrar: ${e.message}\x1b[0m`);
-      mal++;
-    }
-  }
+  const r1 = await centrollService.register(IDS[0], 'C001');
+  console.log(`  ${IDS[0]} entro en ${r1.fieldId} (${r1.queued ? 'en cola' : 'sentado'})`);
 
-  comprobar('el centroll se abrio', campoId !== null, 'no se abrio ninguno');
-
-  const campo = await Field.findOne({ fieldId: campoId });
+  const campo = await Field.findOne({ fieldId: r1.fieldId });
   console.log(
-    `  campo: espera=${campo.waiting} sentados=${campo.seated} ` +
-    `cobrado=${campo.buyInsCollected} registrados=${(campo.registrations ?? []).length}`,
+    `  campo: estado=${campo.status} espera=${campo.waiting} sentados=${campo.seated} ` +
+    `restantes=${campo.playersRemaining} cobrado=${campo.buyInsCollected} ` +
+    `registrados=${(campo.registrations ?? []).length}`,
   );
 
+  comprobar('el centroll se abrio y arranco', campo.status === 'running', `estado=${campo.status}`);
   comprobar(
-    `el campo anota a los ${IDS.length} que pagaron`,
-    (campo.registrations ?? []).length === IDS.length,
+    'el campo anota a 1 humano',
+    (campo.registrations ?? []).length === 1,
     `hay ${(campo.registrations ?? []).length}`,
   );
-
   comprobar(
-    `el bote es exactamente ${buyIn * IDS.length}`,
-    campo.buyInsCollected === buyIn * IDS.length,
+    `el bote es exactamente ${buyIn} (solo paga el humano)`,
+    campo.buyInsCollected === buyIn,
     `hay ${campo.buyInsCollected}`,
   );
+  comprobar(
+    'playersRemaining cuenta al humano y al bot',
+    campo.playersRemaining === 2,
+    `hay ${campo.playersRemaining}`,
+  );
 
-  for (const id of IDS) {
-    const s = await saldoDe(id);
+  const mesas = await mesasDe(r1.fieldId);
+  comprobar('se creo una mesa', mesas.length === 1, `hay ${mesas.length}`);
+  if (mesas.length === 1) {
+    const humanos = mesas[0].seats.filter((s) => s.kind === 'human' && s.status !== 'out');
+    const bots = mesas[0].seats.filter((s) => s.kind === 'bot' && s.status !== 'out');
+    comprobar('hay 1 humano sentado', humanos.length === 1, `hay ${humanos.length}`);
+    comprobar('hay 1 bot de relleno', bots.length === 1, `hay ${bots.length}`);
     comprobar(
-      `a ${id} se le cobro UNA vez`,
-      s === SALDO - buyIn,
-      `tenia ${SALDO}, ahora ${s}`,
+      'el bot tiene el stack completo del torneo (1.000 fichas)',
+      bots[0]?.chips === CENTROLL.startingChips,
+      `chips=${bots[0]?.chips}`,
+    );
+    comprobar(
+      'el humano tambien tiene 1.000 fichas',
+      humanos[0]?.chips === CENTROLL.startingChips,
+      `chips=${humanos[0]?.chips}`,
     );
   }
+
+  comprobar(
+    `a ${IDS[0]} se le cobro UNA vez`,
+    (await saldoDe(IDS[0])) === SALDO - buyIn,
+    `tenia ${SALDO}, ahora ${await saldoDe(IDS[0])}`,
+  );
+
+  // Un segundo humano que llega despues no entra en el campo ya arrancado:
+  // abre su propio centroll. Es la consecuencia de arrancar al minimo.
+  const r2 = await centrollService.register(IDS[1], 'C002');
+  comprobar(
+    'otro humano abre un centroll distinto, no uno ya arrancado',
+    r2.fieldId !== r1.fieldId,
+    `mismo campo ${r2.fieldId}`,
+  );
 
   // ==================================================================
   // 2. PULSAR DOS VECES NO COBRA DOS VECES
@@ -149,17 +162,17 @@ const crearJugador = (id, saldo) =>
     console.log(`  rechazado: ${e.message}`);
   }
 
-  comprobar('el segundo intento se rechaza', bloqueado, 'entró otra vez');
+  comprobar('el segundo intento se rechaza', bloqueado, 'entro otra vez');
   comprobar(
     `a ${IDS[0]} NO se le cobro dos veces`,
     (await saldoDe(IDS[0])) === SALDO - buyIn,
     `tiene ${await saldoDe(IDS[0])}, esperado ${SALDO - buyIn}`,
   );
 
-  const campo2 = await Field.findOne({ fieldId: campoId });
+  const campo2 = await Field.findOne({ fieldId: r1.fieldId });
   comprobar(
     'el bote no subio con el segundo intento',
-    campo2.buyInsCollected === buyIn * IDS.length,
+    campo2.buyInsCollected === buyIn,
     `hay ${campo2.buyInsCollected}`,
   );
 
@@ -168,27 +181,55 @@ const crearJugador = (id, saldo) =>
   // ==================================================================
   console.log('\n=== 3. Si no arranca, se devuelve ===\n');
 
-  const antes = await saldoDe(IDS[1]);
-  const devuelto = await centrollService.refundIfNotStarted(IDS[1]);
+  // Se monta un campo en `filling` a mano: en el flujo normal el centroll
+  // arranca al instante, y la devolucion solo aplica a un campo que se quedo
+  // atascado (por ejemplo, tras un reinicio antes de completar la mesa).
+  await User.updateOne({ telegramId: IDS[2] }, { $inc: { 'balance.real': -buyIn } });
+  const campoAtascado = await Field.create({
+    fieldId: `centroll-refund-${Date.now().toString(36)}`,
+    kind: 'centroll',
+    tierId: `centroll-refund-${Date.now().toString(36)}`,
+    status: 'filling',
+    buyInUnits: buyIn,
+    buyInsCollected: buyIn,
+    targetField: CENTROLL.targetField,
+    waiting: 0,
+    seated: 1,
+    playersRemaining: 1,
+    paidPositionsLeft: FREEROLL_PAYOUT.length,
+    registrations: [
+      {
+        telegramId: IDS[2],
+        username: 'C003',
+        buyIn,
+        status: 'seated',
+        at: new Date(),
+      },
+    ],
+    tables: [],
+  });
 
-  console.log(`  devuelto a ${IDS[1]}: ${formatUnits(devuelto)} USDT`);
+  const antes = await saldoDe(IDS[2]);
+  const devuelto = await centrollService.refundIfNotStarted(IDS[2]);
+
+  console.log(`  devuelto a ${IDS[2]}: ${formatUnits(devuelto)} USDT`);
   comprobar('devuelve el buy-in', devuelto === buyIn, `devolvio ${devuelto}`);
   comprobar(
-    `el saldo de ${IDS[1]} vuelve a ${SALDO}`,
-    (await saldoDe(IDS[1])) === SALDO,
-    `antes ${antes}, ahora ${await saldoDe(IDS[1])}`,
+    `el saldo de ${IDS[2]} vuelve a ${SALDO}`,
+    (await saldoDe(IDS[2])) === SALDO,
+    `antes ${antes}, ahora ${await saldoDe(IDS[2])}`,
   );
 
-  const campo3 = await Field.findOne({ fieldId: campoId });
+  const campo3 = await Field.findOne({ fieldId: campoAtascado.fieldId });
   comprobar(
     'el bote baja lo devuelto',
-    campo3.buyInsCollected === buyIn * (IDS.length - 1),
+    campo3.buyInsCollected === 0,
     `hay ${campo3.buyInsCollected}`,
   );
   comprobar(
     'y la entrada queda marcada como devuelta',
-    (campo3.registrations ?? []).find((r) => r.telegramId === IDS[1])?.status === 'refunded',
-    `estado=${(campo3.registrations ?? []).find((r) => r.telegramId === IDS[1])?.status}`,
+    (campo3.registrations ?? []).find((r) => r.telegramId === IDS[2])?.status === 'refunded',
+    `estado=${(campo3.registrations ?? []).find((r) => r.telegramId === IDS[2])?.status}`,
   );
 
   // ==================================================================
@@ -196,16 +237,16 @@ const crearJugador = (id, saldo) =>
   // ==================================================================
   console.log('\n=== 4. Devolver dos veces no paga dos veces ===\n');
 
-  const otraVez = await centrollService.refundIfNotStarted(IDS[1]);
+  const otraVez = await centrollService.refundIfNotStarted(IDS[2]);
   comprobar('la segunda devolucion devuelve 0', otraVez === 0, `devolvio ${otraVez}`);
   comprobar(
-    `el saldo de ${IDS[1]} sigue en ${SALDO}`,
-    (await saldoDe(IDS[1])) === SALDO,
-    `tiene ${await saldoDe(IDS[1])}`,
+    `el saldo de ${IDS[2]} sigue en ${SALDO}`,
+    (await saldoDe(IDS[2])) === SALDO,
+    `tiene ${await saldoDe(IDS[2])}`,
   );
 
   // ==================================================================
-  // 5. CONCURRENCIA: 10 a la vez, el bote tiene que cuadrar
+  // 5. CONCURRENCIA: 10 A LA VEZ, CADA UNO CON SU BOT
   // ==================================================================
   console.log('\n=== 5. Diez entrando a la vez ===\n');
 
@@ -225,34 +266,57 @@ const crearJugador = (id, saldo) =>
   console.log(`  ${buenos.length} entraron, ${fallos.length} fallaron`);
   for (const f of fallos.slice(0, 2)) console.log(`    ${f.reason?.message}`);
 
-  const campoCon = await Field.findOne({ kind: 'centroll' });
-  const camposVivos = await Field.countDocuments({
+  const campos = await Field.find({
     kind: 'centroll',
     status: { $in: ['filling', 'running', 'final'] },
   });
 
   comprobar(
-    'se abrio UN solo centroll',
-    camposVivos === 1,
-    `hay ${camposVivos} campos vivos a la vez`,
+    'cada humano que pago tiene su campo (no se pierde ninguno)',
+    campos.length === buenos.length,
+    `${campos.length} campos para ${buenos.length} cobros`,
   );
+
+  let potTotal = 0;
+  let registrosTotal = 0;
+  let mesasCorrectas = 0;
+  for (const c of campos) {
+    potTotal += c.buyInsCollected;
+    registrosTotal += (c.registrations ?? []).length;
+    const mesasCampo = await mesasDe(c.fieldId);
+    if (mesasCampo.length === 1) {
+      const humanos = mesasCampo[0].seats.filter(
+        (s) => s.kind === 'human' && s.status !== 'out',
+      );
+      const bots = mesasCampo[0].seats.filter(
+        (s) => s.kind === 'bot' && s.status !== 'out',
+      );
+      if (humanos.length === 1 && bots.length === 1) mesasCorrectas++;
+    }
+  }
+
   comprobar(
-    `el bote es ${buyIn * buenos.length} (lo cobrado de verdad)`,
-    campoCon.buyInsCollected === buyIn * buenos.length,
-    `hay ${campoCon.buyInsCollected}, faltan ${buyIn * buenos.length - campoCon.buyInsCollected}`,
+    `el bote total es ${buyIn * buenos.length} (lo cobrado de verdad)`,
+    potTotal === buyIn * buenos.length,
+    `hay ${potTotal}, faltan ${buyIn * buenos.length - potTotal}`,
   );
   comprobar(
     'las entradas anotadas son las mismas que los cobros',
-    (campoCon.registrations ?? []).length === buenos.length,
-    `${(campoCon.registrations ?? []).length} entradas para ${buenos.length} cobros`,
+    registrosTotal === buenos.length,
+    `${registrosTotal} entradas para ${buenos.length} cobros`,
+  );
+  comprobar(
+    'cada campo tiene 1 humano y 1 bot sentados',
+    mesasCorrectas === campos.length,
+    `${mesasCorrectas} de ${campos.length}`,
   );
 
   let cobradoReal = 0;
   for (const id of C) cobradoReal += SALDO - (await saldoDe(id));
   comprobar(
-    'el bote es exactamente lo que salio de las carteras',
-    cobradoReal === campoCon.buyInsCollected,
-    `carteras ${cobradoReal}, campo ${campoCon.buyInsCollected}`,
+    'el bote total es exactamente lo que salio de las carteras',
+    cobradoReal === potTotal,
+    `carteras ${cobradoReal}, campo ${potTotal}`,
   );
 
   // ==================================================================

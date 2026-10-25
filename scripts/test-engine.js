@@ -414,5 +414,48 @@ section('6. Una mano se juega hasta el final (motor solo)');
   }
 }
 
+// =========================================================================
+section('Rake: el motor cuenta las subidas preflop');
+
+{
+  const engine = new PokerGame('3bet', 10, 20, 3);
+  for (let i = 0; i < 3; i++) engine.addPlayer(String(i), `J${i}`, 1000);
+  engine.startGame(0);
+
+  let s = engine.getState();
+  if (s.preflopRaises === 0) ok('una mano nueva empieza sin subidas preflop');
+  else bad(`preflopRaises inicial=${s.preflopRaises}, esperaba 0`);
+
+  const primero = s.players[s.currentPlayerIndex];
+  if (engine.performAction(primero.id, 'raise', 40)) {
+    ok('la primera subida preflop se acepta');
+  } else {
+    bad('la primera subida preflop fue rechazada');
+  }
+
+  s = engine.getState();
+  const segundo = s.players[s.currentPlayerIndex];
+  if (engine.performAction(segundo.id, 'raise', 60)) {
+    ok('la 3-bet preflop se acepta');
+  } else {
+    bad('la 3-bet preflop fue rechazada');
+  }
+
+  s = engine.getState();
+  if (s.preflopRaises === 2) {
+    ok('un open raise + una 3-bet cuentan como 2 subidas');
+  } else {
+    bad(`preflopRaises=${s.preflopRaises}, esperaba 2`);
+  }
+
+  engine.startGame(1);
+  s = engine.getState();
+  if (s.preflopRaises === 0) {
+    ok('la siguiente mano reinicia el contador de subidas');
+  } else {
+    bad(`preflopRaises=${s.preflopRaises} al empezar la mano siguiente`);
+  }
+}
+
 console.log(`\n\x1b[1mResultado: ${pass} correctos, ${fail} fallidos\x1b[0m\n`);
 process.exit(fail > 0 ? 1 : 0);

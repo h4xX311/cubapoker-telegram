@@ -251,6 +251,16 @@ export const fieldManager = {
     const tier = getTier(tierId);
     if (!tier) throw new FieldError('Tier desconocido', 'UNKNOWN_TIER');
 
+    // VIP Arena es una sala de cash, no un torneo. Sin este corte, el endpoint
+    // `/fields/arena/register` podría abrir un campo de 10.000 USDT y vender
+    // una modalidad que el producto no ofrece.
+    if (tier.vipArena) {
+      throw new FieldError(
+        'VIP Arena es una sala de cash, no un torneo',
+        'UNKNOWN_TIER',
+      );
+    }
+
     const existing = await Field.findOne({
       tierId,
       status: { $in: ['filling', 'running', 'final'] },
@@ -1686,15 +1696,17 @@ export const fieldManager = {
     });
 
     // Un jugador solo puede estar en una mesa, asi que se cuentan los asientos
-    // humanos distintos. Si apareciera el mismo `playerId` en dos mesas, es un bug
-    // de fusion y se avisa: la invariante "nadie esta en dos mesas" tambien importa: un jugador en dos mesas
-    // cobraria dos veces.
-    const vistos = new Set<number>();
+    // distintos. Se incluyen los bots: `startField` los mete en
+    // `playersRemaining` y, si aqui solo se contaran humanos, el primer tick
+    // bajaria el contador a 1 y liquidaria el campo sin jugar la mano.
+    //
+    // La clave es `tipo:playerId`, no el telegramId: todos los bots comparten
+    // telegramId 0 y se pisarian unos a otros.
+    const vistos = new Set<string>();
     let vivos = 0;
 
     for (const t of tables) {
       for (const seat of t.seats) {
-        if (seat.kind !== 'human') continue;
         // NO SE CUENTA UN ASIENTO ELIMINADO COMO VIVO.
         //
         // Antes solo se saltaba 'out'. Un asiento marcado 'eliminated' con cero fichas no
@@ -1712,12 +1724,13 @@ export const fieldManager = {
         // ya no esta jugando. Los dos se saltan.
         if (seat.status === 'out' || seat.status === 'eliminated') continue;
 
-        const id = Number(seat.playerId);
-        if (Number.isNaN(id)) continue;
+        const id = seat.kind === 'bot'
+          ? `bot:${seat.playerId}`
+          : `human:${seat.playerId}`;
 
         if (vistos.has(id)) {
           logger.error(
-            `Campo ${field.fieldId}: el jugador ${id} esta en dos mesas a la vez ` +
+            `Campo ${field.fieldId}: el asiento ${id} esta en dos mesas a la vez ` +
             `(${t.tableId} y otra). Es un bug de fusion.`,
           );
           continue;
@@ -1745,7 +1758,11 @@ export const fieldManager = {
     //     jugadores.
     // ------------------------------------------------------------------
     const conPosicion = new Set(
-      (field.results ?? []).map((r) => r.telegramId).filter((id) => Number.isFinite(id)),
+      (field.results ?? []).map((r) =>
+        r.isBot
+          ? `bot:${r.playerId ?? r.telegramId}`
+          : `human:${r.playerId ?? r.telegramId}`,
+      ),
     );
     const sinPosicion = [...vistos].filter((id) => !conPosicion.has(id));
     const sinMesa = [...conPosicion].filter((id) => !vistos.has(id));
@@ -1817,14 +1834,25 @@ export const fieldManager = {
     // Se lee UNA vez por pasada y se consulta en memoria: con 300 jugadores y
     // cientos de eliminaciones, ir al campo `results` por cada asiento seria una
     // consulta por eliminado.
+    //
+    // La clave incluye el tipo de jugador: todos los bots comparten
+    // `telegramId = 0`, asi que usar solo ese numero haria que el primero en
+    // caer marcara a todos los demas como ya adjudicados.
+    const claveResultado = (r: { isBot?: boolean; playerId?: string; telegramId: number }) =>
+      r.isBot
+        ? `bot:${r.playerId ?? r.telegramId}`
+        : `human:${r.playerId ?? r.telegramId}`;
+
     const yaAdjudicados = new Set(
-      (field.results ?? []).map(r => r.telegramId),
+      (field.results ?? []).map(claveResultado),
     );
 
     for (const table of tables) {
-      const busted = table.seats.filter(
-        s => s.kind === 'human' && s.status === 'eliminated',
-      );
+      // Los bots tambien se eliminan y ocupan posiciones del torneo. Antes
+      // solo se recogian humanos: el contador `playersRemaining` incluia a
+      // los bots pero nunca bajaba por ellos, y un centroll de un humano
+      // contra un bot no podia terminar nunca.
+      const busted = table.seats.filter(s => s.status === 'eliminated');
 
       // DIAGNOSTICO
       logger.warn(
@@ -1847,10 +1875,14 @@ export const fieldManager = {
       let seatsLiquidados = 0;
 
       for (const seat of busted) {
-        const telegramId = Number(seat.playerId);
+        const esBot = seat.kind === 'bot';
+        const telegramId = esBot ? 0 : Number(seat.playerId);
+        const clave = esBot
+          ? `bot:${seat.playerId}`
+          : `human:${seat.playerId}`;
 
         // Ya tiene posicion: no se le adjudica otra.
-        if (yaAdjudicados.has(telegramId)) {
+        if (yaAdjudicados.has(clave)) {
           seatsLiquidados++;
           continue;
         }
@@ -1915,10 +1947,15 @@ export const fieldManager = {
         // Sin esta marca habria que adivinar quien sigue vivo mirando las mesas, y durante
         // una fusion un jugador puede no estar en ninguna o estar en dos.
         // ------------------------------------------------------------------
-        await Field.updateOne(
-          { _id: field._id, 'registrations.telegramId': telegramId },
-          { $set: { 'registrations.$.status': 'eliminated' } },
-        );
+        // Un bot no tiene inscripcion: no se le puede marcar nada. Su posicion
+        // si queda registrada, para que el reparto sepa que ese tramo no va a
+        // un humano y que se queda en la casa.
+        if (!esBot) {
+          await Field.updateOne(
+            { _id: field._id, 'registrations.telegramId': telegramId },
+            { $set: { 'registrations.$.status': 'eliminated' } },
+          );
+        }
 
         // ------------------------------------------------------------------
         // LAS FICHAS DEL ELIMINADO NO VUELVEN A SU CARTERA
@@ -1949,14 +1986,17 @@ export const fieldManager = {
           username: seat.displayName,
           amount: 0,
           tableId: table.tableId,
+          playerId: seat.playerId,
+          isBot: esBot,
         });
 
-        yaAdjudicados.add(telegramId);
+        yaAdjudicados.add(clave);
         seatsLiquidados++;
 
         logger.info(
-          `Campo ${field.fieldId}: jugador ${telegramId} eliminado ` +
-          `en la posicion ${position} (mesa ${table.tableId})`,
+          `Campo ${field.fieldId}: ${esBot ? 'bot' : 'jugador'} ` +
+          `${seat.playerId} eliminado en la posicion ${position} ` +
+          `(mesa ${table.tableId})`,
         );
       }
 
@@ -2344,9 +2384,13 @@ export const fieldManager = {
 
     // Queda un jugador: el campo se liquida.
     if (field.playersRemaining <= 1) {
+      // Solo un humano ACTIVO puede cobrar la posicion 1. Un asiento
+      // `eliminated` esta esperando su turno de adjudicacion y no es el
+      // ganador; si no queda ninguno, el campo se liquida sin ganador humano
+      // y las posiciones de los bots se quedan en la casa.
       const winner = live
         .flatMap(t => t.seats)
-        .find(s => s.kind === 'human' && s.status !== 'out');
+        .find(s => s.kind === 'human' && s.status === 'active');
 
       await this.settleField(field, winner ?? null);
       return;
@@ -2666,27 +2710,16 @@ export const fieldManager = {
     // real que la plataforma se queda de verdad. Cuando lo que hay es MENOS, la
     // retencion seria ficticia y `rakeCollected` dejaria de ser lo que salio de los
     // jugadores. En ese caso el rake es el 5 % y la fuga queda a la vista.
-    const rakeReal = faltan > 0
-      ? rakeObjetivo
-      : Math.max(0, grossPot - distributable);
-
-    // Se escribe SIEMPRE, no solo cuando cambia.
     //
-    // Antes era `if (rakeReal !== rake) { ...update... }`, y eso hacia que el rake del
-    // campo no se guardara nunca en el caso normal: `rake` ya valia `rakeObjetivo` (el
-    // 5 % del bote), que es justo lo mismo que `rakeReal` cuando lo barrido cuadra.
-    // La condicion nunca se cumplia, el campo se quedaba con `rakeCollected = 0` y el
-    // panel de operador mostraba que el campo no habia generado nada, que es
-    // justamente lo contrario de la verdad.
-    //
-    // Lo detectó el test de integracion: los saldos bajaban 15 USDT (el rake se
-    // retenia de verdad) pero el campo decia cero, y la comparacion entre ambos
-    // numeros no cuadraba.
-    rake = rakeReal;
-    await Field.updateOne(
-      { _id: field._id },
-      { $set: { rakeCollected: rakeReal } },
-    );
+    // En el centroll el importe real que se queda la casa depende de quien gane:
+    // si una posicion la ocupa un bot, ese tramo no se paga y tambien es margen.
+    // Por eso el centroll se ajusta DESPUES del reparto, con lo que de verdad
+    // salio hacia humanos. Para cash y freeroll la formula no cambia.
+    let rakeReal = esCentroll
+      ? 0
+      : faltan > 0
+        ? rakeObjetivo
+        : Math.max(0, grossPot - distributable);
 
     // El reparto por posicion. `FIELD_PAYOUT` suma 100, asi que las partes cubren
     // todo el bote; lo que sobre por posiciones sin adjudicado va al ganador.
@@ -2706,10 +2739,22 @@ export const fieldManager = {
     const paid: FieldResultOut['paid'] = [];
     /** Lo que ya se ha repartido, para no pagar dos veces la misma posicion. */
     const paidByPosition = new Set<number>();
-    /** Dinero que no tiene destinatario y va al ganador. */
+    /** Dinero que no tiene destinatario y va al ganador (solo cash). */
     let remainder = 0;
+    /**
+     * Dinero que se queda la casa porque la posicion la ocupa un bot o porque
+     * no hay ningun humano a quien pagarla. En el centroll es margen; en el
+     * freeroll es premio que no se llega a desembolsar.
+     */
+    let houseFromBots = 0;
 
-    const winnerId = winner ? Number(winner.playerId) : null;
+    // Un bot puede ganar el campo. No tiene cuenta ni saldo: su parte no se
+    // paga y se queda en la casa. `winnerId` solo existe para humanos.
+    const winnerEsBot = winner?.kind === 'bot';
+    const winnerId =
+      winner && !winnerEsBot && Number.isFinite(Number(winner.playerId))
+        ? Number(winner.playerId)
+        : null;
 
     for (let i = 0; i < shares.length; i++) {
       const position = i + 1;
@@ -2725,20 +2770,45 @@ export const fieldManager = {
       let username: string | undefined;
       let tableId: string | undefined;
 
+      // El ganador es un bot: su tramo no se paga.
+      if (position === 1 && winnerEsBot) {
+        houseFromBots += amount;
+        continue;
+      }
+
       if (position === 1 && winnerId !== null) {
         telegramId = winnerId;
         username = winner!.displayName;
       } else if (result) {
+        paidByPosition.add(position);
+
+        // Una posicion ocupada por un bot no se paga a nadie: se queda en la
+        // casa. Es lo que evita el error de "sin destinatario" y, sobre todo,
+        // que ese tramo acabe regalado al ganador humano.
+        if (result.isBot) {
+          houseFromBots += amount;
+          logger.info(
+            `Campo ${field.fieldId}: posicion ${position} ocupada por un bot ` +
+            `(${result.username ?? result.playerId}); ${formatUnits(amount)} USDT ` +
+            'se quedan en la casa.',
+          );
+          continue;
+        }
+
         telegramId = result.telegramId;
         username = result.username;
         tableId = result.tableId;
-        paidByPosition.add(position);
       }
 
-      if (telegramId === null) {
-        // Nadie ocupa esta posicion todavia (no se ha eliminado nadie todavia, o
-        // el campo se liquida antes de tiempo). No se pierde: al ganador.
-        remainder += amount;
+      if (telegramId === null || !Number.isFinite(telegramId) || telegramId <= 0) {
+        // Nadie ocupa esta posicion. En un centroll o freeroll no hay un humano
+        // a quien darsela: se queda en la casa. En cash, al ganador, que es
+        // como funciona un Sit'n'Go.
+        if (esFreeroll || esCentroll) {
+          houseFromBots += amount;
+        } else {
+          remainder += amount;
+        }
         continue;
       }
 
@@ -2752,7 +2822,8 @@ export const fieldManager = {
     }
 
     // Lo que no correspondia a ninguna posicion existente se lo lleva el ganador,
-    // que en un Sit'n'Go es exactamente lo que hace: se lleva la pila.
+    // que en un Sit'n'Go es exactamente lo que hace: se lleva la pila. En los
+    // campos con bots no se aplica: esos tramos ya se quedaron en la casa.
     if (remainder > 0) {
       if (winnerId !== null) {
         await this.creditPrize(
@@ -2775,12 +2846,36 @@ export const fieldManager = {
       }
     }
 
+    // El margen real del centroll es todo lo recaudado que no salio hacia un
+    // humano. Incluye el 70 % que no es premio y los tramos que ganaron bots.
+    if (esCentroll) {
+      const pagadoAHumanos = paid.reduce((s, p) => s + p.amount, 0);
+      rakeReal = Math.max(0, grossPot - pagadoAHumanos);
+    }
+
+    rake = rakeReal;
+    await Field.updateOne(
+      { _id: field._id },
+      { $set: { rakeCollected: rakeReal } },
+    );
+
+    if (houseFromBots > 0) {
+      logger.info(
+        `Campo ${field.fieldId}: ${formatUnits(houseFromBots)} USDT de premios de ` +
+        'bots o posiciones sin humano se quedan en la casa.',
+      );
+    }
+
     // --- Cerrar el campo (atomico) ---
     const closed2 = await Field.findOneAndUpdate(
       { fieldId: field.fieldId, status: { $ne: 'finished' } },
       {
         $set: { status: 'finished', finishedAt: new Date() },
-        $inc: { paidPositionsLeft: -(esCentroll ? FREEROLL_PAYOUT.length : PAID_POSITIONS) },
+        $inc: {
+          paidPositionsLeft: -(
+            esFreeroll || esCentroll ? FREEROLL_PAYOUT.length : PAID_POSITIONS
+          ),
+        },
       },
       { new: true },
     );
@@ -2815,11 +2910,16 @@ export const fieldManager = {
       await t.save();
     }
 
-    const totalPaid = paid.reduce((s, p) => s + p.amount, 0) + remainder;
+    // En centroll/freeroll `remainder` siempre vale 0: los tramos sin humano
+    // pasaron a `houseFromBots`. En cash sigue yendo al ganador.
+    const totalPaid =
+      paid.reduce((s, p) => s + p.amount, 0) +
+      (esFreeroll || esCentroll ? 0 : remainder);
 
     logger.info(
       `Campo ${field.fieldId} liquidado: bote ${formatUnits(grossPot)} USDT, ` +
-      `rake ${formatUnits(rake)} USDT, repartido ${formatUnits(totalPaid)} USDT ` +
+      `rake ${formatUnits(rake)} USDT, repartido a humanos ` +
+      `${formatUnits(totalPaid)} USDT ` +
       `(${esFreeroll || esCentroll ? 'promocion' : 'retirable'}), ` +
       `reembolsos ${formatUnits(refunded)} USDT`,
     );
@@ -2979,7 +3079,15 @@ export const fieldManager = {
       myTable: await this.fieldOfByTable(tables, null),
       startedAt: field.startedAt,
       finishedAt: field.finishedAt,
-      results: field.results ?? [],
+      // Vista publica: se omiten `isBot` y `playerId`. El jugador ve nombres y
+      // posiciones, no una etiqueta que le diga que compitio contra bots.
+      results: (field.results ?? []).map((r) => ({
+        position: r.position,
+        telegramId: r.telegramId,
+        username: r.username,
+        amount: r.amount,
+        tableId: r.tableId,
+      })),
     };
   },
 
@@ -3161,6 +3269,10 @@ export interface FieldResultOut {
     username?: string;
     amount: number;
     tableId?: string;
+    /** Identidad estable; en bots, el id del perfil. */
+    playerId?: string;
+    /** Posicion ocupada por un bot: no se paga. */
+    isBot?: boolean;
   }>;
   totalPaid: number;
   refunded: number;

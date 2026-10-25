@@ -124,9 +124,19 @@ section('4. Comisiones');
   if (calculateCommission(1000, 'deposit', 'usdt') === 10) ok('depósito USDT pequeño: gana el mínimo de 10');
   else bad(`esperaba 10 por mínimo, obtuvo ${calculateCommission(1000, 'deposit', 'usdt')}`);
 
-  // Retiros tienen minimo propio de 20 (1% de 1000 = 10)
-  if (calculateCommission(1000, 'withdrawal', 'usdt') === 20) ok('retiro USDT pequeño: gana el mínimo de 20');
-  else bad(`esperaba 20 por mínimo, obtuvo ${calculateCommission(1000, 'withdrawal', 'usdt')}`);
+  // Retiro USDT: comision FIJA de 5 USDT (5.000 unidades), como CoinPoker.
+  // Con el minimo de 10 USDT, el fee es 5 y el neto 5.
+  if (calculateCommission(10000, 'withdrawal', 'usdt') === 5000) {
+    ok('retiro USDT de 10: comisión fija de 5 USDT');
+  } else {
+    bad(`esperaba 5.000 unidades, obtuvo ${calculateCommission(10000, 'withdrawal', 'usdt')}`);
+  }
+
+  if (calculateCommission(50000, 'withdrawal', 'usdt') === 5000) {
+    ok('retiro USDT de 50: la comisión sigue siendo 5 USDT, no el 1%');
+  } else {
+    bad(`la comisión fija no se aplicó: ${calculateCommission(50000, 'withdrawal', 'usdt')}`);
+  }
 
   // Techo aplicado
   if (calculateCommission(1000000, 'deposit', 'enzona') === 500) ok('depósito: gana el techo de 500');
@@ -134,12 +144,6 @@ section('4. Comisiones');
 
   if (calculateCommission(1000000, 'withdrawal', 'enzona') === 1000) ok('retiro: gana el techo de 1000');
   else bad(`techo de retiro no aplicado: ${calculateCommission(1000000, 'withdrawal', 'enzona')}`);
-
-  // USDT siempre debe salir mas barato que los metodos fiat
-  const usdt = calculateCommission(5000, 'withdrawal', 'usdt');
-  const fiat = calculateCommission(5000, 'withdrawal', 'enzona');
-  if (usdt < fiat) ok(`USDT sale mas barato que CUP en retiros (${usdt} < ${fiat})`);
-  else bad('USDT no es mas barato que los metodos fiat');
 }
 
 console.log(`\n\x1b[1mResultado: ${pass} correctos, ${fail} fallidos\x1b[0m\n`);

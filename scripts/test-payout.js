@@ -24,6 +24,8 @@ const {
   FIELD_PAYOUT,
   RAKE,
   TABLE_TIER_LIST,
+  TABLE_TIERS,
+  rakeCapFor,
   ECONOMY,
   SEATS_PER_TABLE,
 } = require('../dist/config/product');
@@ -243,32 +245,60 @@ section('1. splitPrize: cuadra siempre, nunca inventa dinero');
 }
 
 // =========================================================================
-section('2. rakeOf (por mano) y rakeOfField (por campo)');
+section('2. Helpers heredados y topes reales por sala');
 
 {
-  // OJO: `RAKE.cashMax` esta en UNIDADES internas (0,1 USDT), no en USDT. Un
-  // bote de 20 USDT = 20 000 unidades ya supera el tope, asi que rakea 100.
-  // Eso es correcto: el tope por mano existe para que un bote enorme no se
-  // lleve el 5% entero.
-  if (rakeOf(2000) === 100) ok('rake del 5% sobre 2 000 unidades = 100 (justo en el tope)');
+  // `rakeOf` es el helper histórico con el tope global de 100 unidades. Se
+  // conserva para probar la fórmula del 5 %, pero una mesa real NO lo usa:
+  // usa `rakeCapFor(sala, jugadores)`, que se valida más abajo.
+  if (rakeOf(2000) === 100) ok('rake del 5% sobre 2 000 unidades = 100 (tope heredado)');
   else bad(`rake de 2 000 = ${rakeOf(2000)}, esperaba 100`);
 
   if (rakeOf(20000) === RAKE.cashMax) {
-    ok(`bote de 20 USDT (20 000 unidades): rake topado en ${RAKE.cashMax} unidades (0,1 USDT)`);
+    ok(`helper heredado: 20 000 unidades se topan en ${RAKE.cashMax} (0,1 USDT)`);
   } else {
-    bad(`bote de 20 000 unidades rakea ${rakeOf(20000)}, deberia toparse en ${RAKE.cashMax}`);
+    bad(`bote de 20 000 unidades rakea ${rakeOf(20000)}, esperaba el tope heredado ${RAKE.cashMax}`);
   }
 
   // Un bote del que el 5% supera el tope tiene que quedar en el tope.
   const overCap = Math.ceil(RAKE.cashMax * 100 / RAKE.cashPercentage) + 1;
   if (rakeOf(overCap) === RAKE.cashMax) {
-    ok(`el rake por mano se topa en ${RAKE.cashMax} unidades (bote de ${overCap})`);
+    ok(`el helper heredado se topa en ${RAKE.cashMax} unidades (bote de ${overCap})`);
   } else {
     bad(`rake de ${overCap} unidades = ${rakeOf(overCap)}, deberia toparse en ${RAKE.cashMax}`);
   }
 
   if (rakeOf(RAKE.minPot - 1) === 0) ok(`sin rake por debajo de ${RAKE.minPot} unidades de bote`);
   else bad('hay rake en botes por debajo del minimo');
+
+  // El tope real de una mesa no es RAKE.cashMax: depende de la sala y de los
+  // jugadores. El tope global de 100 unidades era el de la micro y dejaba a
+  // VIP Arena cobrando 0,10 USDT por mano.
+  if (rakeCapFor('t1', 2) === usdtToUnits(0.025)) {
+    ok('Micro heads-up: tope de 0,025 USDT');
+  } else {
+    bad(`Micro heads-up: tope=${rakeCapFor('t1', 2)}`);
+  }
+  if (rakeCapFor('t100', 5) === usdtToUnits(5)) {
+    ok('Alto 5+: tope de 5 USDT');
+  } else {
+    bad(`Alto 5+: tope=${rakeCapFor('t100', 5)}`);
+  }
+  if (rakeCapFor('arena', 2) === usdtToUnits(50)) {
+    ok('VIP Arena heads-up: tope de 50 USDT');
+  } else {
+    bad(`VIP Arena heads-up: tope=${rakeCapFor('arena', 2)}`);
+  }
+  if (rakeCapFor('arena', 5) === usdtToUnits(60)) {
+    ok('VIP Arena 5+: tope de 60 USDT');
+  } else {
+    bad(`VIP Arena 5+: tope=${rakeCapFor('arena', 5)}`);
+  }
+  if (TABLE_TIERS.arena.rakeCaps && TABLE_TIERS.arena.rakeCaps.fivePlus > RAKE.cashMax) {
+    ok('el tope de Arena es mayor que el tope global heredado');
+  } else {
+    bad('Arena sigue atada al tope global de 100 unidades');
+  }
 
   // LA DISTINCION IMPORTANTE: el tope es POR MANO, no por campo.
   const bigField = usdtToUnits(1) * 300; // campo micro completo
@@ -375,12 +405,15 @@ section('3. fieldPayout: el reparto del campo');
 }
 
 // =========================================================================
-section('4. RTP: 95% en los cuatro niveles');
+section('4. RTP: 95% en los niveles de torneo');
 
 {
+  // VIP Arena es una ring table, no un campo de torneo: no tiene premio de
+  // field ni RTP de reparto. Se excluye para no validar una modalidad falsa.
+  const tournamentTiers = TABLE_TIER_LIST.filter((t) => !t.vipArena);
   console.log('    nivel   buy-in        CIP      Bote bruto      Rake      Bote neto      1o');
   const rtps = [];
-  for (const tier of TABLE_TIER_LIST) {
+  for (const tier of tournamentTiers) {
     const p = fieldPayout(tier.buyInUnits, tier.fieldSize);
     const rtp = tierRtp(tier.buyInUnits, tier.fieldSize);
     rtps.push(rtp);
@@ -398,8 +431,8 @@ section('4. RTP: 95% en los cuatro niveles');
   }
   console.log('');
 
-  for (let i = 0; i < TABLE_TIER_LIST.length; i++) {
-    const tier = TABLE_TIER_LIST[i];
+  for (let i = 0; i < tournamentTiers.length; i++) {
+    const tier = tournamentTiers[i];
     const rtp = rtps[i];
     if (rtp >= 0.9 && rtp <= 0.99) {
       ok(`${tier.label} (${tier.buyInUsdt} USDT): RTP ${(rtp * 100).toFixed(2)}%`);
@@ -412,7 +445,7 @@ section('4. RTP: 95% en los cuatro niveles');
   const spread = Math.max(...rtps) - Math.min(...rtps);
   if (spread < 0.005) {
     ok(
-      `el RTP es identico en los 4 niveles (dif ${(spread * 100).toFixed(3)} pp): ` +
+      `el RTP es identico en todos los niveles (dif ${(spread * 100).toFixed(3)} pp): ` +
       'el rake no cambia con el stake',
     );
   } else {
@@ -420,16 +453,16 @@ section('4. RTP: 95% en los cuatro niveles');
   }
 
   // Y no puede superar el 95%.
-  for (let i = 0; i < TABLE_TIER_LIST.length; i++) {
+  for (let i = 0; i < tournamentTiers.length; i++) {
     if (rtps[i] <= 0.95 + 0.001) {
-      ok(`${TABLE_TIER_LIST[i].label}: nunca supera el 95% (el jugador no gana a largo plazo)`);
+      ok(`${tournamentTiers[i].label}: nunca supera el 95% (el jugador no gana a largo plazo)`);
     } else {
-      bad(`${TABLE_TIER_LIST[i].label}: RTP ${(rtps[i] * 100).toFixed(2)}% > 95%`);
+      bad(`${tournamentTiers[i].label}: RTP ${(rtps[i] * 100).toFixed(2)}% > 95%`);
     }
   }
 
   // El ladder tiene que escalar: campo mas caro = premio mayor.
-  const prizes = TABLE_TIER_LIST.map(t => {
+  const prizes = tournamentTiers.map(t => {
     const p = fieldPayout(t.buyInUnits, t.fieldSize);
     return p.entries.find(e => e.position === 1)?.amount ?? 0;
   });
@@ -440,12 +473,12 @@ section('4. RTP: 95% en los cuatro niveles');
   if (ascending) {
     ok(
       'el ladder escala: ' +
-      prizes.map((v, i) => `${TABLE_TIER_LIST[i].label} ${formatUnits(v)}`).join(' < '),
+      prizes.map((v, i) => `${tournamentTiers[i].label} ${formatUnits(v)}`).join(' < '),
     );
   } else {
     bad(
       'el ladder NO escala: ' +
-      prizes.map((v, i) => `${TABLE_TIER_LIST[i].label} ${formatUnits(v)}`).join(', '),
+      prizes.map((v, i) => `${tournamentTiers[i].label} ${formatUnits(v)}`).join(', '),
     );
   }
 }

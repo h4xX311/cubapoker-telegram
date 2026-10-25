@@ -11,8 +11,11 @@ import {
   SEATS_PER_TABLE,
   CENTROLL,
   UNLOCK_RATES,
+  CASH_FORMATS,
+  CASH_FORMAT_LIST,
   getTier,
   type TableTierId,
+  type CashFormatId,
 } from '../config/product';
 import { logger } from '../utils/logger';
 import { unlockService } from '../services/unlock.service';
@@ -49,6 +52,7 @@ export class SeatingService {
     telegramId: number;
     tableId?: string;
     tierId?: TableTierId;
+    formatId?: CashFormatId;
     buyIn?: number;
   }): Promise<{ tableId: string; seatIndex: number; chips: number; spentFrom: { play: number; real: number } }> {
     const { telegramId } = params;
@@ -56,7 +60,11 @@ export class SeatingService {
     const user = await User.findOne({ telegramId });
     if (!user) throw new TableError('Usuario no encontrado', 404);
 
-    const table = await this.resolveTable(params.tableId, params.tierId);
+    const table = await this.resolveTable(
+      params.tableId,
+      params.tierId,
+      params.formatId,
+    );
 
     // ------------------------------------------------------------------
     // ENTRAR A UN CAMPO NO SE HACE POR AQUI
@@ -197,7 +205,11 @@ export class SeatingService {
   }
 
   /** Resuelve la mesa destino: por ID, o creando una del tier pedido. */
-  private async resolveTable(tableId?: string, tierId?: TableTierId): Promise<ITable> {
+  private async resolveTable(
+    tableId?: string,
+    tierId?: TableTierId,
+    formatId?: CashFormatId,
+  ): Promise<ITable> {
     if (tableId) {
       const table = await Table.findOne({ tableId, status: { $in: ['waiting', 'running'] } });
       if (!table) throw new TableError('Mesa no encontrada', 404);
@@ -209,32 +221,46 @@ export class SeatingService {
     }
 
     const tier = getTier(tierId || '') || TABLE_TIERS.t1;
+    const formato = CASH_FORMATS[formatId || '7max'];
+    if (!formato) throw new TableError('Formato de mesa desconocido');
 
-    // Buscar una mesa del mismo tier con sitio
+    // Buscar una mesa del mismo tier Y formato con sitio. Sin el filtro de
+    // formato, entrar por `tierId` podia sentar al jugador en una mesa HU
+    // cuando pedia la de 7-max (o al reves), porque las tres comparten tier.
     const existing = await Table.findOne({
       kind: 'cash',
       tierId: tier.id,
+      formatId: formato.id,
       status: { $in: ['waiting', 'running'] },
       $expr: { $lt: [{ $size: '$seats' }, '$maxSeats'] },
     });
 
     if (existing) return existing as ITable;
 
-    // Crear mesa nueva para el tier
-    return (await this.createCashTable(tier.id)) as ITable;
+    // Crear mesa nueva para el tier y formato.
+    return (await this.createCashTable(tier.id, formato.id)) as ITable;
   }
 
-  /** Crea una mesa cash del tier indicado, con una semilla de bots. */
-  async createCashTable(tierId: TableTierId): Promise<ITable> {
+  /** Crea una mesa cash del tier y formato indicados, con una semilla de bots. */
+  async createCashTable(
+    tierId: TableTierId,
+    formatId: CashFormatId = '7max',
+  ): Promise<ITable> {
     const tier = getTier(tierId);
     if (!tier) throw new TableError('Tier de mesa desconocido');
 
-    const tableId = `cash-${tierId}-${Date.now().toString(36)}`;
+    const formato = CASH_FORMATS[formatId];
+    if (!formato) throw new TableError('Formato de mesa desconocido');
+
+    const tableId =
+      `cash-${tierId}-${formato.id}-${Date.now().toString(36)}-` +
+      `${Math.random().toString(36).slice(2, 6)}`;
 
     const table = await Table.create({
       tableId,
       kind: 'cash',
       tierId,
+      formatId: formato.id,
       status: 'waiting',
       // Las ciegas vienen del tier ya calculadas en unidades. No se derivan
       // aqui con `Math.round(buyIn / 100)`: dos mesas del mismo tier podrian
@@ -243,9 +269,10 @@ export class SeatingService {
       smallBlind: tier.blinds.small,
       bigBlind: tier.blinds.big,
       buyInUnits: tier.buyInUnits,
-      // 7 asientos. `tier.fieldSize` es el numero de participantes del campo
-      // completo (multi-mesa), no lo que cabe en una mesa.
-      maxSeats: SEATS_PER_TABLE,
+      // El formato decide cuantos asientos tiene la mesa. `tier.fieldSize` es
+      // el numero de participantes del campo completo (multi-mesa), no lo que
+      // cabe en una mesa.
+      maxSeats: formato.maxSeats,
       seats: [],
       hand: {
         handNumber: 0,
@@ -260,7 +287,7 @@ export class SeatingService {
 
     logger.info(
       `Mesa cash creada: ${tableId} ` +
-      `(7-max, campo de ${tier.fieldSize}, buy-in ${tier.buyInUsdt} USDT ` +
+      `(${formato.label}, campo de ${tier.fieldSize}, buy-in ${tier.buyInUsdt} USDT ` +
       `= ${tier.stackInBigBlinds} BB)`,
     );
     return table;
@@ -822,14 +849,32 @@ export class SeatingService {
    * ------------------------------------------------------------------
    */
   async seedTables(): Promise<void> {
+    // Una mesa por cada sala (tier) y cada formato que el motor puede jugar.
+    // Asi el lobby nunca ensena una sala vacia y el jugador puede elegir
+    // 7-max, 6-max o Heads-Up sin esperar a que se cree la mesa.
     for (const tier of TABLE_TIER_LIST) {
-      const existing = await Table.findOne({ kind: 'cash', tierId: tier.id, status: 'waiting' });
-      if (!existing) {
-        await this.createCashTable(tier.id);
+      for (const formato of CASH_FORMAT_LIST) {
+        // Las mesas antiguas no tienen `formatId`; se consideran 7-max para no
+        // duplicarlas en cada arranque.
+        const filtroFormato =
+          formato.id === '7max'
+            ? { $or: [{ formatId: '7max' }, { formatId: { $exists: false } }] }
+            : { formatId: formato.id };
+
+        const existing = await Table.findOne({
+          kind: 'cash',
+          tierId: tier.id,
+          status: { $in: ['waiting', 'running'] },
+          ...filtroFormato,
+        });
+
+        if (!existing) {
+          await this.createCashTable(tier.id, formato.id);
+        }
       }
     }
 
-    logger.info('Mesas base verificadas');
+    logger.info('Mesas base verificadas (7-max, 6-max y Heads-Up por sala)');
   }
 }
 

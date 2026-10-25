@@ -6,6 +6,7 @@ import { Referral } from '../models/Referral';
 import { Achievement } from '../models/Achievement';
 import { Streak } from '../models/Achievement';
 import { VIP_CONFIG, VIPLevel } from '../models/VIP';
+import { rakebackService } from '../services/rakeback.service';
 import { monetizationConfig } from '../config/monetization';
 import { unitsToUsdt } from '../config/units';
 import { requireTelegramAuth, getAuthedTelegramId } from '../middleware/telegramAuth';
@@ -32,12 +33,46 @@ router.use(requireTelegramAuth);
 router.get('/vip', async (req: Request, res: Response) => {
   try {
     const telegramId = getAuthedTelegramId(req);
-    const level = await monetizationService.getVIPLevel(telegramId);
+    const [estado, arena] = await Promise.all([
+      rakebackService.getStatus(telegramId),
+      rakebackService.getArenaStatus(telegramId),
+    ]);
 
     res.json({
       success: true,
-      level,
-      config: vipPublico(level ? VIP_CONFIG[level] : null),
+      level: estado.level,
+      active: estado.active,
+      endDate: estado.endDate,
+      config: vipPublico(estado.level ? VIP_CONFIG[estado.level] : null),
+      rakeback: {
+        weekKey: estado.weekKey,
+        weekStart: estado.weekStart,
+        weekEnd: estado.weekEnd,
+        percent: estado.rakebackPercent,
+        rakeUsdt: unitsToUsdt(estado.rakeUnits),
+        estimatedUsdt: unitsToUsdt(estado.estimatedUnits),
+        paidUsdt: unitsToUsdt(estado.paidUnits),
+        claimableUsdt: unitsToUsdt(estado.claimableUnits),
+        currentWeekRakeUsdt: unitsToUsdt(estado.currentWeekRakeUnits),
+        payoutStatus: estado.payoutStatus,
+        lastPayoutAt: estado.lastPayoutAt,
+        nextPayoutAt: estado.nextPayoutAt,
+      },
+      // VIP Arena es una sala, no una membresía. Va aparte para que la UI no
+      // la presente como un plan comprable.
+      arena: {
+        weekKey: arena.weekKey,
+        weekStart: arena.weekStart,
+        weekEnd: arena.weekEnd,
+        percent: arena.profitSharePercent,
+        rakeUsdt: unitsToUsdt(arena.rakeUnits),
+        estimatedUsdt: unitsToUsdt(arena.estimatedUnits),
+        paidUsdt: unitsToUsdt(arena.paidUnits),
+        claimableUsdt: unitsToUsdt(arena.claimableUnits),
+        payoutStatus: arena.payoutStatus,
+        lastPayoutAt: arena.lastPayoutAt,
+        nextPayoutAt: arena.nextPayoutAt,
+      },
     });
   } catch (error) {
     console.error('Get VIP error:', error);
@@ -51,10 +86,10 @@ router.post('/vip/purchase', async (req: Request, res: Response) => {
     const telegramId = getAuthedTelegramId(req);
     const { level } = req.body;
 
-    if (!['basic', 'premium', 'elite'].includes(level)) {
+    if (!['basic', 'premium'].includes(level)) {
       return res.status(400).json({ error: 'Nivel VIP inválido' });
     }
-    
+
     const success = await monetizationService.purchaseVIP(telegramId, level as VIPLevel);
     
     if (success) {
@@ -67,7 +102,61 @@ router.post('/vip/purchase', async (req: Request, res: Response) => {
     }
   } catch (error: any) {
     console.error('Purchase VIP error:', error);
-    res.status(500).json({ error: error.message || 'Error al comprar VIP' });
+    const esSaldo = /saldo insuficiente/i.test(error?.message ?? '');
+    res.status(esSaldo ? 400 : 500).json({
+      error: error?.message || 'Error al comprar VIP',
+    });
+  }
+});
+
+/**
+ * Cobrar el rakeback de la semana cerrada.
+ *
+ * Es idempotente: si ya se pagó, devuelve 0 y la semana pagada. El job
+ * automático usa el mismo camino, así que un clic y el job no pueden pagar
+ * dos veces.
+ */
+router.post('/vip/rakeback/claim', async (req: Request, res: Response) => {
+  try {
+    const telegramId = getAuthedTelegramId(req);
+    const resultado = await rakebackService.payWeeklyRakeback(telegramId);
+
+    res.json({
+      success: true,
+      paidUsdt: unitsToUsdt(resultado.paid),
+      weekKey: resultado.weekKey,
+      reason: resultado.reason ?? null,
+    });
+  } catch (error: any) {
+    console.error('Claim rakeback error:', error);
+    res.status(500).json({
+      error: error?.message || 'Error al cobrar el rakeback',
+    });
+  }
+});
+
+/**
+ * Cobrar el profit share de VIP Arena.
+ *
+ * Es una sala, no una membresía: no se compra nada. Solo se cobra el 15 % del
+ * rake generado en las mesas de Arena durante la semana cerrada.
+ */
+router.post('/vip/arena/claim', async (req: Request, res: Response) => {
+  try {
+    const telegramId = getAuthedTelegramId(req);
+    const resultado = await rakebackService.payArenaWeekly(telegramId);
+
+    res.json({
+      success: true,
+      paidUsdt: unitsToUsdt(resultado.paid),
+      weekKey: resultado.weekKey,
+      reason: resultado.reason ?? null,
+    });
+  } catch (error: any) {
+    console.error('Claim Arena profit share error:', error);
+    res.status(500).json({
+      error: error?.message || 'Error al cobrar el profit share de VIP Arena',
+    });
   }
 });
 

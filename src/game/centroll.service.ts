@@ -16,6 +16,7 @@ import { logger } from '../utils/logger';
 // asi que no hay ciclo. Se comparte para que "dos personas pulsando JUGAR a la vez" se
 // serialice igual en un centroll que en un campo de cash.
 import { withFieldLock } from './field.manager';
+import { tableManager } from './table.manager';
 
 /** Clave del cerrojo. Un centroll es un solo nivel, siempre el mismo. */
 const LOCK_CENTROLL = 'centroll';
@@ -231,13 +232,20 @@ export const centrollService = {
 
   /** Abre un centroll, o devuelve el que ya esta abierto. */
   async openField(): Promise<IField> {
+    // Solo se reutiliza un campo que aun admite jugadores. Un centroll que ya
+    // arranco no puede aceptar a nadie: `trySeat` solo sienta en `filling`.
+    // Antes se devolvia tambien el running y el jugador pagaba sin poder jugar.
     const existing = await Field.findOne({
       kind: 'centroll',
-      status: { $in: ['filling', 'running', 'final'] },
+      status: 'filling',
     });
     if (existing) return existing;
 
-    const fieldId = `centroll-${Date.now().toString(36)}`;
+    // Sufijo aleatorio: con dos aperturas en el mismo milisegundo, `Date.now()`
+    // solo no garantiza un `fieldId` distinto.
+    const fieldId = `centroll-${Date.now().toString(36)}-${Math.random()
+      .toString(36)
+      .slice(2, 7)}`;
     const buyIn = usdtToUnits(CENTROLL.buyInUsdt);
     // Las fichas del centroll son FIJAS, no la parte del premio: el buy-in es
     // dinero (0,01 USDT) y las fichas son de torneo (1.000). Con ciegas 5/10
@@ -265,7 +273,10 @@ export const centrollService = {
     const documento = {
       fieldId,
       kind: 'centroll',
-      tierId: LOCK_CENTROLL,
+      // Un `tierId` UNICO por campo. El indice `un_campo_vivo_por_nivel` impide
+      // dos campos vivos con la misma clave. Como los centrolls arrancan de uno
+      // en uno y pueden convivir varios en running, cada campo necesita la suya.
+      tierId: `${LOCK_CENTROLL}-${fieldId}`,
       status: 'filling',
       buyInUnits: buyIn,
       targetField: CENTROLL.targetField,
@@ -295,7 +306,7 @@ export const centrollService = {
         // Otro registro lo abrio primero. No es un error: se entra al que hay.
         const ganador = await Field.findOne({
           kind: 'centroll',
-          status: { $in: ['filling', 'running', 'final'] },
+          status: 'filling',
         });
         if (ganador) return ganador;
       }
@@ -395,10 +406,41 @@ export const centrollService = {
 
     queues.set(field.fieldId, queue);
 
-    // Arrancar si se lleno el objetivo. `seatedAny` es booleano, asi que se
-    // convierte a numero antes de sumar al contador.
-    if (queue.length === 0 && field.seated + (seatedAny ? 1 : 0) >= CENTROLL.targetField) {
-      await this.startField(field);
+    // ------------------------------------------------------------------
+    // BOTS HASTA EL MINIMO, Y ARRANQUE INMEDIATO
+    //
+    // Un centroll no puede esperar a 100 humanos: con un solo jugador se queda
+    // abierto para siempre. La decision de producto es rellenar cada mesa que
+    // tenga humanos hasta el minimo con bots y arrancar. Los bots no pagan
+    // buy-in; si ganan una posicion, su premio se queda en la casa (ver
+    // `settleField`).
+    // ------------------------------------------------------------------
+    const mesasConHumanos = await Table.find({
+      'field.fieldId': field.fieldId,
+      status: { $in: ['waiting', 'running'] },
+    });
+
+    for (const mesa of mesasConHumanos) {
+      const humanos = mesa.seats.filter(
+        (s) => s.kind === 'human' && s.status !== 'out',
+      ).length;
+      if (humanos === 0) continue;
+
+      await tableManager.asegurarMinimoAsientos(
+        mesa.tableId,
+        CENTROLL.minPlayersPerTable,
+      );
+    }
+
+    const fresco = await Field.findById(field._id);
+    if (fresco && queue.length === 0 && fresco.seated > 0) {
+      const arrancado = await this.startField(fresco);
+      if (!arrancado) {
+        logger.warn(
+          `Centroll ${field.fieldId}: hay jugador sentado pero la mesa aun no ` +
+          'tiene dos activos. Se reintenta en la siguiente vuelta.',
+        );
+      }
     }
 
     return seatedAny;
@@ -418,6 +460,10 @@ export const centrollService = {
       smallBlind: small,
       bigBlind: big,
       buyInUnits: buyIn,
+      // Sin esto, `asegurarMinimoAsientos` daba a los bots el buy-in (10
+      // unidades) en vez del stack del torneo (1.000) y se quedaban sin fichas
+      // en dos manos. El humano juega 100 BB; el bot tiene que jugar igual.
+      startChips: CENTROLL.startingChips,
       maxSeats: SEATS_PER_TABLE,
       seats: [],
       field: {
@@ -458,6 +504,26 @@ export const centrollService = {
 
   /** Arranca el centroll. */
   async startField(field: IField): Promise<boolean> {
+    // No se re-arranca un campo que ya esta en marcha: recalcularia
+    // `playersRemaining` y `startedAt` encima de un torneo ya jugandose.
+    if (field.status !== 'filling') return false;
+
+    // Red de seguridad: si una mesa con humanos se quedo sin su bot de relleno,
+    // se completa antes de comprobar si se puede arrancar. Es la misma regla que
+    // aplica `trySeat`, aqui para que un reintento no dependa de un registro.
+    const antes = await Table.find({ 'field.fieldId': field.fieldId });
+    for (const mesa of antes) {
+      const humanos = mesa.seats.filter(
+        (s) => s.kind === 'human' && s.status !== 'out',
+      ).length;
+      if (humanos === 0) continue;
+
+      await tableManager.asegurarMinimoAsientos(
+        mesa.tableId,
+        CENTROLL.minPlayersPerTable,
+      );
+    }
+
     const tables = await Table.find({ 'field.fieldId': field.fieldId });
     const playable = tables.filter(
       t => t.seats.filter(s => s.status === 'active' && s.chips > 0).length >= 2,
@@ -484,6 +550,55 @@ export const centrollService = {
 
     logger.info(`Centroll ${field.fieldId} arrancado con ${field.playersRemaining} jugadores`);
     return true;
+  },
+
+  /**
+   * Red de seguridad para centrolls que se quedaron en `filling` con humanos.
+   *
+   * El camino normal es `register() -> trySeat() -> startField()`. Si el
+   * proceso se reinicia entre el asiento y el arranque, el jugador queda
+   * sentado en un campo que nunca empieza. El `tick` de campos no puede
+   * arreglarlo porque para el centroll exige el objetivo de 100. Esta vuelta
+   * repite el relleno de bots y el arranque, y es idempotente.
+   */
+  async ensureRunning(): Promise<number> {
+    const fields = await Field.find({ kind: 'centroll', status: 'filling' });
+    let arrancados = 0;
+
+    for (const field of fields) {
+      if ((field.seated ?? 0) <= 0) continue;
+
+      try {
+        const mesas = await Table.find({
+          'field.fieldId': field.fieldId,
+          status: { $in: ['waiting', 'running'] },
+        });
+
+        for (const mesa of mesas) {
+          const humanos = mesa.seats.filter(
+            (s) => s.kind === 'human' && s.status !== 'out',
+          ).length;
+          if (humanos === 0) continue;
+
+          await tableManager.asegurarMinimoAsientos(
+            mesa.tableId,
+            CENTROLL.minPlayersPerTable,
+          );
+        }
+
+        const fresco = await Field.findById(field._id);
+        if (fresco && fresco.seated > 0) {
+          if (await this.startField(fresco)) arrancados++;
+        }
+      } catch (err) {
+        logger.error(
+          `Centroll ${field.fieldId}: fallo la red de seguridad de arranque: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    return arrancados;
   },
 
   /**
@@ -593,9 +708,18 @@ export const centrollService = {
    * ------------------------------------------------------------------
    */
   async refundIfNotStarted(telegramId: number): Promise<number> {
+    // Se busca el campo que TIENE la entrada de este jugador, no el primero
+    // que este llenandose. Con varios centrolls abiertos, el primero podia no
+    // ser el suyo y la devolucion se quedaba en 0 aunque hubiera pagado.
     const field = await Field.findOne({
       kind: 'centroll',
       status: 'filling',
+      registrations: {
+        $elemMatch: {
+          telegramId,
+          status: { $in: ['waiting', 'seated'] },
+        },
+      },
     });
     if (!field) return 0;
 

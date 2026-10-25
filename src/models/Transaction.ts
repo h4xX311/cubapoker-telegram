@@ -1,6 +1,6 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
-export type TransactionType = 'deposit' | 'withdrawal' | 'game_bet' | 'game_win' | 'rake' | 'commission' | 'vip_purchase' | 'referral_commission' | 'tournament_buyin' | 'tournament_prize';
+export type TransactionType = 'deposit' | 'withdrawal' | 'game_bet' | 'game_win' | 'rake' | 'commission' | 'vip_purchase' | 'vip_rakeback' | 'arena_profit_share' | 'referral_commission' | 'tournament_buyin' | 'tournament_prize';
 export type PaymentMethod = 'enzona' | 'qvapay' | 'usdt' | 'credits';
 export type TransactionStatus = 'pending' | 'completed' | 'failed' | 'cancelled';
 

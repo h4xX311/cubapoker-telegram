@@ -186,9 +186,11 @@ export class PaymentService {
       type: 'deposit',
       paymentMethod: order.provider,
       // En unidades, como el saldo al que se suma. El libro de movimientos tiene que
-      // sumar con la misma aritmetica que el saldo.
+      // sumar con la misma aritmetica que el saldo. Por eso la etiqueta es 'CUP'
+      // (unidad interna), aunque la orden se haya creado en USDT: el importe de la
+      // transaccion NO esta en USDT. La moneda pedida queda en metadata.
       amount: credited,
-      currency: order.currency,
+      currency: 'CUP',
       status: 'completed',
       commission,
       commissionRate: orderUnits > 0 ? commission / orderUnits : 0,
@@ -406,8 +408,10 @@ export class PaymentService {
       type: 'withdrawal',
       paymentMethod: provider,
       // El neto que SALE del saldo, en unidades, como `balance.real`.
+      // La etiqueta es 'CUP' (unidad interna) a proposito, también en USDT:
+      // el importe no esta en USDT. Lo pedido queda en `requestedUsdt`.
       amount: net,
-      currency: provider === 'usdt' ? 'USDT' : 'CUP',
+      currency: 'CUP',
       status: 'pending',
       commission,
       externalId: saved.orderId,

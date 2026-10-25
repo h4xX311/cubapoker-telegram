@@ -69,14 +69,22 @@ export const usdtToCup = (usdt: number): number =>
  *   USDC:  minimo 10 USDT, maximo 25 000 USDT equivalente, fee 0-5 USDT
  *   BTC:   minimo 10 USDT equivalente, ~1 USDT
  *
- * Y el dato que de verdad importa para el usuario: **USDT y USDC en Polygon no
- * tienen commission**. Por eso Polygon debe ser la opcion por defecto en la
- * pantalla de retiro: el resto de redes cuesta 5 USDT, que en un retiro pequeno
- * se come una parte enorme del importe.
+ * DECISION DE PRODUCTO (CubaPoker): el jugador paga una comision FIJA de 5 USDT
+ * por retiro en USDT, como CoinPoker. No se cobra por red ni se bonifica
+ * Polygon: el coste real de la red se paga con esos 5 USDT y lo que sobre se
+ * queda la casa. El fee variable por red se elimino porque hacia que el jugador
+ * viera "gratis" una red y caro otra, y el margen dependiera de por donde
+ * sacara el dinero.
  */
 export const WITHDRAWALS = {
   /** Minimo por transaccion, en USDT (10 USDT = 1200 CUP). */
   min: 10,
+
+  /**
+   * Comision fija por retiro, en USDT. Se cobra siempre, en cualquier red.
+   * Con el minimo de 10 USDT, el neto minimo es 5 USDT.
+   */
+  fixedFeeUsdt: 5,
 
   /** Maximo por transaccion, en USDT. */
   maxPerTransaction: 25_000,
@@ -108,11 +116,12 @@ export const WITHDRAWALS = {
   monthlyWinCap: 25_000,
 
   /**
-   * Cadencia de las redes segun CoinPoker.
+   * COSTE ESTIMADO DE RED, NO LO QUE PAGA EL JUGADOR.
    *
-   * `free: true` significa que el operador no cobra comision de red. Con la
-   * tasa actual eso solo es posible en Polygon; en las otras redes el coste
-   * real corre de la plataforma y hay que cobrarlo o se opera en negativo.
+   * El jugador paga siempre `fixedFeeUsdt` (5 USDT). Estos numeros son lo que
+   * le cuesta al operador enviar por cada red; la diferencia entre 5 y el
+   * coste es margen de la casa. Se dejan para contabilidad y para elegir la
+   * red mas barata por defecto, no para cobrar.
    */
   networkFees: {
     polygon: { fee: 0, free: true },
@@ -122,7 +131,13 @@ export const WITHDRAWALS = {
     solana: { fee: 0.5, free: false },
   } as Record<string, { fee: number; free: boolean }>,
 
-  /** Red por defecto en la pantalla de retiro: la unica gratis. */
+  /**
+   * Red por defecto en la pantalla de retiro.
+   *
+   * Polygon tiene coste 0 para la casa, asi que maximiza el margen de los 5
+   * USDT. La UI puede recomendar TRC20 por compatibilidad, pero el fee es el
+   * mismo en todas.
+   */
   defaultNetwork: 'polygon',
 } as const;
 

@@ -32,6 +32,7 @@ const {
   usdtToCup,
 } = require('../dist/config/currency');
 const { usdtToUnits, unitsToUsdt, blindsFor } = require('../dist/config/units');
+const { calculateCommission } = require('../dist/config/monetization');
 
 let pass = 0;
 let fail = 0;
@@ -46,7 +47,7 @@ const section = (t) => console.log(`\n\x1b[1m${t}\x1b[0m`);
 console.log('\n\x1b[1mCubaPoker · Reglas de negocio\x1b[0m');
 
 // =========================================================================
-section('1. Escalera de campos: escalan en buy-in, todos de 300');
+section('1. Niveles de cash: escalan en buy-in; VIP Arena es una sala');
 
 {
   // La distincion que rompio una iteracion anterior:
@@ -55,11 +56,11 @@ section('1. Escalera de campos: escalan en buy-in, todos de 300');
   if (SEATS_PER_TABLE === 7) ok('mesa fisica 7-max');
   else bad(`SEATS_PER_TABLE=${SEATS_PER_TABLE}; el producto define 7-max`);
 
-  if (TABLE_TIER_LIST.length === 4) ok('hay 4 niveles de campo');
-  else bad(`esperaba 4 niveles, hay ${TABLE_TIER_LIST.length}`);
+  if (TABLE_TIER_LIST.length === 5) ok('hay 4 niveles de cash + VIP Arena');
+  else bad(`esperaba 5 niveles, hay ${TABLE_TIER_LIST.length}`);
 
-  const expectedBuys = [1, 5, 25, 100];
-  const expectedIds = ['t1', 't5', 't25', 't100'];
+  const expectedBuys = [1, 5, 25, 100, 10_000];
+  const expectedIds = ['t1', 't5', 't25', 't100', 'arena'];
 
   for (let i = 0; i < expectedBuys.length; i++) {
     const tier = TABLE_TIER_LIST[i];
@@ -354,7 +355,7 @@ section('5. Centrolls: la via de ingresos del freeroll');
 }
 
 // =========================================================================
-section('6. Retiros: minimo, maximo y red gratis');
+section('6. Retiros: minimo, maximo y comision fija');
 
 {
   if (WITHDRAWALS.min === 10) ok('minimo 10 USDT (1200 CUP), igual que CoinPoker');
@@ -363,25 +364,30 @@ section('6. Retiros: minimo, maximo y red gratis');
   if (WITHDRAWALS.maxPerTransaction === 25000) ok('maximo 25 000 USDT por transaccion');
   else bad(`maximo ${WITHDRAWALS.maxPerTransaction} USDT, CoinPoker usa 25 000`);
 
-  // La red por defecto tiene que ser la gratis.
-  const defaultFee = WITHDRAWALS.networkFees[WITHDRAWALS.defaultNetwork];
-  if (defaultFee && defaultFee.fee === 0) {
-    ok(`red por defecto: ${WITHDRAWALS.defaultNetwork} (fee 0, la unica gratis)`);
+  if (WITHDRAWALS.fixedFeeUsdt === 5) {
+    ok('comision fija de 5 USDT, como CoinPoker');
   } else {
-    bad(
-      `la red por defecto (${WITHDRAWALS.defaultNetwork}) tiene fee ` +
-      `${defaultFee?.fee}: el usuario paga por retirar`,
-    );
+    bad(`comision fija ${WITHDRAWALS.fixedFeeUsdt} USDT, CoinPoker usa 5`);
   }
 
-  // Las demas redes tienen que cobrar algo: no se puede assumir el coste de red.
-  const paidNetworks = Object.entries(WITHDRAWALS.networkFees).filter(
-    ([, f]) => !f.free,
-  );
-  if (paidNetworks.length > 0) {
-    ok(
-      `${paidNetworks.length} redes cobran comision: ` +
-      paidNetworks.map(([n, f]) => `${n} ${f.fee}`).join(', '),
+  // La comision es fija, no un porcentaje: 10 y 50 USDT pagan lo mismo.
+  const fee10 = calculateCommission(usdtToUnits(10), 'withdrawal', 'usdt');
+  const fee50 = calculateCommission(usdtToUnits(50), 'withdrawal', 'usdt');
+  if (fee10 === usdtToUnits(5) && fee50 === usdtToUnits(5)) {
+    ok('la comision no cambia con el monto: 10 y 50 USDT pagan 5 USDT');
+  } else {
+    bad(`comision variable: 10 -> ${unitsToUsdt(fee10)}, 50 -> ${unitsToUsdt(fee50)}`);
+  }
+
+  // El fee de red es solo coste interno; la red por defecto debe ser la mas
+  // barata para que el resto de los 5 USDT quede como margen de la casa.
+  const defaultCost = WITHDRAWALS.networkFees[WITHDRAWALS.defaultNetwork];
+  if (defaultCost && defaultCost.fee === 0) {
+    ok(`red por defecto: ${WITHDRAWALS.defaultNetwork} (coste 0 para la casa)`);
+  } else {
+    bad(
+      `la red por defecto (${WITHDRAWALS.defaultNetwork}) cuesta ` +
+      `${defaultCost?.fee}: se come parte de los 5 USDT`,
     );
   }
 

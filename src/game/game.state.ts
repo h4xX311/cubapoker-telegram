@@ -29,6 +29,8 @@ export interface GameState {
   deck: Card[];
   pot: number;
   currentBet: number;
+  /** Cuántas subidas hubo en preflop. Una 3-bet son dos subidas. */
+  preflopRaises?: number;
   currentPlayerIndex: number;
   dealerIndex: number;
   smallBlindIndex: number;
@@ -103,6 +105,7 @@ export class PokerGame {
       deck: [],
       pot: 0,
       currentBet: 0,
+      preflopRaises: 0,
       currentPlayerIndex: 0,
       dealerIndex: 0,
       smallBlindIndex: 0,
@@ -179,6 +182,7 @@ export class PokerGame {
     this.state.communityCards = [];
     this.state.pot = 0;
     this.state.currentBet = 0;
+    this.state.preflopRaises = 0;
 
     this.state.players.forEach(p => {
       p.bet = 0;
@@ -292,6 +296,9 @@ export class PokerGame {
         this.state.pot += raiseAmount;
         this.state.currentBet = totalBet;
         this.state.minRaise = amount;
+        if (this.state.phase === 'preflop') {
+          this.state.preflopRaises = (this.state.preflopRaises ?? 0) + 1;
+        }
         if (player.chips === 0) player.allIn = true;
         player.lastAction = 'raise';
         break;
@@ -299,6 +306,7 @@ export class PokerGame {
 
       case 'all_in': {
         const allInAmount = player.chips;
+        const eraSubida = player.bet + allInAmount > this.state.currentBet;
         player.bet += allInAmount;
         player.totalBet += allInAmount;
         this.state.pot += allInAmount;
@@ -307,6 +315,9 @@ export class PokerGame {
         player.lastAction = 'all_in';
         if (player.bet > this.state.currentBet) {
           this.state.currentBet = player.bet;
+        }
+        if (this.state.phase === 'preflop' && eraSubida) {
+          this.state.preflopRaises = (this.state.preflopRaises ?? 0) + 1;
         }
         break;
       }

@@ -160,8 +160,12 @@ export const api = {
   // Juego
   gameConfig: () => request<any>('/game/config'),
   listTables: () => request<{ tables: any[] }>('/game/list'),
-  sit: (params: { tableId?: string; tierId?: string; buyIn?: number }) =>
-    request<any>('/game/sit', { method: 'POST', body: params }),
+  sit: (params: {
+    tableId?: string;
+    tierId?: string;
+    formatId?: '7max' | '6max' | 'hu';
+    buyIn?: number;
+  }) => request<any>('/game/sit', { method: 'POST', body: params }),
   tableView: (tableId: string) => request<any>(`/game/view/${tableId}`),
   gameAction: (tableId: string, action: string, amount?: number) =>
     request<any>('/game/action', { method: 'POST', body: { tableId, action, amount } }),
@@ -205,6 +209,10 @@ export const api = {
   vipConfig: () => request<any>('/monetization/vip/config'),
   purchaseVip: (level: string) =>
     request<any>('/monetization/vip/purchase', { method: 'POST', body: { level } }),
+  claimVipRakeback: () =>
+    request<any>('/monetization/vip/rakeback/claim', { method: 'POST', body: {} }),
+  claimArenaProfitShare: () =>
+    request<any>('/monetization/vip/arena/claim', { method: 'POST', body: {} }),
   referrals: () => request<any>('/monetization/referrals'),
   achievements: () => request<any>('/monetization/achievements'),
   streaks: () => request<any>('/monetization/streaks'),

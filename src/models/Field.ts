@@ -297,12 +297,24 @@ export interface FieldTable {
 export interface FieldResult {
   /** Posicion final, 1-based. 1 = ganador del campo. */
   position: number;
+  /**
+   * Identificador del jugador humano. Para bots es 0: no tienen cuenta ni
+   * saldo, y nunca se les paga. El campo `isBot` es el que los distingue.
+   */
   telegramId: number;
   username?: string;
   /** Importe cobrado, en la moneda de la cuenta. */
   amount: number;
   /** Que mesa termino el jugador. */
   tableId?: string;
+  /**
+   * Identidad estable dentro del campo. Para humanos es el telegramId en
+   * texto; para bots, el id del perfil. Sirve para no adjudicar dos veces la
+   * misma posicion cuando `telegramId` vale 0 en todos los bots.
+   */
+  playerId?: string;
+  /** true si la posicion la ocupa un bot de relleno. Nunca se paga. */
+  isBot?: boolean;
 }
 
 const fieldTableSchema = new Schema<FieldTable>(
@@ -323,6 +335,8 @@ const fieldResultSchema = new Schema<FieldResult>(
     username: String,
     amount: { type: Number, required: true },
     tableId: String,
+    playerId: String,
+    isBot: { type: Boolean, default: false },
   },
   { _id: false },
 );

@@ -4,8 +4,9 @@ import { unitsToUsdt, formatUnits } from '../config/units';
 import { User } from '../models/User';
 import { PokerGame } from './game.state';
 import { botFactory, BotProfile, decideAction, mulberry32 } from './bot.engine';
-import { TABLE_TIERS, TABLE_TIER_LIST, BOT_CONFIG, RAKE, TURN_TIMER, getTier } from '../config/product';
+import { TABLE_TIERS, TABLE_TIER_LIST, BOT_CONFIG, RAKE, TURN_TIMER, getTier, rakeCapFor } from '../config/product';
 import { markShuttingDown, shutdownFieldManager } from './field.manager';
+import { rakebackService } from '../services/rakeback.service';
 import { logger } from '../utils/logger';
 
 /**
@@ -1454,11 +1455,31 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
     }
 
     // --- Rake ---
+    //
+    // Regla de CoinPoker: en cash solo se cobra rake si hubo flop o si hubo
+    // una 3-bet preflop. Una mano que se resuelve preflop con un raise normal
+    // no paga. El tope depende de la sala y de cuántos jugadores recibieron
+    // cartas; el tope global de 100 unidades era el de la micro y convertía
+    // las mesas altas en mesas sin rake.
     let rake = 0;
-    if (table.kind === 'cash' && state.pot >= RAKE.minPot) {
+    const jugadoresConCartas = state.players.filter(p => p.cards.length > 0).length;
+    const huboPostflop = state.communityCards.length > 0;
+    const hubo3Bet = (state.preflopRaises ?? 0) >= 2;
+    // Las mesas de un campo (torneo, freeroll, centroll) no son cash ring: su
+    // economía ya está definida por el campo. La regla de "flop o 3-bet" es
+    // solo para ring tables.
+    const esRing = !this.isFieldTable(table);
+
+    if (
+      table.kind === 'cash' &&
+      state.pot >= RAKE.minPot &&
+      (!esRing || huboPostflop || hubo3Bet)
+    ) {
       rake = Math.min(
         Math.floor((state.pot * RAKE.cashPercentage) / 100),
-        RAKE.cashMax,
+        esRing
+          ? rakeCapFor(table.tierId, jugadoresConCartas)
+          : RAKE.cashMax,
       );
       table.stats.rakeCollected += rake;
 
@@ -1471,6 +1492,11 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
           { $inc: { rakeCollected: rake } },
         );
       }
+
+      // El rake por jugador se anota aqui, mientras `seat.totalBet` todavia
+      // tiene lo que cada uno aporto a la mano. Despues del reparto se reinicia
+      // y el rakeback saldria siempre cero.
+      await rakebackService.recordTableRake(table, rake);
     }
 
     const netPot = state.pot - rake;

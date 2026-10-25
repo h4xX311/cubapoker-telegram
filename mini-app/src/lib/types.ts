@@ -84,6 +84,18 @@ export interface CashTier {
   blinds: { small: number; big: number };
   /** Stack de referencia en ciegas grandes. */
   stackInBigBlinds: number;
+  /** VIP Arena es una sala de cash, no una membresía. */
+  vipArena?: boolean;
+  /** Profit share semanal de la sala, en porcentaje del rake. */
+  arenaProfitSharePercent?: number;
+}
+
+/** Formato de mesa cash disponible en una sala. */
+export interface CashFormat {
+  id: '7max' | '6max' | 'hu';
+  label: string;
+  shortLabel: string;
+  maxSeats: number;
 }
 
 /** Un freeroll en el lobby (abierto o en juego). */
@@ -127,6 +139,8 @@ export interface WithdrawalLimits {
   min: number;
   maxPerTransaction: number;
   monthlyWinCap: number;
+  /** Comision fija por retiro, en USDT. */
+  fixedFee: number;
   defaultNetwork: string;
   networkFees: Record<string, { fee: number; free: boolean }>;
 }
@@ -134,6 +148,7 @@ export interface WithdrawalLimits {
 export interface ProductConfig {
   seatsPerTable: number;
   cashTiers: CashTier[];
+  cashFormats: CashFormat[];
   prizeDisclosure: string;
   freerollTiers: readonly number[];
   freerollTargetField: number;
@@ -153,6 +168,8 @@ export interface TableSummary {
   tableId: string;
   kind: 'cash' | 'freeroll' | 'centroll';
   tierId?: string;
+  /** Formato cash: 7max, 6max o hu. */
+  formatId?: string;
   status: string;
   /** Ciegas en USDT. */
   smallBlind: number;

@@ -21,7 +21,7 @@ export type TableKind = 'cash' | 'freeroll' | 'centroll';
  * de los campos que ya esten guardados. Si hay datos en produccion hay que
  * hacer una migracion de ids, no solo cambiar la constante.
  */
-export type TableTierId = 't1' | 't5' | 't25' | 't100';
+export type TableTierId = 't1' | 't5' | 't25' | 't100' | 'arena';
 
 /**
  * Asientos por mesa fisica.
@@ -44,6 +44,57 @@ export type TableTierId = 't1' | 't5' | 't25' | 't100';
  * obligado a repartir 23 por tanda para disimularlo.
  */
 export const SEATS_PER_TABLE = 7;
+
+/**
+ * FORMATOS DE MESA CASH
+ * =====================
+ *
+ * El motor solo juega No-Limit Hold'em. Dentro de Hold'em si se pueden ofrecer
+ * los formatos que un lobby real muestra en cada sala:
+ *
+ *   7-max  mesa llena, el formato clasico
+ *   6-max  mas accion por jugador
+ *   HU     Heads-Up, dos jugadores
+ *
+ * No se anuncian PLO, PLO5, PLO6 ni Short Deck: exigirian un evaluador de
+ * Omaha, una baraja de 36 cartas y un ranking distinto. Ponerlos en el lobby
+ * sin motor seria vender una mesa que no existe.
+ */
+export type CashFormatId = '7max' | '6max' | 'hu';
+
+export interface CashFormat {
+  id: CashFormatId;
+  label: string;
+  shortLabel: string;
+  maxSeats: number;
+}
+
+export const CASH_FORMATS: Record<CashFormatId, CashFormat> = {
+  '7max': {
+    id: '7max',
+    label: '7-max',
+    shortLabel: '7-MAX',
+    maxSeats: SEATS_PER_TABLE,
+  },
+  '6max': {
+    id: '6max',
+    label: '6-max',
+    shortLabel: '6-MAX',
+    maxSeats: 6,
+  },
+  hu: {
+    id: 'hu',
+    label: 'Heads-Up',
+    shortLabel: 'HU',
+    maxSeats: 2,
+  },
+};
+
+export const CASH_FORMAT_LIST: CashFormat[] = [
+  CASH_FORMATS['7max'],
+  CASH_FORMATS['6max'],
+  CASH_FORMATS.hu,
+];
 
 /**
  * Reparto del bote del campo entre los primeros puestos, en porcentajes.
@@ -137,17 +188,18 @@ export const PAID_POSITIONS = FIELD_PAYOUT.length;
  * Campos cash en USDT.
  *
  * ------------------------------------------------------------------
- * LOS CUATRO NIVELES ESCALAN EN BUY-IN
+ * LOS NIVELES ESCALAN EN BUY-IN
  *
  * El cash es una ring table 7-max: el jugador entra con un buy-in, juega las
  * manos que quiera y se levanta con sus fichas. Los niveles cambian el tamano
  * de la apuesta, no el numero de participantes.
  *
- *   nivel      buy-in    ciegas (USDT)     stack
- *   micro      1 USDT    0,005 / 0,01      100 BB
- *   bajo       5 USDT    0,025 / 0,05      100 BB
- *   medio     25 USDT    0,125 / 0,25      100 BB
- *   alto     100 USDT    0,50 / 1,00       100 BB
+ *   nivel       buy-in       ciegas (USDT)     stack
+ *   micro       1 USDT       0,005 / 0,01      100 BB
+ *   bajo        5 USDT       0,025 / 0,05      100 BB
+ *   medio      25 USDT       0,125 / 0,25      100 BB
+ *   alto      100 USDT       0,50 / 1,00       100 BB
+ *   VIP Arena 10.000 USDT   50 / 100          100 BB
  *
  * `fieldSize` se conserva para los campos multi-mesa de torneo (freeroll,
  * centroll), que no son cash. El lobby de cash ya no lo muestra.
@@ -158,7 +210,7 @@ export const PAID_POSITIONS = FIELD_PAYOUT.length;
 export interface TableTier {
   id: TableTierId;
   /**
-   * Participantes del campo (multi-mesa), 300 en los cuatro niveles.
+   * Participantes del campo (multi-mesa), 300 en todos los niveles.
    * Solo lo usan los campos de torneo; una ring table cash no tiene fieldSize.
    */
   fieldSize: number;
@@ -188,7 +240,56 @@ export interface TableTier {
 
   /** Stack de referencia en ciegas grandes, para mostrarlo en la UI. */
   stackInBigBlinds: number;
+
+  /**
+   * Sala VIP Arena. No es una membresía: es una mesa de cash premium.
+   *
+   * La UI la pinta distinta y el motor de rake marca sus manos para pagar el
+   * profit share semanal. No se compra acceso: se juega con el buy-in.
+   */
+  vipArena?: boolean;
+
+  /** Porcentaje del rake de esta sala que se devuelve como profit share. */
+  arenaProfitSharePercent?: number;
+
+  /**
+   * Tope de rake por mano, en unidades internas, según cuántos jugadores
+   * recibieron cartas. Es el esquema de CoinPoker: el tope sube con el número
+   * de jugadores porque el bote puede ser mayor.
+   *
+   * Sin esto, el tope global de 100 unidades (0,10 USDT) hacía que una mesa de
+   * 50/100 USDT pagara el mismo rake máximo que la micro. La sala VIP Arena
+   * habría sido decorativa.
+   */
+  rakeCaps?: {
+    headsUp: number;
+    threeToFour: number;
+    fivePlus: number;
+  };
 }
+
+/**
+ * VIP ARENA
+ * =========
+ *
+ * En CoinPoker, VIP Arena es una SALA de cash de high stakes, no un plan que se
+ * compra. Los jugadores reciben un profit share semanal por el rake que
+ * generan. Se puede sumar al 3-Bet Club: no son el mismo producto.
+ *
+ * Ciegas 50/100 USDT y buy-in de 10.000 USDT = 100 BB. Es el escalón de
+ * entrada de la sala real. Para un jugador nuevo es inalcanzable, y está bien:
+ * la sala se muestra como objetivo, no se le vende una membresía falsa.
+ */
+export const VIP_ARENA = {
+  id: 'arena' as const,
+  label: 'VIP Arena',
+  buyInUsdt: 10_000,
+  blinds: { small: 50, big: 100 },
+  profitSharePercent: 15,
+  description:
+    'Mesa premium de high stakes. Los jugadores reciben un 15 % del rake ' +
+    'que generan, pagado cada lunes. No es una membresía: se entra con el buy-in.',
+} as const;
 
 /**
  * Construye un tier.
@@ -219,12 +320,59 @@ const tier = (
   description: `Ring table 7-max · buy-in ${buyInUsdt} USDT`,
 });
 
+/**
+ * Topes de rake por mano, en unidades internas.
+ *
+ * Se toman de la tabla pública de CoinPoker. Para las ciegas que no aparecen
+ * exactamente se usa el escalón inmediatamente inferior, que es el conservador
+ * para el jugador. En la micro se escala a la mitad del escalón 0,01/0,02.
+ *
+ * Los topes son por mano y dependen de cuántos jugadores recibieron cartas:
+ * heads-up, 3-4 y 5+.
+ */
+const capsUsdt = (
+  headsUp: number,
+  threeToFour: number,
+  fivePlus: number,
+): NonNullable<TableTier['rakeCaps']> => ({
+  headsUp: usdtToUnits(headsUp),
+  threeToFour: usdtToUnits(threeToFour),
+  fivePlus: usdtToUnits(fivePlus),
+});
+
 export const TABLE_TIERS: Record<TableTierId, TableTier> = {
   // Micro: 1000 unidades con ciega grande de 10 -> 100 BB de stack.
-  t1: tier('t1', 'Micro', 1),
-  t5: tier('t5', 'Bajo', 5),
-  t25: tier('t25', 'Medio', 25),
-  t100: tier('t100', 'Alto', 100),
+  t1: {
+    ...tier('t1', 'Micro', 1),
+    rakeCaps: capsUsdt(0.025, 0.06, 0.10),
+  },
+  t5: {
+    ...tier('t5', 'Bajo', 5),
+    // Ciegas 0,025/0,05: se usa el escalón 0,02/0,05.
+    rakeCaps: capsUsdt(0.13, 0.30, 0.50),
+  },
+  t25: {
+    ...tier('t25', 'Medio', 25),
+    // Ciegas 0,125/0,25: se usa el escalón 0,10/0,25.
+    rakeCaps: capsUsdt(0.50, 1.20, 2.00),
+  },
+  t100: {
+    ...tier('t100', 'Alto', 100),
+    // Ciegas 0,50/1,00.
+    rakeCaps: capsUsdt(1.25, 3.00, 5.00),
+  },
+
+  // VIP Arena: ciegas 50/100 USDT, buy-in 10.000 USDT (100 BB). No se compra
+  // una membresía para entrar; se entra con el buy-in y se cobra profit share
+  // por el rake generado.
+  arena: {
+    ...tier('arena', 'VIP Arena', VIP_ARENA.buyInUsdt),
+    vipArena: true,
+    arenaProfitSharePercent: VIP_ARENA.profitSharePercent,
+    // Escalón 50/100+ de CoinPoker: 0,50 / 0,60 / 0,60 BB.
+    rakeCaps: capsUsdt(50, 60, 60),
+    description: VIP_ARENA.description,
+  },
 };
 
 export const TABLE_TIER_LIST: TableTier[] = [
@@ -232,6 +380,7 @@ export const TABLE_TIER_LIST: TableTier[] = [
   TABLE_TIERS.t5,
   TABLE_TIERS.t25,
   TABLE_TIERS.t100,
+  TABLE_TIERS.arena,
 ];
 
 /**
@@ -351,6 +500,16 @@ export const CENTROLL = {
   /** Techo duro. Mas bajo que el del freeroll: son mucho mas frecuentes. */
   maxField: 300,
 
+  /**
+   * Jugadores minimos por mesa para arrancar.
+   *
+   * Un centroll no puede esperar a juntar 100 humanos: con un solo jugador se
+   * queda abierto para siempre. Cada mesa que tenga al menos un humano se
+   * completa con bots hasta este minimo y arranca. Los bots no pagan buy-in;
+   * si ganan una posicion, su premio se queda en la casa (ver `settleField`).
+   */
+  minPlayersPerTable: 2,
+
   /** Cuantas veces se puede reentrar por 0,01 USDT, como CoinPoker. */
   maxRebuys: 5,
 } as const;
@@ -468,7 +627,11 @@ export const BOT_CONFIG = {
 
 /**
  * Rake por tipo de mesa.
- * El freeroll no aplica rake: es el coste de adquisicion.
+ *
+ * `cashMax` es solo el tope de seguridad heredado para un tier sin topes
+ * configurados. Las ring tables usan `rakeCapFor()`, que aplica el tope de
+ * CoinPoker según la sala y los jugadores. El freeroll no aplica rake: es el
+ * coste de adquisición.
  */
 export const RAKE = {
   cashPercentage: 5,
@@ -485,3 +648,19 @@ export const TURN_TIMER = {
 } as const;
 
 export const getTier = (id: string): TableTier | undefined => TABLE_TIERS[id as TableTierId];
+
+/**
+ * Tope de rake de una mano según la sala y cuántos jugadores recibieron
+ * cartas. `RAKE.cashMax` queda solo como red de seguridad para datos viejos o
+ * un tier sin topes configurados.
+ */
+export const rakeCapFor = (
+  tierId: string | undefined,
+  players: number,
+): number => {
+  const caps = getTier(tierId ?? '')?.rakeCaps;
+  if (!caps) return RAKE.cashMax;
+  if (players <= 2) return caps.headsUp;
+  if (players <= 4) return caps.threeToFour;
+  return caps.fivePlus;
+};

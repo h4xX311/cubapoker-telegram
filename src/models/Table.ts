@@ -77,6 +77,11 @@ export interface ITable extends Document {
   kind: 'cash' | 'freeroll' | 'centroll';
   /** Solo en mesas cash */
   tierId?: string;
+  /**
+   * Formato de la mesa cash: '7max', '6max' o 'hu'. Las mesas antiguas sin
+   * este campo se tratan como 7-max.
+   */
+  formatId?: string;
   /** Solo en freeroll */
   prizeTier?: number;
 
@@ -197,6 +202,8 @@ const tableSchema = new Schema<ITable>({
   // jugador. Se veia como "Table validation failed", no como un problema de enum.
   kind: { type: String, enum: ['cash', 'freeroll', 'centroll'], required: true, index: true },
   tierId: String,
+  // Formato cash: 7max, 6max o hu. Ausente en mesas antiguas = 7max.
+  formatId: String,
   prizeTier: Number,
 
   status: {
@@ -262,6 +269,7 @@ export const toPublicTable = (table: ITable, viewerSeat?: number) => {
     tableId: table.tableId,
     kind: table.kind,
     tierId: table.tierId,
+    formatId: table.formatId ?? '7max',
     prizeTier: table.prizeTier,
 
     status: table.status,

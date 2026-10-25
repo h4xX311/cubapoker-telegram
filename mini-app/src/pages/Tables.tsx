@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { api, ApiError } from '../lib/api';
-import type { CashTier, TableSummary } from '../lib/types';
+import type { CashFormat, CashTier, TableSummary } from '../lib/types';
 import { PageHeader, SectionLabel } from '../components/Layout';
 import { fmtUsdt, fmtStake } from '../components/Balance';
 
@@ -32,8 +32,8 @@ export function Tables({
   onPlay,
 }: Props) {
   const [tiers, setTiers] = useState<CashTier[]>([]);
+  const [formats, setFormats] = useState<CashFormat[]>([]);
   const [tables, setTables] = useState<TableSummary[]>([]);
-  const [seatsPerTable, setSeatsPerTable] = useState(7);
   const [unlockRatio, setUnlockRatio] = useState('1:10');
   const [miMesa, setMiMesa] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -49,7 +49,11 @@ export function Tables({
       ]);
 
       setTiers(cfg?.cashTiers ?? []);
-      if (cfg?.seatsPerTable) setSeatsPerTable(cfg.seatsPerTable);
+      setFormats(
+        cfg?.cashFormats ?? [
+          { id: '7max', label: '7-max', shortLabel: '7-MAX', maxSeats: 7 },
+        ],
+      );
       if (cfg?.unlock?.ratioLabel) setUnlockRatio(cfg.unlock.ratioLabel);
 
       // Solo mesas sueltas. Las mesas que pertenecen a un campo multi-mesa
@@ -71,8 +75,13 @@ export function Tables({
     return () => clearInterval(timer);
   }, []);
 
-  const entrar = async (destino: { tierId?: string; tableId?: string }) => {
-    const clave = destino.tableId ?? destino.tierId ?? '';
+  const entrar = async (destino: {
+    tierId?: string;
+    tableId?: string;
+    formatId?: '7max' | '6max' | 'hu';
+  }) => {
+    const clave =
+      destino.tableId ?? `${destino.tierId ?? ''}-${destino.formatId ?? ''}`;
     setBusy(clave);
     setError('');
 
@@ -189,26 +198,52 @@ export function Tables({
           <div className="space-y-3 mb-6">
             {tiers.map((tier, i) => {
               const canAfford = balance >= tier.buyIn;
-              const sentando = busy === tier.id;
+              // VIP Arena no es una membresía: es una sala de cash de high
+              // stakes. Se pinta distinta y se explica el profit share, pero
+              // se entra con el buy-in como en cualquier otra mesa.
+              const arena = Boolean(tier.vipArena);
 
               return (
                 <article
                   key={tier.id}
                   className="card animate-slideUp"
-                  style={{ animationDelay: `${i * 40}ms` }}
+                  style={{
+                    animationDelay: `${i * 40}ms`,
+                    ...(arena
+                      ? {
+                          borderColor: 'rgba(255, 215, 0, 0.55)',
+                          background:
+                            'linear-gradient(135deg, #1c1730 0%, #16131f 100%)',
+                        }
+                      : {}),
+                  }}
                 >
                   <header className="flex items-start justify-between mb-3 gap-3">
                     <div className="min-w-0">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <h3 className="font-bold text-white">{tier.label}</h3>
-                        <span className="badge badge-success">
-                          {seatsPerTable}-max
-                        </span>
+                        {arena ? (
+                          <span className="text-[9px] font-bold text-[#ffd700] bg-[#ffd700]/10 border border-[#ffd700]/30 rounded-full px-2 py-0.5">
+                            {tier.arenaProfitSharePercent ?? 15}% profit share
+                          </span>
+                        ) : (
+                          <span className="badge badge-success">
+                            {formats.length} formatos
+                          </span>
+                        )}
                       </div>
                       <p className="text-xs text-[#a0a0b0] mt-1">
                         Ciegas {fmtStake(tier.blinds.small)}/
                         {fmtStake(tier.blinds.big)} · {tier.stackInBigBlinds} BB
                       </p>
+                      {arena && (
+                        <p className="text-[10px] text-[#ffd700]/80 mt-1 leading-relaxed">
+                          Sala premium. No se compra acceso: entras con el
+                          buy-in y cobras cada lunes el{' '}
+                          {tier.arenaProfitSharePercent ?? 15}% del rake que
+                          generes aquí.
+                        </p>
+                      )}
                     </div>
 
                     <div className="text-right shrink-0">
@@ -222,19 +257,74 @@ export function Tables({
                     </div>
                   </header>
 
-                  <button
-                    onClick={() => entrar({ tierId: tier.id })}
-                    disabled={sentando || (!miMesa && !canAfford)}
-                    className="w-full btn btn-primary py-2.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {sentando
-                      ? 'Sentando…'
-                      : miMesa
-                      ? 'Volver a mi mesa'
-                      : !canAfford
-                      ? `Te faltan ${fmtUsdt(tier.buyIn - balance)} USDT`
-                      : `Jugar ahora · ${fmtUsdt(tier.buyIn)} USDT`}
-                  </button>
+                  {/* Cada sala ofrece los tres formatos del motor actual.
+                      El buy-in y las ciegas son los mismos; solo cambia
+                      cuanta gente se sienta en la mesa. */}
+                  <div className="grid grid-cols-3 gap-2">
+                    {formats.map((formato) => {
+                      const mesa = tables.find(
+                        (t) =>
+                          t.tierId === tier.id &&
+                          t.formatId === formato.id &&
+                          t.occupied < t.maxSeats,
+                      );
+                      const llena = tables.some(
+                        (t) =>
+                          t.tierId === tier.id &&
+                          t.formatId === formato.id &&
+                          t.occupied >= t.maxSeats,
+                      ) && !mesa;
+                      const clave = mesa?.tableId ?? `${tier.id}-${formato.id}`;
+                      const sentandoAqui = busy === clave;
+                      const sinSaldo = !miMesa && !canAfford;
+
+                      return (
+                        <button
+                          key={formato.id}
+                          onClick={() =>
+                            entrar(
+                              mesa
+                                ? { tableId: mesa.tableId }
+                                : { tierId: tier.id, formatId: formato.id },
+                            )
+                          }
+                          disabled={sentandoAqui || sinSaldo || llena}
+                          className="rounded-xl px-2 py-2 text-left transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          style={{
+                            background: '#151525',
+                            border: `1px solid ${
+                              mesa ? '#2f6b4f' : '#2a2a4a'
+                            }`,
+                          }}
+                        >
+                          <p className="text-xs font-bold text-white">
+                            {formato.shortLabel}
+                          </p>
+                          <p className="text-[9px] text-[#a0a0b0] mt-0.5">
+                            {sentandoAqui
+                              ? 'Sentando…'
+                              : llena
+                              ? 'Llena'
+                              : mesa
+                              ? `${mesa.occupied}/${mesa.maxSeats} jugadores`
+                              : `${formato.maxSeats} asientos`}
+                          </p>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <p className="text-[10px] text-[#a0a0b0] mt-2">
+                    Buy-in {fmtUsdt(tier.buyIn)} USDT · mismos blinds en los
+                    tres formatos
+                  </p>
+
+                  {!canAfford && !miMesa && (
+                    <p className="text-[10px] text-[#ff8a94] mt-1">
+                      Te faltan {fmtUsdt(tier.buyIn - balance)} USDT para este
+                      nivel
+                    </p>
+                  )}
                 </article>
               );
             })}
@@ -248,6 +338,9 @@ export function Tables({
                 {tables.map((t) => {
                   const label =
                     tiers.find((tier) => tier.id === t.tierId)?.label ?? 'Cash';
+                  const formato =
+                    formats.find((f) => f.id === t.formatId)?.shortLabel ??
+                    `${t.maxSeats}-MAX`;
                   const sentando = busy === t.tableId;
                   const llena = t.occupied >= t.maxSeats;
 
@@ -267,7 +360,7 @@ export function Tables({
                         />
                         <div className="min-w-0">
                           <p className="text-sm font-semibold text-white truncate">
-                            {label} · {fmtStake(t.smallBlind)}/
+                            {label} · {formato} · {fmtStake(t.smallBlind)}/
                             {fmtStake(t.bigBlind)}
                           </p>
                           <p className="text-[10px] text-[#a0a0b0]">
@@ -295,9 +388,9 @@ export function Tables({
           <div className="card">
             <p className="text-xs text-[#a0a0b0] leading-relaxed">
               <span className="text-white font-semibold">Cómo funciona:</span> cada
-              mesa es {seatsPerTable}-max. Entras con el buy-in, juegas con tus
-              fichas y, cuando te levantas, vuelven a tu saldo. El saldo de
-              promoción se desbloquea {unlockRatio} al usarlo.
+              sala tiene 7-max, 6-max y Heads-Up. Entras con el buy-in, juegas
+              con tus fichas y, cuando te levantas, vuelven a tu saldo. El saldo
+              de promoción se desbloquea {unlockRatio} al usarlo.
             </p>
           </div>
         </>
