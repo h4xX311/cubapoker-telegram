@@ -8,6 +8,7 @@
  *   - VIP Arena no se puede comprar.
  *   - El rake de una mano se atribuye a los humanos según lo que aportaron.
  *   - El rakeback de la semana cerrada es el 10% y se paga una sola vez.
+ *   - Un pago failed se reintenta sin duplicar el saldo si ya estaba acreditado.
  *   - Una membresía vencida esta semana todavía cobra la semana pasada.
  *   - Renovar suma días al final, no reinicia el periodo.
  *
@@ -378,6 +379,122 @@ const saldo = async (id) =>
   const sinVip = await rakebackService.getStatus(ID_SIN_VIP, ahora);
   check('no está activa', sinVip.active === false);
   check('no hay rakeback cobrable', sinVip.claimableUnits === 0);
+
+  console.log('\n=== 9. Reintento seguro de un pago failed ===\n');
+  const ID_FALLO = 880006;
+  const ID_YA_COBRADO = 880007;
+  const ID_PAGO_CONCURRENTE = 880008;
+
+  const prepararPagoFallido = async (id, saldoInicial, creditos = []) => {
+    await crearUsuario(id, saldoInicial);
+    if (creditos.length > 0) {
+      await User.updateOne(
+        { telegramId: id },
+        { $set: { payoutCredits: creditos } },
+      );
+    }
+    await VIP.create({
+      telegramId: id,
+      level: 'basic',
+      startDate: new Date(inicioPrevia.getTime() - 86_400_000),
+      endDate: new Date(ahora.getTime() + 10 * 86_400_000),
+      rakebackPercent: 10,
+      rakeDiscount: 0,
+    });
+    await RakeEvent.create({
+      telegramId: id,
+      tableId: `cash-fallo-${id}`,
+      handNumber: 1,
+      amount: 5_000,
+      at: new Date(inicioPrevia.getTime() + 10_000_000),
+    });
+    await RakebackPayout.create({
+      telegramId: id,
+      weekKey: clave,
+      level: 'basic',
+      rakeUnits: 5_000,
+      amountUnits: 500,
+      creditKey: `vip_rakeback:${clave}`,
+      status: 'failed',
+      error: 'fallo simulado antes de acreditar',
+    });
+  };
+
+  // Fallo antes de acreditar: el reintento debe pagar una vez.
+  await prepararPagoFallido(ID_FALLO, 0);
+  const pagoFallido = await rakebackService.payWeeklyRakeback(ID_FALLO, ahora);
+  check(
+    'un failed sin crédito se reintenta y paga 500',
+    pagoFallido.paid === 500,
+    `pagó=${pagoFallido.paid}`,
+  );
+  check(
+    'el saldo sube exactamente 500, no 1.000',
+    (await saldo(ID_FALLO)) === 500,
+    `saldo=${await saldo(ID_FALLO)}`,
+  );
+  const registroFallido = await RakebackPayout.findOne({
+    telegramId: ID_FALLO,
+    weekKey: clave,
+  });
+  check('el registro queda paid', registroFallido?.status === 'paid');
+
+  // Fallo después de acreditar: la clave ya está en el jugador. El reintento
+  // no puede sumar el dinero otra vez; solo regulariza el registro.
+  const claveCredito = `vip_rakeback:${clave}`;
+  await prepararPagoFallido(ID_YA_COBRADO, 500, [
+    { key: claveCredito, amount: 500, at: new Date() },
+  ]);
+  const pagoYaCobrado = await rakebackService.payWeeklyRakeback(
+    ID_YA_COBRADO,
+    ahora,
+  );
+  check(
+    'un failed ya acreditado paga 0, no otros 500',
+    pagoYaCobrado.paid === 0 && pagoYaCobrado.reason === 'ya acreditado',
+    `pagó=${pagoYaCobrado.paid} motivo=${pagoYaCobrado.reason}`,
+  );
+  check(
+    'el saldo sigue en 500',
+    (await saldo(ID_YA_COBRADO)) === 500,
+    `saldo=${await saldo(ID_YA_COBRADO)}`,
+  );
+  const usuarioYaCobrado = await User.findOne({ telegramId: ID_YA_COBRADO });
+  check(
+    'queda una sola marca de crédito para la semana',
+    usuarioYaCobrado.payoutCredits.filter((c) => c.key === claveCredito).length === 1,
+  );
+  check(
+    'el registro ya cobrado también queda paid',
+    (await RakebackPayout.findOne({
+      telegramId: ID_YA_COBRADO,
+      weekKey: clave,
+    }))?.status === 'paid',
+  );
+
+  // Dos reintentos a la vez: el crédito es atómico, así que solo uno suma.
+  await prepararPagoFallido(ID_PAGO_CONCURRENTE, 0);
+  const [concurrente1, concurrente2] = await Promise.all([
+    rakebackService.payWeeklyRakeback(ID_PAGO_CONCURRENTE, ahora),
+    rakebackService.payWeeklyRakeback(ID_PAGO_CONCURRENTE, ahora),
+  ]);
+  check(
+    'dos reintentos simultáneos suman 500 en total',
+    concurrente1.paid + concurrente2.paid === 500,
+    `pagos=${concurrente1.paid}+${concurrente2.paid}`,
+  );
+  check(
+    'el saldo final es 500, no 1.000',
+    (await saldo(ID_PAGO_CONCURRENTE)) === 500,
+    `saldo=${await saldo(ID_PAGO_CONCURRENTE)}`,
+  );
+  const usuarioConcurrente = await User.findOne({
+    telegramId: ID_PAGO_CONCURRENTE,
+  });
+  check(
+    'queda una sola marca de crédito en el reintento concurrente',
+    usuarioConcurrente.payoutCredits.filter((c) => c.key === claveCredito).length === 1,
+  );
 
   console.log(`\n${'='.repeat(56)}`);
   console.log(`Resultado: ${ok} correctos, ${fail} fallidos`);

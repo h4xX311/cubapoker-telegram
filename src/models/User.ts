@@ -74,6 +74,25 @@ export interface IUser extends Document {
   /** Estado del juego en curso, para reconectar tras cerrar la app */
   activeTableId?: string;
 
+  /**
+   * Créditos de payouts ya aplicados, por clave idempotente.
+   *
+   * Vive en el mismo documento que `balance.real` a propósito. El pago de
+   * rakeback o de Arena tiene que hacer dos cosas a la vez: subir el saldo y
+   * registrar que esa semana ya se pagó. Si fueran dos documentos distintos,
+   * un corte entre las dos escrituras dejaría un pago a medias y el reintento
+   * no podría saber si el dinero entró. Un único `findOneAndUpdate` con
+   * `$inc` y `$push` es atómico: o se aplican los dos, o ninguno.
+   *
+   * La clave incluye el programa y la semana (`vip_rakeback:2026-10-12`). Así
+   * el 3-Bet Club y VIP Arena pueden pagar la misma semana sin pisarse.
+   */
+  payoutCredits: Array<{
+    key: string;
+    amount: number;
+    at: Date;
+  }>;
+
   createdAt: Date;
   updatedAt: Date;
 }
@@ -104,6 +123,22 @@ const userSchema = new Schema<IUser>({
   },
 
   activeTableId: { type: String, default: null },
+
+  // Ver el comentario de `payoutCredits` en la interfaz. `_id: false` porque
+  // no es una colección de entidades: es un conjunto de claves idempotentes.
+  payoutCredits: {
+    type: [
+      new Schema(
+        {
+          key: { type: String, required: true },
+          amount: { type: Number, required: true, min: 0 },
+          at: { type: Date, required: true, default: Date.now },
+        },
+        { _id: false },
+      ),
+    ],
+    default: [],
+  },
 }, { timestamps: true });
 
 /** Saldo total disponible para jugar (real + play). */

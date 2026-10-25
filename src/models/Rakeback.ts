@@ -58,10 +58,15 @@ export const RakeEvent = mongoose.model<IRakeEvent>('RakeEvent', rakeEventSchema
  * único es lo que impide pagar dos veces la misma semana, incluso con dos
  * procesos o dos clics simultáneos.
  *
- * El registro se crea en `pending` ANTES de acreditar. Si el proceso muere
- * entre las dos operaciones, el pago queda pendiente y no se reintenta solo:
- * es preferible deberle una semana a un VIP que pagarle dos veces. Un operador
- * puede revisarlo y reintentarlo a mano.
+ * El registro se crea en `pending` ANTES de acreditar. El crédito en sí es
+ * idempotente: `User.payoutCredits` guarda la clave de la semana en el mismo
+ * `findOneAndUpdate` que sube el saldo. Por eso un pago `pending` o `failed`
+ * se puede reintentar sin miedo a pagar dos veces; si el dinero ya entró, el
+ * segundo intento lo detecta y solo marca el registro como `paid`.
+ *
+ * `creditKey` se añadió después de los primeros pagos. Los registros viejos
+ * que no lo tengan no se reintentan automáticamente: sin la clave no hay forma
+ * de demostrar que el crédito no se aplicó antes de morir el proceso.
  */
 export interface IRakebackPayout extends Document {
   telegramId: number;
@@ -71,6 +76,8 @@ export interface IRakebackPayout extends Document {
   rakeUnits: number;
   /** Lo que se le paga, en unidades. */
   amountUnits: number;
+  /** Clave idempotente del crédito (`vip_rakeback:YYYY-MM-DD`). */
+  creditKey?: string;
   status: 'pending' | 'paid' | 'failed';
   paidAt?: Date;
   error?: string;
@@ -84,6 +91,7 @@ const rakebackPayoutSchema = new Schema<IRakebackPayout>({
   level: { type: String, required: true },
   rakeUnits: { type: Number, required: true, min: 0 },
   amountUnits: { type: Number, required: true, min: 0 },
+  creditKey: String,
   status: {
     type: String,
     enum: ['pending', 'paid', 'failed'],
@@ -113,8 +121,10 @@ export const RakebackPayout = mongoose.model<IRakebackPayout>(
  * por el rake generado en esa sala. Por eso no se reutiliza `RakebackPayout`:
  * su índice único es por jugador y semana, y bloquearía el segundo pago.
  *
- * Se crea `pending` antes de acreditar y no se reintenta solo. La misma regla
- * que el rakeback: una deuda visible es mejor que un pago doble.
+ * Se crea `pending` antes de acreditar. Igual que el rakeback, el crédito usa
+ * una clave idempotente en `User.payoutCredits` y se puede reintentar sin
+ * pagar dos veces. El prefijo de la clave (`arena_profit_share:`) es distinto
+ * del de 3-Bet para que ambos programas paguen la misma semana.
  */
 export interface IArenaPayout extends Document {
   telegramId: number;
@@ -124,6 +134,8 @@ export interface IArenaPayout extends Document {
   profitSharePercent: number;
   /** Lo que se le paga, en unidades. */
   amountUnits: number;
+  /** Clave idempotente del crédito (`arena_profit_share:YYYY-MM-DD`). */
+  creditKey?: string;
   status: 'pending' | 'paid' | 'failed';
   paidAt?: Date;
   error?: string;
@@ -137,6 +149,7 @@ const arenaPayoutSchema = new Schema<IArenaPayout>({
   rakeUnits: { type: Number, required: true, min: 0 },
   profitSharePercent: { type: Number, required: true, min: 0 },
   amountUnits: { type: Number, required: true, min: 0 },
+  creditKey: String,
   status: {
     type: String,
     enum: ['pending', 'paid', 'failed'],

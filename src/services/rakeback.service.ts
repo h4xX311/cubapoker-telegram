@@ -135,6 +135,47 @@ const rakeBetween = async (
   return rows[0]?.total ?? 0;
 };
 
+type CreditOutcome = 'credited' | 'already' | 'missing';
+
+/**
+ * Acredita un pago una sola vez, aunque se reintente.
+ *
+ * El saldo y la marca de "esta semana ya se pagó" se escriben en el MISMO
+ * `findOneAndUpdate` sobre el jugador. No es un detalle de estilo: si fueran
+ * dos escrituras, un fallo de red entre ellas dejaría el dinero dentro y la
+ * marca fuera (o al revés), y el reintento no sabría qué de las dos pasó.
+ *
+ * La condición `payoutCredits.key != clave` hace que el segundo intento no
+ * encuentre el documento y no vuelva a incrementar el saldo. Si el jugador
+ * existe pero la clave ya está, devuelve `already`; si no existe, `missing`.
+ */
+const creditPayoutOnce = async (
+  telegramId: number,
+  creditKey: string,
+  amountUnits: number,
+): Promise<CreditOutcome> => {
+  const actualizado = await User.findOneAndUpdate(
+    {
+      telegramId,
+      'payoutCredits.key': { $ne: creditKey },
+    },
+    {
+      $inc: { 'balance.real': amountUnits },
+      $push: {
+        payoutCredits: {
+          key: creditKey,
+          amount: amountUnits,
+          at: new Date(),
+        },
+      },
+    },
+    { new: true },
+  );
+
+  if (actualizado) return 'credited';
+  return (await User.exists({ telegramId })) ? 'already' : 'missing';
+};
+
 class RakebackService {
   /**
    * Atribuye el rake de una mano cash a los humanos que aportaron al bote.
@@ -284,9 +325,11 @@ class RakebackService {
   /**
    * Paga la semana cerrada a un jugador.
    *
-   * Idempotente por `(telegramId, weekKey)`. El registro se crea en `pending`
-   * antes de acreditar: si el proceso muere entre las dos escrituras, no se
-   * reintenta solo. Es una deuda visible, no un doble pago.
+   * Idempotente por `(telegramId, weekKey)` y por la clave del crédito. El
+   * registro se crea en `pending` antes de acreditar; si el proceso muere, el
+   * siguiente intento encuentra el registro y `creditPayoutOnce` decide si el
+   * dinero ya entró. No hay que elegir entre deberle la semana o pagarla dos
+   * veces.
    */
   async payWeeklyRakeback(
     telegramId: number,
@@ -297,21 +340,56 @@ class RakebackService {
     if (estado.claimableUnits <= 0) {
       return { paid: 0, weekKey: estado.weekKey, reason: 'sin rakeback pendiente' };
     }
-    if (estado.payoutStatus === 'pending') {
-      return { paid: 0, weekKey: estado.weekKey, reason: 'pago pendiente de revision' };
-    }
 
     let pago;
     try {
       await asegurarIndices();
-      pago = await RakebackPayout.create({
-        telegramId,
-        weekKey: estado.weekKey,
-        level: estado.level,
-        rakeUnits: estado.rakeUnits,
-        amountUnits: estado.claimableUnits,
-        status: 'pending',
-      });
+
+      // Un pago `failed` o `pending` de esta semana se reutiliza y se
+      // reintenta. Solo si tiene `creditKey`: los registros anteriores a la
+      // clave idempotente no se pueden distinguir de un pago ya aplicado.
+      pago = await RakebackPayout.findOneAndUpdate(
+        {
+          telegramId,
+          weekKey: estado.weekKey,
+          status: { $in: ['pending', 'failed'] },
+          creditKey: { $exists: true, $ne: null },
+        },
+        {
+          $set: { status: 'pending' },
+          $unset: { error: 1, paidAt: 1 },
+        },
+        { new: true },
+      );
+
+      if (!pago) {
+        const existente = await RakebackPayout.findOne({
+          telegramId,
+          weekKey: estado.weekKey,
+        });
+        if (existente) {
+          return {
+            paid: 0,
+            weekKey: estado.weekKey,
+            reason:
+              existente.status === 'pending'
+                ? 'pago pendiente de revision'
+                : existente.status === 'failed'
+                  ? 'pago fallido anterior: revisar'
+                  : 'ya pagado o en curso',
+          };
+        }
+
+        pago = await RakebackPayout.create({
+          telegramId,
+          weekKey: estado.weekKey,
+          level: estado.level,
+          rakeUnits: estado.rakeUnits,
+          amountUnits: estado.claimableUnits,
+          creditKey: `vip_rakeback:${estado.weekKey}`,
+          status: 'pending',
+        });
+      }
     } catch (error: any) {
       if (error?.code === 11000 || error?.code === 11001) {
         return { paid: 0, weekKey: estado.weekKey, reason: 'ya pagado o en curso' };
@@ -319,12 +397,20 @@ class RakebackService {
       throw error;
     }
 
-    let actualizado;
+    if (!pago.creditKey) {
+      return {
+        paid: 0,
+        weekKey: estado.weekKey,
+        reason: 'pago sin clave de reintento',
+      };
+    }
+
+    let credito: CreditOutcome;
     try {
-      actualizado = await User.findOneAndUpdate(
-        { telegramId },
-        { $inc: { 'balance.real': pago.amountUnits } },
-        { new: true },
+      credito = await creditPayoutOnce(
+        telegramId,
+        pago.creditKey,
+        pago.amountUnits,
       );
     } catch (error: any) {
       pago.status = 'failed';
@@ -333,7 +419,7 @@ class RakebackService {
       throw error;
     }
 
-    if (!actualizado) {
+    if (credito === 'missing') {
       pago.status = 'failed';
       pago.error = 'usuario no encontrado';
       await pago.save();
@@ -341,8 +427,17 @@ class RakebackService {
     }
 
     pago.status = 'paid';
-    pago.paidAt = new Date();
+    pago.paidAt = pago.paidAt ?? new Date();
+    pago.error = undefined;
     await pago.save();
+
+    if (credito === 'already') {
+      logger.info(
+        `Rakeback 3-Bet Club: la semana ${pago.weekKey} de ${telegramId} ya ` +
+          'estaba acreditada; se marca el pago sin volver a sumar saldo.',
+      );
+      return { paid: 0, weekKey: pago.weekKey, reason: 'ya acreditado' };
+    }
 
     // El libro de transacciones es para el operador. Si falla, el pago ya esta
     // hecho y no se revierte: se registra el error, no se le quita el dinero al
@@ -447,9 +542,9 @@ class RakebackService {
   /**
    * Paga el profit share de la semana cerrada a un jugador de Arena.
    *
-   * Idempotente por `(telegramId, weekKey)`. Igual que el 3-Bet: se crea
-   * `pending` antes de acreditar y no se reintenta solo si el proceso muere a
-   * mitad. Es preferible una deuda visible a un doble pago.
+   * Idempotente por `(telegramId, weekKey)` y por la clave del crédito. Igual
+   * que el 3-Bet: `pending` se crea antes de acreditar y un reintento sabe si
+   * el dinero entró. No se paga dos veces ni se queda como deuda invisible.
    */
   async payArenaWeekly(
     telegramId: number,
@@ -460,21 +555,53 @@ class RakebackService {
     if (estado.claimableUnits <= 0) {
       return { paid: 0, weekKey: estado.weekKey, reason: 'sin profit share pendiente' };
     }
-    if (estado.payoutStatus === 'pending') {
-      return { paid: 0, weekKey: estado.weekKey, reason: 'pago pendiente de revision' };
-    }
 
     let pago;
     try {
       await asegurarIndices();
-      pago = await ArenaPayout.create({
-        telegramId,
-        weekKey: estado.weekKey,
-        rakeUnits: estado.rakeUnits,
-        profitSharePercent: estado.profitSharePercent,
-        amountUnits: estado.claimableUnits,
-        status: 'pending',
-      });
+
+      pago = await ArenaPayout.findOneAndUpdate(
+        {
+          telegramId,
+          weekKey: estado.weekKey,
+          status: { $in: ['pending', 'failed'] },
+          creditKey: { $exists: true, $ne: null },
+        },
+        {
+          $set: { status: 'pending' },
+          $unset: { error: 1, paidAt: 1 },
+        },
+        { new: true },
+      );
+
+      if (!pago) {
+        const existente = await ArenaPayout.findOne({
+          telegramId,
+          weekKey: estado.weekKey,
+        });
+        if (existente) {
+          return {
+            paid: 0,
+            weekKey: estado.weekKey,
+            reason:
+              existente.status === 'pending'
+                ? 'pago pendiente de revision'
+                : existente.status === 'failed'
+                  ? 'pago fallido anterior: revisar'
+                  : 'ya pagado o en curso',
+          };
+        }
+
+        pago = await ArenaPayout.create({
+          telegramId,
+          weekKey: estado.weekKey,
+          rakeUnits: estado.rakeUnits,
+          profitSharePercent: estado.profitSharePercent,
+          amountUnits: estado.claimableUnits,
+          creditKey: `arena_profit_share:${estado.weekKey}`,
+          status: 'pending',
+        });
+      }
     } catch (error: any) {
       if (error?.code === 11000 || error?.code === 11001) {
         return { paid: 0, weekKey: estado.weekKey, reason: 'ya pagado o en curso' };
@@ -482,12 +609,20 @@ class RakebackService {
       throw error;
     }
 
-    let actualizado;
+    if (!pago.creditKey) {
+      return {
+        paid: 0,
+        weekKey: estado.weekKey,
+        reason: 'pago sin clave de reintento',
+      };
+    }
+
+    let credito: CreditOutcome;
     try {
-      actualizado = await User.findOneAndUpdate(
-        { telegramId },
-        { $inc: { 'balance.real': pago.amountUnits } },
-        { new: true },
+      credito = await creditPayoutOnce(
+        telegramId,
+        pago.creditKey,
+        pago.amountUnits,
       );
     } catch (error: any) {
       pago.status = 'failed';
@@ -496,7 +631,7 @@ class RakebackService {
       throw error;
     }
 
-    if (!actualizado) {
+    if (credito === 'missing') {
       pago.status = 'failed';
       pago.error = 'usuario no encontrado';
       await pago.save();
@@ -504,8 +639,17 @@ class RakebackService {
     }
 
     pago.status = 'paid';
-    pago.paidAt = new Date();
+    pago.paidAt = pago.paidAt ?? new Date();
+    pago.error = undefined;
     await pago.save();
+
+    if (credito === 'already') {
+      logger.info(
+        `VIP Arena: la semana ${pago.weekKey} de ${telegramId} ya estaba ` +
+          'acreditada; se marca el pago sin volver a sumar saldo.',
+      );
+      return { paid: 0, weekKey: pago.weekKey, reason: 'ya acreditado' };
+    }
 
     try {
       await Transaction.create({

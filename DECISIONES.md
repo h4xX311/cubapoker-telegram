@@ -283,9 +283,12 @@ Reglas de dinero:
 - Se paga la **semana anterior**, los lunes UTC, a `balance.real` (retirable).
 - `RakebackPayout` tiene índice único `{telegramId, weekKey}`. Un jugador no puede cobrar dos
   veces la misma semana, ni con dos clics ni con dos procesos.
-- El registro se crea `pending` antes de acreditar. Si el proceso muere entre las dos
-  escrituras, queda una deuda visible y **no se reintenta solo**: mejor deberle una semana a
-  un VIP que pagarle dos veces.
+- El registro se crea `pending` antes de acreditar. El crédito y la marca de la semana se
+  escriben en el **mismo** `findOneAndUpdate` sobre `User.payoutCredits`; por eso un pago
+  `pending` o `failed` se puede reintentar sin pagar dos veces. Si el proceso murió después
+  de acreditar, el reintento lo detecta y solo marca `paid`. Los registros anteriores a
+  `creditKey` no se reintentan solos: sin la clave no se puede demostrar que el dinero no
+  entró.
 - Una membresía que venció esta semana **todavía cobra** la semana pasada. No se borra el
   documento al vencer; borrarlo era perder el pago del lunes.
 - Renovar suma días al final; no reinicia el periodo que le quedaba.
@@ -307,6 +310,9 @@ el plan `elite` desapareció del 3-Bet Club y VIP Arena pasó al lobby de cash.
 - Es un programa aparte del 3-Bet Club: un miembro del 3-Bet que juegue en Arena cobra su 10 %
   sobre todo el rake cash **y además** el 15 % del rake de Arena. Los pagos se guardan en
   `ArenaPayout`, con índice único `{telegramId, weekKey}`, separado de `RakebackPayout`.
+- El reintento de Arena usa la clave `arena_profit_share:YYYY-MM-DD`, distinta de la del
+  3-Bet. El mismo jugador puede cobrar ambos programas de la misma semana sin que uno bloquee
+  al otro ni se acredite dos veces.
 - El job de los lunes paga ambos programas. Un fallo en uno no cancela el otro.
 - No hay lista de "miembros de Arena": la elegibilidad nace de haber generado rake en la sala.
   La selección curada de CoinPoker se puede añadir después con invitaciones, sin vender acceso.

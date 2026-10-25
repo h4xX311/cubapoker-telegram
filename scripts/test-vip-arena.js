@@ -8,6 +8,7 @@
  *   - El 15 % se calcula solo sobre eventos `arena: true`.
  *   - El rake de mesas normales no entra en el profit share de Arena.
  *   - Se paga una sola vez por jugador y semana.
+ *   - Un profit share failed se reintenta sin duplicar el saldo.
  *   - El job paga a todos los que generaron rake en Arena.
  *   - El 3-Bet Club no se activa por jugar en Arena.
  *
@@ -259,6 +260,59 @@ const saldo = async (id) =>
   const estado3Bet = await rakebackService.getStatus(ID, ahora);
   check('jugar en Arena no crea una membresía', estado3Bet.active === false);
   check('tampoco genera rakeback del 3-Bet', estado3Bet.claimableUnits === 0);
+
+  console.log('\n=== 8. Reintento seguro de un profit share failed ===\n');
+  const ID_ARENA_FALLO = 881004;
+  await crearUsuario(ID_ARENA_FALLO, 0);
+  await RakeEvent.create({
+    telegramId: ID_ARENA_FALLO,
+    tableId: 'cash-arena-fallo',
+    handNumber: 1,
+    amount: 1_000,
+    arena: true,
+    at: duranteLaSemana,
+  });
+  await ArenaPayout.create({
+    telegramId: ID_ARENA_FALLO,
+    weekKey: clave,
+    rakeUnits: 1_000,
+    profitSharePercent: 15,
+    amountUnits: 150,
+    creditKey: `arena_profit_share:${clave}`,
+    status: 'failed',
+    error: 'fallo simulado antes de acreditar',
+  });
+
+  const pagoFallido = await rakebackService.payArenaWeekly(
+    ID_ARENA_FALLO,
+    ahora,
+  );
+  check(
+    'un failed de Arena se reintenta y paga 150',
+    pagoFallido.paid === 150,
+    `pagó=${pagoFallido.paid}`,
+  );
+  check(
+    'el saldo de Arena sube exactamente 150',
+    (await saldo(ID_ARENA_FALLO)) === 150,
+    `saldo=${await saldo(ID_ARENA_FALLO)}`,
+  );
+  check(
+    'el registro de Arena queda paid',
+    (await ArenaPayout.findOne({
+      telegramId: ID_ARENA_FALLO,
+      weekKey: clave,
+    }))?.status === 'paid',
+  );
+  const segundoIntento = await rakebackService.payArenaWeekly(
+    ID_ARENA_FALLO,
+    ahora,
+  );
+  check(
+    'el segundo intento de Arena paga 0',
+    segundoIntento.paid === 0 && (await saldo(ID_ARENA_FALLO)) === 150,
+    `pagó=${segundoIntento.paid} saldo=${await saldo(ID_ARENA_FALLO)}`,
+  );
 
   console.log(`\n${'='.repeat(56)}`);
   console.log(`Resultado: ${ok} correctos, ${fail} fallidos`);
