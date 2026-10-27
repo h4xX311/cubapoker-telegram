@@ -241,6 +241,8 @@ async function main() {
     profile: perfil,
     position: 2,
     playersLeft: 4,
+    currentBet: 20,
+    minRaise: 20,
   });
 
   const conMalaMano = decideAction({
@@ -260,6 +262,8 @@ async function main() {
     profile: perfil,
     position: 2,
     playersLeft: 4,
+    currentBet: 20,
+    minRaise: 20,
   });
 
   note(`con dos ases: ${conBuenaMano.action}`);

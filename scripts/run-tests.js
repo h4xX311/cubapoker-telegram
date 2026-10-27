@@ -23,6 +23,9 @@ const SUITES = [
   { name: 'Reglas de retiro', file: 'test-withdrawal.js' },
   { name: 'Depositos USDT en TRC20', file: 'test-usdt-deposit.js' },
   { name: 'Motor de poker', file: 'test-engine.js' },
+  { name: 'Núcleo: evaluador, all-in y rake', file: 'test-engine-core.js' },
+  { name: 'Conservación de fichas', file: 'test-chip-conservation.js' },
+  { name: 'Ritmo y decisiones de bots', file: 'test-bot-pace.js' },
 ];
 
 const results = [];

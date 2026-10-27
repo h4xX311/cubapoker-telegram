@@ -1,5 +1,6 @@
 import mongoose, { Document, Schema } from 'mongoose';
 import { unitsToUsdt } from '../config/units';
+import { avatarForDisplay } from '../config/avatars';
 
 /**
  * Estado de un asiento en la mesa.
@@ -40,6 +41,12 @@ export interface ISeat {
   /** telegramId para humanos; botId para bots */
   playerId: string;
   displayName: string;
+  /**
+   * Identificador del avatar elegido. Es solo una clave del catálogo; el
+   * servidor decide si el jugador puede usarlo (algunos son exclusivos de
+   * miembros) y la UI pinta el arte correspondiente.
+   */
+  avatar?: string;
 
   /** Fichas en la mesa */
   chips: number;
@@ -149,6 +156,36 @@ export interface ITable extends Document {
     dealerSeat: number;
     startedAt?: Date;
     lastActionAt?: Date;
+    /**
+     * Resultado de la última mano. La mesa vuelve a `idle` en cuanto termina,
+     * así que sin este snapshot la UI nunca puede mostrar quién ganó, con qué
+     * mano ni cuánto se llevó.
+     */
+    lastResult?: {
+      handNumber: number;
+      endedAt: string;
+      pot: number;
+      potUsdt: number;
+      rake: number;
+      rakeUsdt: number;
+      board: string[];
+      winners: Array<{
+        seatIndex: number;
+        displayName: string;
+        amount: number;
+        amountUsdt: number;
+        handName: string;
+        cards: string[];
+      }>;
+      showdown: Array<{
+        seatIndex: number;
+        displayName: string;
+        cards: string[];
+        handName: string;
+      }>;
+      endedByFold: boolean;
+      unit: 'USDT' | 'PTS';
+    };
   };
 
   /** Estadisticas agregadas */
@@ -168,6 +205,7 @@ const seatSchema = new Schema<ISeat>(
     kind: { type: String, enum: ['human', 'bot'], required: true },
     playerId: { type: String, required: true },
     displayName: { type: String, required: true },
+    avatar: String,
 
     chips: { type: Number, default: 0 },
     bet: { type: Number, default: 0 },
@@ -248,6 +286,9 @@ const tableSchema = new Schema<ITable>({
     dealerSeat: { type: Number, default: 0 },
     startedAt: Date,
     lastActionAt: Date,
+    // Snapshot heterogéneo: winners y showdown tienen formas distintas y no
+    // se consultan por campo. Mixed evita duplicar el esquema en dos sitios.
+    lastResult: { type: Schema.Types.Mixed, default: undefined },
   },
 
   stats: {
@@ -265,12 +306,22 @@ tableSchema.index({ kind: 1, status: 1, tierId: 1 });
  * pintar la interfaz. Las cartas de los demas no viajan nunca.
  */
 export const toPublicTable = (table: ITable, viewerSeat?: number) => {
+  // Una mesa de campo es un torneo: sus "fichas" son puntos, no USDT. Solo las
+  // ring tables cash muestran dinero real. Esto lo decide el servidor para que
+  // la UI no tenga que adivinar a partir de `kind`.
+  const esCashRing = table.kind === 'cash' && !table.field?.fieldId;
+  const modo: 'USDT' | 'PTS' = esCashRing ? 'USDT' : 'PTS';
+  const aMostrar = (unidades: number) =>
+    modo === 'USDT' ? unitsToUsdt(unidades) : unidades;
+
   return {
     tableId: table.tableId,
     kind: table.kind,
     tierId: table.tierId,
     formatId: table.formatId ?? '7max',
     prizeTier: table.prizeTier,
+    /** Unidad que debe pintar la mesa: USDT en cash ring, puntos en torneos. */
+    mode: modo,
 
     status: table.status,
     smallBlind: table.smallBlind,
@@ -306,7 +357,13 @@ export const toPublicTable = (table: ITable, viewerSeat?: number) => {
       phase: table.hand.phase,
       communityCards: table.hand.communityCards,
       pot: table.hand.pot,
+      potUsdt: unitsToUsdt(table.hand.pot),
       currentBet: table.hand.currentBet,
+      currentBetUsdt: unitsToUsdt(table.hand.currentBet),
+      // Indice del asiento que tiene el turno, -1 si nadie. La mesa lo usa para
+      // iluminar al jugador que piensa; es publico, como el propio turno.
+      actingSeat: table.hand.actingSeat ?? -1,
+      lastResult: table.hand.lastResult,
     },
 
     stats: table.stats,
@@ -314,8 +371,16 @@ export const toPublicTable = (table: ITable, viewerSeat?: number) => {
     seats: table.seats.map(s => ({
       index: s.index,
       displayName: s.displayName,
+      avatar: s.avatar ?? 'fox',
+      // El emoji se resuelve en el servidor para que la interfaz no tenga que
+      // mantener una copia del catálogo ni romperse si se añade un avatar.
+      avatarEmoji: avatarForDisplay(s.avatar).emoji,
       chips: s.chips,
+      chipsUsdt: unitsToUsdt(s.chips),
+      displayChips: aMostrar(s.chips),
       bet: s.bet,
+      betUsdt: unitsToUsdt(s.bet),
+      displayBet: aMostrar(s.bet),
       status: s.status,
       isDealer: s.isDealer,
       isSmallBlind: s.isSmallBlind,

@@ -10,11 +10,16 @@ import mongoose, { Document, Schema } from 'mongoose';
  *
  * `rakeDiscount` se conserva en el documento por compatibilidad con datos
  * viejos, pero el producto ya no lo usa. El beneficio real es
- * `rakebackPercent`, que se paga los lunes sobre el rake de la semana anterior.
+ * `rakebackPercent`, que se paga los lunes sobre el rake de la semana anterior
+ * en mesas cash normales.
  *
  * IMPORTANTE: VIP Arena NO es un plan de esta membresía. Es una sala de cash
  * de high stakes con su propio profit share. Mezclarlos hacía que la UI
  * vendiera una "membresía VIP Arena" que en CoinPoker no existe.
+ *
+ * El rake de Arena no entra en el 10% del 3-Bet Club: se reparte aparte como
+ * profit share del 15% entre quienes jugaron esa sala. Si se sumaran ambos, un
+ * miembro que jugara Arena recuperaria el 25% del rake de la mesa.
  */
 export type VIPLevel = 'basic' | 'premium';
 
@@ -81,7 +86,7 @@ export const VIP_CONFIG: Record<VIPLevel, VIPPlan> = {
     powerUpsPerMonth: 6,
     tournamentDiscount: 0,
     benefits: [
-      '10% de rakeback semanal sobre el rake que generas',
+      '10% de rakeback semanal sobre el rake de mesas cash (fuera de Arena)',
       '6 Power Ups al mes (1,5x durante 12 h)',
       'Badge 3-Bet Club en la mesa',
       'Pagos de rakeback los lunes',
@@ -95,7 +100,7 @@ export const VIP_CONFIG: Record<VIPLevel, VIPPlan> = {
     powerUpsPerMonth: 6,
     tournamentDiscount: 5,
     benefits: [
-      '10% de rakeback semanal sobre el rake que generas',
+      '10% de rakeback semanal sobre el rake de mesas cash (fuera de Arena)',
       '18 Power Ups en el trimestre',
       '5% de descuento en buy-ins de torneos',
       'Badge trimestral y prioridad en retiros',

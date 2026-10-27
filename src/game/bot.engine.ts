@@ -139,55 +139,160 @@ export function decideAction(params: {
   profile: BotProfile;
   position: number;
   playersLeft: number;
+  /**
+   * Apuesta actual de la calle. Se necesita para devolver el `amount` con la
+   * misma semántica que el motor: total al que queda la apuesta, no incremento.
+   */
+  currentBet?: number;
+  /** Subida mínima de la calle. Si no llega, el bot no intenta una subida ilegal. */
+  minRaise?: number;
 }): BotDecision {
-  const { hand, community, potSize, toCall, chips, profile, position, playersLeft } = params;
+  const {
+    hand, community, potSize, toCall, chips, profile, position, playersLeft,
+  } = params;
 
   const rng = Math.random;
 
-  // Fuerza de la mano en escala 0-1
+  // Fuerza de la mano en escala 0-1. Los proyectos que se juegan con proyectos
+  // (color o escalera) no son manos hechas, pero tampoco son aire: se les da un
+  // pequeño empujón para que el bot no foldee siempre una buena oportunidad.
   const strength = evaluateStrength(hand, community);
+  const drawBonus = estimateDrawBonus(hand, community);
+  const fuerzaEfectiva = Math.min(1, strength + (strength < 0.55 ? drawBonus : 0));
 
-  // Sin coste para igualar: solo hay decision si queremos subir
+  // Pot odds: lo que cuesta igualar dividido por el bote que habrá después.
+  // Sin esto, el bot igualaba cualquier cosa en un bote enorme, que es una de
+  // las formas más fáciles de detectar una IA y de perder dinero sin jugar.
+  const potOdds = toCall > 0 ? toCall / Math.max(1, potSize + toCall) : 0;
+  const precioMalo = potOdds > 0.30;
+  const precioMuyMalo = potOdds > 0.42;
+  const pocosJugadores = playersLeft <= 3;
+
+  const currentBet = Math.max(0, params.currentBet ?? 0);
+  const minRaise = Math.max(1, params.minRaise ?? Math.max(1, currentBet));
+  // Fichas que quedarían en la apuesta si el bot pusiera todo su stack.
+  const stackTarget = currentBet - toCall + chips;
+  const minTarget = currentBet + minRaise;
+
+  // Redondea una subida y la convierte en all-in si no queda otra. Si el
+  // objetivo no llega al mínimo legal, devuelve null para que el bot iguale.
+  const subirA = (objetivo: number): BotDecision | null => {
+    const target = Math.min(stackTarget, Math.max(minTarget, Math.round(objetivo)));
+    if (target >= stackTarget) return { action: 'all_in' };
+    if (target <= currentBet) return null;
+    return { action: 'raise', amount: target };
+  };
+
+  // Sin coste para igualar. Se apuesta por valor, por proyecto y, de vez en
+  // cuando, sin nada: un bot que solo apuesta con el nuts es una señal.
   if (toCall === 0) {
-    if (strength > 0.72 && rng() < profile.raiseFreq) {
-      const raise = Math.min(chips, potSize * (0.5 + rng() * 0.5));
-      return raise >= chips ? { action: 'all_in' } : { action: 'raise', amount: Math.round(raise) };
+    const apuestaValor = fuerzaEfectiva > 0.62;
+    const apuestaProyecto = drawBonus >= 0.12;
+    const farol = fuerzaEfectiva < 0.34;
+
+    let frecuencia = 0;
+    if (apuestaValor) frecuencia = profile.raiseFreq * (0.9 + fuerzaEfectiva * 0.4);
+    else if (apuestaProyecto) frecuencia = profile.aggression * 0.45;
+    else if (farol) frecuencia = profile.aggression * 0.06;
+
+    if (frecuencia > 0 && rng() < frecuencia) {
+      const fraccion = apuestaValor ? 0.55 + rng() * 0.55 : 0.4 + rng() * 0.35;
+      const raise = subirA(currentBet + potSize * fraccion);
+      if (raise) return raise;
     }
     return { action: 'check' };
   }
 
-  // All-in short stack cuando la mano es fuerte y le queda poco
-  if (chips <= toCall * 3 && strength > 0.6 && rng() < profile.aggression) {
+  // All-in short stack cuando la mano es fuerte y le queda poco.
+  if (chips <= toCall * 3 && fuerzaEfectiva > 0.6 && rng() < profile.aggression) {
     return { action: 'all_in' };
   }
 
-  // Mano marginal: abandonar con la frecuencia que dicta el estilo
-  if (strength < 0.32) {
-    if (rng() < profile.foldFreq) {
-      return { action: 'fold' };
-    }
-    // Si no abandona, iguala (no sube una mano mala)
-    return { action: 'call' };
+  // Mano muy fuerte con un bote ya grande: se mete el stack. Sin esto, dos
+  // bots con 100 BB pueden pasarse miles de manos subiendo y retirándose sin
+  // que las fichas cambien de dueño; el torneo no termina nunca.
+  if (
+    fuerzaEfectiva > 0.85 &&
+    chips <= potSize * 3 &&
+    rng() < 0.35 + profile.aggression * 0.35
+  ) {
+    return { action: 'all_in' };
   }
 
-  // Mano buena
-  if (strength > 0.68) {
-    // Presion cuando actua temprano
+  // No queda stack para igualar: o se paga el all-in o se abandona. Se exige
+  // algo más que las pot odds peladas porque no hay calles futuras que cobrar.
+  if (chips <= toCall) {
+    if (fuerzaEfectiva >= Math.max(0.42, potOdds)) {
+      return { action: 'call' };
+    }
+    if (rng() < profile.aggression * 0.18) {
+      return { action: 'call' };
+    }
+    return { action: 'fold' };
+  }
+
+  // Mano buena: subir o igualar. Aquí no se foldea por precio.
+  const umbralFuerte = pocosJugadores ? 0.58 : 0.62;
+  if (fuerzaEfectiva > umbralFuerte) {
+    // Presión cuando actúa en posición tardía o quedan pocos jugadores.
     const latePosition = position >= Math.max(1, playersLeft - 2);
-    const pressure = latePosition ? 1.15 : 1;
+    const pressure = (latePosition ? 1.15 : 1) * (pocosJugadores ? 1.2 : 1);
 
     if (rng() < profile.raiseFreq * pressure) {
-      const sizing = potSize * (0.6 + rng() * 0.8) * pressure;
-      const raise = Math.min(chips, Math.max(toCall * 2, sizing));
-      if (raise >= chips * 0.95) {
-        return { action: 'all_in' };
-      }
-      return { action: 'raise', amount: Math.round(raise) };
+      const sizing = potSize * (0.75 + rng() * 0.9) * pressure;
+      const raise = subirA(currentBet + Math.max(toCall, sizing));
+      if (raise) return raise;
     }
     return { action: 'call' };
   }
 
-  // Mano media
+  // Proyecto: no es una mano hecha, pero tampoco aire. Se paga más que con
+  // 7-2 y se semi-farolea de vez en cuando.
+  if (drawBonus >= 0.12 && fuerzaEfectiva < 0.55) {
+    if (precioMalo && rng() < profile.foldFreq * 0.5) {
+      return { action: 'fold' };
+    }
+    if (rng() < profile.aggression * 0.18) {
+      const raise = subirA(currentBet + Math.max(toCall, potSize * 0.55));
+      if (raise) return raise;
+    }
+    return { action: 'call' };
+  }
+
+  // Mano débil de verdad (aire): el precio manda. Un bote grande que exige el
+  // 35% de equity no se paga con 7-2 solo porque el bot sea "loose". Una pareja
+  // ya no cae aquí: está por encima de 0.20 y merece ver más calles.
+  if (strength < 0.20) {
+    const castigo = precioMalo ? 0.28 : potOdds > 0.22 ? 0.12 : 0;
+    if (rng() < Math.min(0.95, profile.foldFreq + castigo)) {
+      return { action: 'fold' };
+    }
+    return { action: 'call' };
+  }
+
+  // Mano marginal (pareja débil, dos overcards) o proyecto: se paga si el
+  // precio no es un overbet. El proyecto conserva algo de semi-farol.
+  if (fuerzaEfectiva < 0.55) {
+    if (precioMuyMalo && rng() < profile.foldFreq * 0.75) {
+      return { action: 'fold' };
+    }
+    if (drawBonus > 0 && rng() < profile.aggression * 0.18) {
+      const raise = subirA(currentBet + Math.max(toCall, potSize * 0.55));
+      if (raise) return raise;
+    }
+    if (rng() < profile.foldFreq * 0.20) {
+      return { action: 'fold' };
+    }
+    return { action: 'call' };
+  }
+
+  // Mano media: farolea de vez en cuando, sobre todo en posición tardía. Un bot
+  // que solo sube con manos fuertes se lee en dos órbitas.
+  if (rng() < profile.aggression * 0.08) {
+    const raise = subirA(currentBet + Math.max(toCall, potSize * 0.6));
+    if (raise) return raise;
+  }
+
   if (rng() < profile.foldFreq * 0.6) {
     return { action: 'fold' };
   }
@@ -195,25 +300,86 @@ export function decideAction(params: {
 }
 
 /**
+ * Valor aproximado de un proyecto de color o escalera, entre 0 y 0.26.
+ *
+ * No intenta calcular outs exactos: eso exige conocer las cartas de los
+ * rivales y sería información privilegiada. Solo mira lo que el bot puede ver:
+ * sus cartas y el board. Es una señal para no tratar un proyecto como aire.
+ */
+export function estimateDrawBonus(hand: Card[], community: Card[]): number {
+  if (community.length < 3) return 0;
+
+  const cartas = [...hand, ...community];
+  const porPalo = new Map<string, number>();
+  for (const c of cartas) {
+    porPalo.set(c.suit, (porPalo.get(c.suit) ?? 0) + 1);
+  }
+  const maxPalo = Math.max(...porPalo.values());
+  // Cuatro del mismo palo y el board incompleto: proyecto de color. Si ya hay
+  // cinco, el evaluador lo cuenta como color y no hace falta sumar nada.
+  const proyectoColor = community.length < 5 && maxPalo === 4 ? 0.16 : 0;
+
+  const valores = new Set(cartas.map((c) => c.value));
+  if (valores.has(14)) valores.add(1); // la rueda también es proyecto
+
+  let proyectoEscalera = 0;
+  for (let inicio = 1; inicio <= 10; inicio++) {
+    let presentes = 0;
+    for (let i = 0; i < 5; i++) {
+      if (valores.has(inicio + i)) presentes++;
+    }
+    // Cuatro de cinco: falta una carta. No se distingue gutshot de abierta;
+    // ambos merecen algo de crédito, el abierto algo más.
+    if (presentes === 4) {
+      const abierta = valores.has(inicio - 1) || valores.has(inicio + 5);
+      proyectoEscalera = Math.max(proyectoEscalera, abierta ? 0.14 : 0.09);
+    }
+  }
+
+  return Math.min(0.26, proyectoColor + proyectoEscalera);
+}
+
+/**
  * Fuerza de la mano en 0-1, usando el valor del evaluador normalizado.
  * Evalua las 5 mejores cartas de las 7 disponibles y escala por ranking.
+ */
+/**
+ * Fuerza de la mano en 0..1.
+ *
+ * No se normaliza el entero del evaluador: con base 15 y cinco posiciones, el
+ * valor de un full house es millones y dividirlo por 10 000 daba siempre 1. Eso
+ * hacía que el bot jugara todas las manos postflop como si fueran la nuts.
+ *
+ * Se usa la categoría como escala base y se añade un pequeño ajuste por el
+ * desempate, suficiente para distinguir dos parejas de ases con distinto kicker.
  */
 export function evaluateStrength(hand: Card[], community: Card[]): number {
   const all = [...hand, ...community];
   if (all.length < 5) {
-    // Preflop: fuerza aproximada por la mejor carta y los kort
+    // Preflop: fuerza aproximada por la mejor carta y el parejamiento
     return preflopStrength(hand);
   }
 
   const result = evaluateHand(all);
 
-  // Mapea el valor interno (1..10000) a 0..1
-  // El valor real ya codifica el ranking, asi que basta normalizar.
-  const normalized = Math.min(1, Math.max(0, result.value / 10000));
+  const base: Record<string, number> = {
+    high_card: 0.08,
+    pair: 0.22,
+    two_pair: 0.36,
+    three_of_a_kind: 0.52,
+    straight: 0.64,
+    flush: 0.72,
+    full_house: 0.84,
+    four_of_a_kind: 0.93,
+    straight_flush: 0.97,
+    royal_flush: 1,
+  };
 
-  // Comprime el rango alto: una mano media (full house) no debe sentirse
-  // tan fuerte como el poker real porque asi juega el bot de forma creible.
-  return Math.pow(normalized, 0.55);
+  const categoria = base[result.rank] ?? 0.08;
+  // Dentro de la categoría, el desempate mueve como mucho 0.04. Es una señal
+  // para elegir entre manos del mismo tipo, no para saltar de categoría.
+  const dentro = (result.value % (15 ** 5)) / (15 ** 5);
+  return Math.max(0, Math.min(1, categoria + dentro * 0.04));
 }
 
 /** Fuerza aproximada preflop usando la mejor carta y el parejamiento. */

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { Fragment, useState, useEffect } from 'react';
 import { api, ApiError } from '../lib/api';
 import type { CashFormat, CashTier, TableSummary } from '../lib/types';
 import { PageHeader, SectionLabel } from '../components/Layout';
@@ -194,7 +194,7 @@ export function Tables({
         <>
           {!miMesa && (
             <>
-          <SectionLabel>Elige tu nivel</SectionLabel>
+          <SectionLabel>Mesas cash</SectionLabel>
           <div className="space-y-3 mb-6">
             {tiers.map((tier, i) => {
               const canAfford = balance >= tier.buyIn;
@@ -204,20 +204,43 @@ export function Tables({
               const arena = Boolean(tier.vipArena);
 
               return (
-                <article
-                  key={tier.id}
-                  className="card animate-slideUp"
-                  style={{
-                    animationDelay: `${i * 40}ms`,
-                    ...(arena
-                      ? {
-                          borderColor: 'rgba(255, 215, 0, 0.55)',
-                          background:
-                            'linear-gradient(135deg, #1c1730 0%, #16131f 100%)',
-                        }
-                      : {}),
-                  }}
-                >
+                <Fragment key={tier.id}>
+                  {/* Separacion explicita: Arena no es "otro nivel" mas de la
+                      lista. Es otra sala, con otras reglas de rake, y mezclarla
+                      con Micro/Bajo/Medio/Alto hacia que pareciera un plan de
+                      suscripcion. */}
+                  {arena && (
+                    <div className="pt-5 pb-1">
+                      <div className="flex items-center gap-3">
+                        <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#ffd700]">
+                          VIP Arena
+                        </span>
+                        <span className="flex-1 h-px bg-gradient-to-r from-[#ffd700]/60 to-transparent" />
+                        <span className="text-[9px] font-semibold text-[#ffd700]/70">
+                          HIGH STAKES
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-[#a0a0b0] mt-1 leading-relaxed">
+                        Sala premium, separada de las mesas cash. No se compra
+                        acceso: entras con el buy-in y cobras profit share del
+                        rake que generes.
+                      </p>
+                    </div>
+                  )}
+
+                  <article
+                    className="card animate-slideUp"
+                    style={{
+                      animationDelay: `${i * 40}ms`,
+                      ...(arena
+                        ? {
+                            borderColor: 'rgba(255, 215, 0, 0.55)',
+                            background:
+                              'linear-gradient(135deg, #1c1730 0%, #16131f 100%)',
+                          }
+                        : {}),
+                    }}
+                  >
                   <header className="flex items-start justify-between mb-3 gap-3">
                     <div className="min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
@@ -325,7 +348,8 @@ export function Tables({
                       nivel
                     </p>
                   )}
-                </article>
+                  </article>
+                </Fragment>
               );
             })}
           </div>
@@ -389,7 +413,7 @@ export function Tables({
             <p className="text-xs text-[#a0a0b0] leading-relaxed">
               <span className="text-white font-semibold">Cómo funciona:</span> cada
               sala tiene 7-max, 6-max y Heads-Up. Entras con el buy-in, juegas
-              con tus fichas y, cuando te levantas, vuelven a tu saldo. El saldo
+              con tu stack y, cuando te levantas, vuelve a tu saldo. El saldo
               de promoción se desbloquea {unlockRatio} al usarlo.
             </p>
           </div>

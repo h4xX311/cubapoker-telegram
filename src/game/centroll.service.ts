@@ -11,6 +11,7 @@ import {
   centrollPrizeUnits,
 } from '../config/product';
 import { usdtToUnits, unitsToUsdt, formatUnits, blindsFor } from '../config/units';
+import { DEFAULT_AVATAR, getAvatar } from '../config/avatars';
 import { logger } from '../utils/logger';
 // El mismo cerrojo por nivel que usa `field.manager`. `field.manager` no importa este modulo,
 // asi que no hay ciclo. Se comparte para que "dos personas pulsando JUGAR a la vez" se
@@ -58,7 +59,10 @@ export class CentrollError extends Error {
 }
 
 /** Cola de espera de un centroll en curso. */
-const queues = new Map<string, { telegramId: number; username?: string }[]>();
+const queues = new Map<
+  string,
+  { telegramId: number; username?: string; avatar?: string }[]
+>();
 
 export const centrollService = {
   /**
@@ -184,7 +188,11 @@ export const centrollService = {
     }
 
     const queue = queues.get(field.fieldId) ?? [];
-    queue.push({ telegramId, username });
+    queue.push({
+      telegramId,
+      username,
+      avatar: getAvatar(user.avatar)?.id ?? DEFAULT_AVATAR,
+    });
     queues.set(field.fieldId, queue);
 
     // ------------------------------------------------------------------
@@ -346,11 +354,17 @@ export const centrollService = {
       const player = queue.shift();
       if (!player) break;
 
+      const usados = new Set(table.seats.map((s) => s.index));
+      let indiceLibre = 0;
+      while (usados.has(indiceLibre)) indiceLibre++;
+      if (indiceLibre >= table.maxSeats) continue;
+
       const seat: ISeat = {
-        index: table.seats.length,
+        index: indiceLibre,
         kind: 'human',
         playerId: String(player.telegramId),
         displayName: player.username || `Jugador ${player.telegramId}`,
+        avatar: player.avatar ?? DEFAULT_AVATAR,
         chips: CENTROLL.startingChips,
         bet: 0,
         totalBet: 0,

@@ -149,7 +149,8 @@ export function VIP({ user, onBack, onBalanceChange }: Props) {
           Recupera tu rake cada semana
         </h2>
         <p className="text-xs text-[#a0a0b0] mt-1 leading-relaxed">
-          El 10% del rake que generas vuelve a tu saldo retirable. Los pagos se
+          El 10% del rake que generas en mesas cash normales vuelve a tu saldo
+          retirable. El rake de Arena se reparte aparte. Los pagos se
           procesan los lunes.
         </p>
       </div>
@@ -344,8 +345,10 @@ export function VIP({ user, onBack, onBalanceChange }: Props) {
                 Empieza a recuperar tu rake
               </p>
               <p className="text-xs text-[#a0a0b0] mt-1 leading-relaxed">
-                Con el plan mensual recuperas el 10% de todo el rake que generes.
-                Si juegas 1.000 USDT de rake al mes, recuperas 100 USDT.
+                Con el plan mensual recuperas el 10% del rake de tus mesas cash
+                normales. Si generas 1.000 USDT de rake al mes, recuperas 100
+                USDT. El rake de VIP Arena no entra aquí: tiene su propio
+                profit share del 15%.
               </p>
             </div>
           )}
@@ -427,9 +430,10 @@ export function VIP({ user, onBack, onBalanceChange }: Props) {
           </div>
 
           <p className="text-[10px] text-[#a0a0b0] mt-4 leading-relaxed">
-            El rakeback se calcula solo sobre mesas cash y se paga en USDT a tu
-            saldo retirable. Los torneos no generan rakeback porque no cobran
-            rake por mano.
+            El rakeback se calcula solo sobre mesas cash normales y se paga en
+            USDT a tu saldo retirable. VIP Arena queda fuera porque su rake se
+            reparte como profit share entre los participantes de la sala. Los
+            torneos no generan rakeback porque no cobran rake por mano.
           </p>
         </>
       )}

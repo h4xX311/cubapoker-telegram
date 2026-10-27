@@ -40,6 +40,7 @@
 
 const { PokerGame } = require('../dist/game/game.state');
 const { decideAction, botFactory } = require('../dist/game/bot.engine');
+const { createDeck } = require('../dist/game/card.utils');
 
 let pass = 0;
 let fail = 0;
@@ -167,6 +168,8 @@ function jugarHastaUnJugador({
         profile: perfiles.get(actual.id),
         position: Number(actual.id),
         playersLeft: conFichas,
+        currentBet: state.currentBet,
+        minRaise: state.minRaise,
       });
 
       const aplico = engine.performAction(actual.id, decision.action, decision.amount);
@@ -312,6 +315,143 @@ section('3. Con bots mucho mas agresivos');
       'agresivos se tiran las manos rapido y suben las fichas de todos por igual, que ' +
       'tambien es un equilibrio. Es un matiz que hay que tener en cuenta al tocar la IA.',
     );
+  }
+}
+
+// =========================================================================
+section('4. Decisiones: precio, proyectos y faroles');
+// =========================================================================
+
+{
+  const deck = createDeck();
+  const carta = (rank, suit) => {
+    const c = deck.find((x) => x.rank === rank && x.suit === suit);
+    if (!c) throw new Error(`Carta inexistente: ${rank} ${suit}`);
+    return c;
+  };
+  const perfil = (extra = {}) => ({
+    id: 'test-bot',
+    name: 'Test',
+    style: 'tight',
+    winRate: 0.45,
+    raiseFreq: 0.22,
+    foldFreq: 0.42,
+    aggression: 0.15,
+    ...extra,
+  });
+
+  const contar = (params, veces = 1000) => {
+    const cuenta = { fold: 0, check: 0, call: 0, raise: 0, all_in: 0 };
+    for (let i = 0; i < veces; i++) {
+      cuenta[decideAction(params).action]++;
+    }
+    return cuenta;
+  };
+
+  const debil = [carta('7', 'clubs'), carta('2', 'diamonds')];
+  const aire = [carta('7', 'clubs'), carta('3', 'diamonds')];
+  const aa = [carta('A', 'spades'), carta('A', 'hearts')];
+  const boardSeco = [carta('Q', 'hearts'), carta('9', 'hearts'), carta('2', 'clubs')];
+  const proyectoColor = [carta('A', 'hearts'), carta('K', 'hearts')];
+  const boardColor = [carta('Q', 'hearts'), carta('9', 'hearts'), carta('2', 'clubs')];
+
+  const base = {
+    hand: debil,
+    community: [],
+    potSize: 100,
+    toCall: 10,
+    chips: 1000,
+    profile: perfil(),
+    position: 3,
+    playersLeft: 5,
+    currentBet: 10,
+    minRaise: 10,
+  };
+
+  const barato = contar({ ...base, toCall: 10, potSize: 100 });
+  const caro = contar({ ...base, toCall: 100, potSize: 100 });
+  note(`7-2 ante apuesta pequena: fold ${barato.fold}/1000`);
+  note(`7-2 ante apuesta de bote:  fold ${caro.fold}/1000`);
+
+  if (caro.fold > barato.fold * 1.25 && caro.fold - barato.fold > 80) {
+    ok('las pot odds cambian el fold: el mismo 7-2 se tira mas caro');
+  } else {
+    bad(
+      `el precio no pesa lo suficiente: barato=${barato.fold}, caro=${caro.fold}`,
+      'Sin esta separacion, el bot iguala cualquier basura en cualquier bote.',
+    );
+  }
+
+  const fuertes = contar({
+    ...base,
+    hand: aa,
+    toCall: 100,
+    potSize: 200,
+    currentBet: 100,
+  });
+  if (fuertes.fold === 0) {
+    ok('una mano fuerte (AA) no se tira aunque el precio sea alto');
+  } else {
+    bad(`AA se tiro ${fuertes.fold}/1000 veces: el bot regala las mejores manos`);
+  }
+
+  const conProyecto = contar({
+    ...base,
+    hand: proyectoColor,
+    community: boardColor,
+    toCall: 50,
+    potSize: 200,
+    currentBet: 50,
+  });
+  const sinProyecto = contar({
+    ...base,
+    hand: aire,
+    community: boardSeco,
+    toCall: 50,
+    potSize: 200,
+    currentBet: 50,
+  });
+  note(`proyecto de color: fold ${conProyecto.fold}/1000`);
+  note(`aire sin proyecto:  fold ${sinProyecto.fold}/1000`);
+
+  if (conProyecto.fold + 80 < sinProyecto.fold) {
+    ok('un proyecto de color se paga mas que el aire: no se trata igual');
+  } else {
+    bad(
+      `el proyecto no recibe trato propio: ${conProyecto.fold} contra ${sinProyecto.fold}`,
+      'Un bot que foldea todos los proyectos solo juega manos hechas.',
+    );
+  }
+
+  const perfiles = [
+    perfil(),
+    perfil({ style: 'aggressive', raiseFreq: 0.45, foldFreq: 0.20, aggression: 0.65 }),
+    perfil({ style: 'calling', raiseFreq: 0.14, foldFreq: 0.24, aggression: 0.25 }),
+    perfil({ style: 'loose', raiseFreq: 0.24, foldFreq: 0.12, aggression: 0.35 }),
+  ];
+  let subidasIlegales = 0;
+  let subidas = 0;
+  for (const p of perfiles) {
+    for (let i = 0; i < 500; i++) {
+      const d = decideAction({
+        ...base,
+        hand: i % 2 === 0 ? aa : debil,
+        toCall: 30,
+        potSize: 150,
+        currentBet: 30,
+        minRaise: 30,
+        profile: p,
+      });
+      if (d.action === 'raise') {
+        subidas++;
+        if (!(d.amount > 30) || d.amount > 1000) subidasIlegales++;
+      }
+    }
+  }
+  if (subidas > 0 && subidasIlegales === 0) {
+    ok(`las ${subidas} subidas simuladas son legales (total > apuesta y <= stack)`);
+  } else {
+    bad(`subidas ilegales: ${subidasIlegales} de ${subidas}`, 'El motor las rechazaria.');
   }
 }
 

@@ -1,12 +1,15 @@
-import type { Session } from '../lib/types';
+import { useEffect, useState } from 'react';
+import type { AvatarOption, Page, Session } from '../lib/types';
 import { PageHeader } from '../components/Layout';
 import { fmtUsdt, PromoBalanceNote } from '../components/Balance';
+import { api, ApiError } from '../lib/api';
 
 interface Props {
   user: Session | null;
   onBack: () => void;
   onDeposit: () => void;
   onWithdraw: () => void;
+  onNavigate: (page: Page) => void;
 }
 
 /**
@@ -28,7 +31,13 @@ interface Props {
  * convertir la promocion en dinero.
  * ------------------------------------------------------------------
  */
-export function Profile({ user, onBack, onDeposit, onWithdraw }: Props) {
+export function Profile({
+  user,
+  onBack,
+  onDeposit,
+  onWithdraw,
+  onNavigate,
+}: Props) {
   const real = user?.balance?.real ?? 0;
   const play = user?.balance?.play ?? 0;
   const total = user?.balance?.total ?? 0;
@@ -43,6 +52,42 @@ export function Profile({ user, onBack, onDeposit, onWithdraw }: Props) {
 
   const nombre = [user?.firstName, user?.lastName].filter(Boolean).join(' ');
 
+  // ------------------------------------------------------------------
+  // AVATAR
+  //
+  // La elección se guarda en el servidor y se copia al asiento. Los avatares
+  // de miembro vienen con `unlocked` ya resuelto: si la membresía venció,
+  // siguen visibles pero bloqueados, para que el jugador sepa qué se pierde.
+  // ------------------------------------------------------------------
+  const catalogo: AvatarOption[] = user?.avatarCatalog ?? [];
+  const [avatar, setAvatar] = useState(user?.avatar ?? 'fox');
+  const [guardandoAvatar, setGuardandoAvatar] = useState<string | null>(null);
+  const [errorAvatar, setErrorAvatar] = useState('');
+
+  useEffect(() => {
+    if (user?.avatar) setAvatar(user.avatar);
+  }, [user?.avatar]);
+
+  const avatarActual =
+    catalogo.find((a) => a.id === avatar) ??
+    catalogo.find((a) => a.id === 'fox');
+
+  const elegirAvatar = async (opcion: AvatarOption) => {
+    if (!opcion.unlocked || guardandoAvatar) return;
+    setGuardandoAvatar(opcion.id);
+    setErrorAvatar('');
+    try {
+      await api.updateAvatar(opcion.id);
+      setAvatar(opcion.id);
+    } catch (err) {
+      setErrorAvatar(
+        err instanceof ApiError ? err.message : 'No se pudo cambiar el avatar.',
+      );
+    } finally {
+      setGuardandoAvatar(null);
+    }
+  };
+
   return (
     <div className="p-4 pb-10 animate-fadeIn">
       <PageHeader title="Mi perfil" onBack={onBack} />
@@ -50,12 +95,13 @@ export function Profile({ user, onBack, onDeposit, onWithdraw }: Props) {
       {/* ---------------- Identidad ---------------- */}
       <section className="flex items-center gap-4 mb-5">
         <div
-          className="w-16 h-16 rounded-full flex items-center justify-center text-2xl font-bold text-black shrink-0"
+          className="w-16 h-16 rounded-full flex items-center justify-center text-3xl shrink-0 border-2 border-[#ffd700]/50"
           style={{
-            background: 'linear-gradient(135deg, #ffd700 0%, #e6a800 100%)',
+            background: 'linear-gradient(135deg, #2a2a4a 0%, #151525 100%)',
           }}
+          aria-label={avatarActual?.label ?? 'Avatar'}
         >
-          {(user?.firstName || 'J').charAt(0).toUpperCase()}
+          {avatarActual?.emoji ?? '🃏'}
         </div>
         <div className="min-w-0">
           <h2 className="text-lg font-bold text-white truncate">
@@ -74,6 +120,67 @@ export function Profile({ user, onBack, onDeposit, onWithdraw }: Props) {
           </div>
         </div>
       </section>
+
+      {/* ---------------- Avatar ---------------- */}
+      {catalogo.length > 0 && (
+        <section className="card mb-5">
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-xs font-semibold text-white">Tu avatar de mesa</p>
+            <span className="text-[10px] text-[#a0a0b0]">
+              {catalogo.filter((a) => a.unlocked).length}/{catalogo.length}{' '}
+              disponibles
+            </span>
+          </div>
+          <p className="text-[10px] text-[#a0a0b0] leading-relaxed mb-3">
+            Los avatares con corona son exclusivos del 3-Bet Club. Se mantienen
+            aunque la membresía venza, pero no se pueden elegir de nuevo hasta
+            renovar.
+          </p>
+
+          <div className="grid grid-cols-5 gap-2">
+            {catalogo.map((opcion) => {
+              const activo = opcion.id === avatar;
+              const guardando = guardandoAvatar === opcion.id;
+              return (
+                <button
+                  key={opcion.id}
+                  onClick={() => elegirAvatar(opcion)}
+                  disabled={!opcion.unlocked || !!guardandoAvatar}
+                  title={
+                    opcion.unlocked
+                      ? opcion.label
+                      : `${opcion.label} · exclusivo del 3-Bet Club`
+                  }
+                  className="relative rounded-xl h-12 flex items-center justify-center text-xl transition-transform active:scale-95 disabled:cursor-not-allowed"
+                  style={{
+                    background: activo ? 'rgba(0,210,106,0.14)' : '#151525',
+                    border: `1px solid ${
+                      activo ? '#00d26a' : opcion.memberOnly ? '#ffd70055' : '#2a2a4a'
+                    }`,
+                    opacity: opcion.unlocked ? 1 : 0.45,
+                  }}
+                >
+                  {opcion.emoji}
+                  {!opcion.unlocked && (
+                    <span className="absolute -top-1 -right-1 text-[9px] leading-none bg-[#ffd700] text-black rounded-full px-1 py-0.5">
+                      🔒
+                    </span>
+                  )}
+                  {guardando && (
+                    <span className="absolute inset-0 rounded-xl bg-black/60 flex items-center justify-center text-[9px] text-white">
+                      …
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          {errorAvatar && (
+            <p className="text-[10px] text-[#ff8a94] mt-2">{errorAvatar}</p>
+          )}
+        </section>
+      )}
 
       {/* ---------------- Saldo ---------------- */}
       <section
@@ -163,7 +270,7 @@ export function Profile({ user, onBack, onDeposit, onWithdraw }: Props) {
       </div>
 
       {/* ---------------- Juego responsable ---------------- */}
-      <div className="card flex items-start gap-3">
+      <div className="card flex items-start gap-3 mb-4">
         <span className="text-lg">🔒</span>
         <div>
           <p className="text-sm font-semibold text-white mb-1">Juego responsable</p>
@@ -174,6 +281,15 @@ export function Profile({ user, onBack, onDeposit, onWithdraw }: Props) {
           </p>
         </div>
       </div>
+
+      {/* La AGPL exige ofrecer el codigo fuente a quien usa el servicio por
+          red. El enlace esta en el perfil y tambien en el pie de Inicio. */}
+      <button
+        onClick={() => onNavigate('source')}
+        className="w-full text-center text-[10px] text-[#6c6c80] hover:text-[#a0a0b0] transition-colors py-2"
+      >
+        Código fuente · Licencia AGPL-3.0
+      </button>
     </div>
   );
 }

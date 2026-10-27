@@ -28,6 +28,7 @@ const { Table } = require('../dist/models/Table');
 const { User } = require('../dist/models/User');
 const { freerollManager } = require('../dist/game/freeroll.service');
 const { fieldManager } = require('../dist/game/field.manager');
+const { tableManager } = require('../dist/game/table.manager');
 const { FREEROLL_PAYOUT } = require('../dist/config/product');
 const { usdtToUnits, formatUnits } = require('../dist/config/units');
 const {
@@ -347,6 +348,26 @@ const limpiar = async () => {
     'la mesa tiene al menos 2 asientos activos',
     activosSolo.length >= 2,
     `${activosSolo.length} activos`,
+  );
+
+  // ------------------------------------------------------------------
+  // EL BUG QUE ESTA PRUEBA NO VEIA
+  //
+  // El campo arrancaba, sentaba a todos y se quedaba `running`... pero la
+  // mesa no repartia NUNCA. `tableManager.tick()` solo buscaba mesas
+  // `kind: 'cash'`, asi que los freerolls no entraban en el ciclo. La
+  // comprobacion de "arranca" pasaba igual porque miraba el campo, no la
+  // mano.
+  //
+  // Aqui se ejecuta el ciclo real una vez y se exige una mano repartida.
+  // ------------------------------------------------------------------
+  await tableManager['tick']();
+  const mesaRepartida = await Table.findOne({ 'field.fieldId': fSolo.fieldId });
+  comprobar(
+    'la mesa del freeroll reparte la primera mano',
+    (mesaRepartida?.hand?.handNumber ?? 0) >= 1,
+    `handNumber=${mesaRepartida?.hand?.handNumber ?? 0}, ` +
+    `fase=${mesaRepartida?.hand?.phase ?? 'sin mesa'}`,
   );
 
   // ==================================================================

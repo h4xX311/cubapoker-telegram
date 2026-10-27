@@ -20,9 +20,9 @@ export interface IRakeEvent extends Document {
   /**
    * `true` si la mano se jugó en VIP Arena.
    *
-   * El 3-Bet Club cuenta todo el rake cash, también el de Arena. El profit
-   * share de Arena solo cuenta estas manos. Sin esta bandera no se pueden
-   * calcular dos programas distintos sobre el mismo libro.
+   * Las dos bolsas son excluyentes: el 3-Bet Club paga el 10% del rake de
+   * mesas cash normales (`arena: false`) y el profit share de Arena paga el
+   * 15% de estas manos. Una misma mano no alimenta los dos programas.
    */
   arena: boolean;
   at: Date;

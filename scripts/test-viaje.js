@@ -13,13 +13,15 @@
  *
  *   1. Abrir la aplicacion y cargar el perfil
  *   2. Depositar (en simulacion, sin tocar la cadena)
- *   3. Ver los campos y los tiers
- *   4. Sentarse en una mesa y jugar CONTRA BOTS de verdad
- *   5. Levantar y recuperar el saldo
- *   6. Registrarse en un campo, llenarlo con bots, y jugar
- *   7. Que el campo reparta el premio al ganador
+ *   3. Ver los tiers del lobby
+ *   4. Sentarse en una mesa cash y jugar CONTRA BOTS de verdad
+ *   5. Levantar y recuperar el stack exacto
+ *   6. Inscribirse en el freeroll de la hora y ver que arranca solo,
+ *      con bots de relleno, sin esperar a que se llene
  *
- * El paso 7 es el que no funciona. Y hasta que funcione, un campo es una promesa sin pago.
+ * La liquidacion de campos y freerolls se prueba en `test-e2e-field.js` y
+ * `test-freeroll.js`. Este recorrido comprueba lo que ve el jugador: deposito,
+ * mesa cash, bots y reloj del freeroll.
  *
  * Ejecutar: MONGODB_URI=mongodb://127.0.0.1:37017/cubapoker_viaje node scripts/test-viaje.js
  */
@@ -79,9 +81,9 @@ async function main() {
   const { paymentService } = require('../dist/services/payment/payment.service');
   const { seatingService } = require('../dist/game/seating.service');
   const { fieldManager } = require('../dist/game/field.manager');
+  const { freerollManager } = require('../dist/game/freeroll.service');
   const { tableManager } = require('../dist/game/table.manager');
-  const { getTier, TABLE_TIER_LIST } = require('../dist/config/product');
-  const { decideAction, botFactory } = require('../dist/game/bot.engine');
+  const { TABLE_TIER_LIST } = require('../dist/config/product');
   const { formatUnits } = require('../dist/config/units');
   const { TURN_TIMER, BOT_CONFIG } = require('../dist/config/product');
 
@@ -113,7 +115,7 @@ async function main() {
   try {
     const orden = await paymentService.createDepositOrder({
       telegramId: YOI,
-      amount: 20_000,
+      amount: 20,
       provider: 'usdt',
       chain: 'TRC20',
     });
@@ -122,8 +124,10 @@ async function main() {
 
     await paymentService.creditDepositOrder(orden.orderId ?? orden.id);
     const tras = await saldo();
-    if (tras === 20_000) ok(`saldo acreditado: ${formatUnits(tras)}`);
-    else bad(`el deposito no acredito bien: ${formatUnits(tras)}, esperado 20 USDT`);
+    // 20 USDT = 20.000 unidades. La comision de deposito es del 0,5 %
+    // (100 unidades) con tope de 500 unidades.
+    if (tras === 19_900) ok(`saldo acreditado: ${formatUnits(tras)} (20 USDT menos 0,5 %)`);
+    else bad(`el deposito no acredito bien: ${formatUnits(tras)}, esperado 19,9 USDT`);
   } catch (e) {
     bad(`el deposito falla: ${e.message}`);
     nota('Sin deposito no hay nada que probar mas abajo.');
@@ -132,11 +136,12 @@ async function main() {
   }
 
   // =====================================================================
-  titulo('Ver los campos y los tiers');
+  titulo('Ver los tiers del lobby');
 
-  const tier = TABLE_TIER_LIST[0];
-  ok(`tiers: ${TABLE_TIER_LIST.map((t) => `${t.id}(${t.buyInUsdt} USDT, ${t.fieldSize} jugadores)`).join(', ')}`);
-  nota(`campo de un tier: ${tier.fieldSize} participantes. Con poca liquidez, nadie puede entrar.`);
+  ok(
+    `tiers cash: ${TABLE_TIER_LIST.map((t) => `${t.id}(${t.buyInUsdt} USDT)`).join(', ')}`,
+  );
+  nota('VIP Arena se muestra aparte, como sala de high stakes, no como membresia.');
 
   // =====================================================================
   titulo('Sentarse en una mesa y jugar contra bots');
@@ -154,7 +159,7 @@ async function main() {
     }
   };
 
-  await darVueltas(60);
+  await darVueltas(250);
 
   const jugando = await Table.findOne({ tableId: sentado.tableId });
   const mios = jugando.seats.find((s) => s.playerId === String(YOI));
@@ -171,15 +176,39 @@ async function main() {
   // =====================================================================
   titulo('Levantar y recuperar el saldo');
 
+  // La regla de seguridad: con una mano en curso no se puede quitar el
+  // asiento, porque el motor sigue apuntando a indices viejos. Se comprueba
+  // que la API lo rechaza de verdad, no solo que el comentario lo diga.
+  const enMano = await Table.findOne({ tableId: sentado.tableId });
+  if (enMano && enMano.hand.phase !== 'idle' && enMano.hand.phase !== 'idle-awaiting') {
+    try {
+      await seatingService.standUp(YOI, sentado.tableId);
+      bad('dejo levantar a mitad de mano: el motor quedaria desindexado');
+    } catch (e) {
+      if (e.status === 409 || /mano en curso/i.test(e.message)) {
+        ok('bloquea levantarse a mitad de mano (409)');
+      } else {
+        bad(`el bloqueo de mitad de mano falla con otro error: ${e.message}`);
+      }
+    }
+  } else {
+    nota('la mano termino antes de probar el bloqueo; se valida el saldo igual');
+  }
+
   const antes = await saldo();
   let meLevante = false;
-  for (let i = 0; i < 25 && !meLevante; i++) {
+  let ultimoError = null;
+
+  // El gestor arranca la siguiente mano al quedar la mesa en reposo. Hay que
+  // intentarlo en esa ventana; si se pasa, se espera a que termine la nueva.
+  for (let i = 0; i < 600 && !meLevante; i++) {
     try {
       const r = await seatingService.standUp(YOI, sentado.tableId);
       meLevante = true;
       nota(`levantado al intento ${i + 1}, devuelto ${formatUnits(r.returned)}`);
     } catch (e) {
-      await new Promise((r) => setTimeout(r, 40));
+      ultimoError = e;
+      await new Promise((r) => setTimeout(r, 50));
     }
   }
 
@@ -188,170 +217,88 @@ async function main() {
     if (despues > antes) ok(`saldo recuperado: ${formatUnits(antes)} -> ${formatUnits(despues)}`);
     else bad(`no se ha recuperado nada: ${formatUnits(antes)} -> ${formatUnits(despues)}`);
   } else {
-    bad('NO se puede levantar de la mesa');
-  }
-
-  // =====================================================================
-  titulo('Entrar en un campo y llenarlo con bots');
-
-  // Un campo pequeño, porque a 300 no llega nadie nunca.
-  const OBJETIVO = 8;
-
-  await User.findOneAndUpdate({ telegramId: YOI }, { $set: { 'balance.real': 5_000_000 } });
-
-  const primero = await fieldManager.register(YOI, 't1', 'yo');
-  ok(`registrado en ${primero.fieldId} (sala ${primero.position})`);
-
-  const campo = await Field.findOne({ fieldId: primero.fieldId });
-  await Field.updateOne(
-    { _id: campo._id },
-    { $set: { targetField: OBJETIVO } },
-  );
-  nota(`campo recortado a ${OBJETIVO} para que arranque`);
-
-  const DESDE = 610_000_000;
-  for (let i = 0; i < OBJETIVO - 1; i++) {
-    const id = DESDE + i;
-    await User.findOneAndUpdate(
-      { telegramId: id },
-      {
-        $setOnInsert: {
-          telegramId: id,
-          username: 'b' + id,
-          firstName: 'B' + id,
-          balance: { real: 5_000_000, play: 0 },
-          stats: {
-            handsPlayed: 0, handsWon: 0, tablesJoined: 0,
-            freerollsPlayed: 0, totalRakePaid: 0, totalFreerollWon: 0,
-          },
-        },
-      },
-      { upsert: true, setDefaultsOnInsert: true },
+    bad(
+      `NO se puede levantar de la mesa tras 30 s` +
+      (ultimoError ? `: ${ultimoError.message}` : ''),
     );
-    try {
-      await fieldManager.register(id, 't1', 'b' + id);
-    } catch (e) {
-      bad(`el bot ${id} no pudo entrar: ${e.message}`);
-      break;
-    }
-  }
-
-  await darVueltas(40);
-
-  const campo2 = await Field.findOne({ fieldId: primero.fieldId });
-  nota(`campo: estado="${campo2.status}" sentados=${campo2.seated} vivos=${campo2.playersRemaining} de ${campo2.targetField}`);
-
-  if (campo2.status === 'running' || campo2.status === 'final') {
-    ok(`el campo arranco (${campo2.status})`);
-  } else {
-    bad(`el campo NO ha arrancado: sigue en "${campo2.status}" con ${campo2.seated} de ${campo2.targetField}`);
   }
 
   // =====================================================================
-  titulo('Que el campo reparta el PREMIO');
+  titulo('Inscribirse en el freeroll de la hora');
 
-  // A aqui es donde se pierde. El campo tiene que llegar a un ganador y pagarle.
-  // ------------------------------------------------------------------
-  // JUGAR POR LOS HUMANOS DEL CAMPO
-  //
-  // En un campo no hay bots: todos los asientos son `human`, y `checkTurnTimeout` sale
-  // temprano para los que no lo son. O sea que el campo lo juegan personas de verdad, y si
-  // nadie pulsa, la mano se queda esperando para siempre.
-  //
-  // Aqui se pulsa con la misma IA que usan los bots (`decideAction`) y por la misma ruta que
-  // la interfaz (`applyHumanAction`). No es un doble: es el codigo de produccion de las dos
-  // partes, decidir y aplicar. Lo unico que cambia es quien pulsa.
-  // ------------------------------------------------------------------
-  const perfiles = new Map();
-  const jugarTurnos = async () => {
-    const mesas = await Table.find({ 'field.fieldId': primero.fieldId });
-    for (const mesa of mesas) {
-      const entry = tableManager.engines.get(mesa.tableId);
-      if (!entry) continue;
+  // Regla de producto: el freeroll arranca a su hora con los humanos y los
+  // bots apuntados en ese momento. No espera a llenar 300 asientos.
+  // Se adelanta el reloj del slot para no esperar hasta la hora en punto.
+  const abierto = await freerollManager.asegurarAbierto();
+  const inscripcion = await freerollManager.registrar(YOI, 'yo', abierto.fieldId);
+  ok(`inscrito en ${inscripcion.fieldId} (posicion ${inscripcion.position})`);
 
-      const est = entry.engine.getState();
-      if (est.phase !== 'preflop' && est.phase !== 'flop' &&
-          est.phase !== 'turn' && est.phase !== 'river') continue;
+  await Field.updateOne(
+    { fieldId: abierto.fieldId },
+    {
+      $set: {
+        scheduledStartAt: new Date(Date.now() - 60_000),
+        lateRegUntil: new Date(Date.now() + 11 * 60_000),
+      },
+    },
+  );
+  nota('slot adelantado un minuto: el planificador debe arrancarlo ya');
 
-      const jugador = est.players[est.currentPlayerIndex];
-      if (!jugador) continue;
+  const arranque = await freerollManager.procesar();
+  if (arranque.arrancados >= 1) ok('el freeroll arranco sin esperar a llenarse');
+  else bad('el planificador no arranco el freeroll');
 
-      const asiento = mesa.seats.find((s) => s.index === parseInt(jugador.id, 10));
-      if (!asiento) continue;
+  const enJuego = await Field.findOne({ fieldId: abierto.fieldId });
+  const mesasFreeroll = await Table.find({ 'field.fieldId': abierto.fieldId });
+  const botsFreeroll = mesasFreeroll.reduce(
+    (n, m) => n + m.seats.filter((s) => s.kind === 'bot').length,
+    0,
+  );
 
-      if (!perfiles.has(asiento.index)) {
-        perfiles.set(asiento.index, botFactory.create(asiento.index));
-      }
+  nota(
+    `estado="${enJuego.status}" vivos=${enJuego.playersRemaining} ` +
+    `mesas=${mesasFreeroll.length} bots=${botsFreeroll}`,
+  );
 
-      const toCall = Math.max(0, est.currentBet - (jugador.bet || 0));
-      const conFichas = est.players.filter((p) => p.chips > 0).length;
-
-      const d = decideAction({
-        hand: jugador.cards,
-        community: est.communityCards,
-        potSize: est.pot,
-        toCall,
-        chips: jugador.chips,
-        profile: perfiles.get(asiento.index),
-        position: asiento.index,
-        playersLeft: conFichas,
-      });
-
-      await tableManager.applyHumanAction(mesa, asiento.index, d.action, d.amount);
-    }
-  };
-
-  nota('jugando por los jugadores del campo, con la IA de produccion...');
-
-  let termino = false;
-  for (let vuelta = 0; vuelta < 600 && !termino; vuelta++) {
-    await darVueltas(1, 8);
-    await jugarTurnos().catch(() => {});
-    const c = await Field.findOne({ fieldId: primero.fieldId });
-    if (c.status === 'finished') termino = true;
-    if (vuelta % 40 === 0) {
-      nota(`  vuelta ${vuelta}: ${c.status} vivos=${c.playersRemaining} eliminados=${c.eliminated}`);
-    }
+  if (enJuego.status === 'running' || enJuego.status === 'final') {
+    ok('el campo quedo en juego');
+  } else {
+    bad(`el campo no quedo en juego: "${enJuego.status}"`);
   }
 
-  const final = await Field.findOne({ fieldId: primero.fieldId });
-
-  nota(`estado final: "${final.status}" vivos=${final.playersRemaining} eliminados=${final.eliminated}`);
-  nota(`posiciones adjudicadas: ${(final.results || []).length}`);
-  nota(`rake registrado: ${formatUnits(final.rakeCollected)}`);
-  nota(`bote recogido: ${formatUnits(final.buyInsCollected)}`);
-
-  if (final.status === 'finished') {
-    ok('el campo TERMINO');
-
-    const ganador = (final.results || []).find((r) => r.position === 1);
-    if (ganador) {
-      const g = await User.findOne({ telegramId: ganador.telegramId });
-      ok(`ganador ${ganador.telegramId} por la posicion 1, premio ${formatUnits(ganador.amount)}`);
-      nota(`su saldo de promocion: ${formatUnits(g.balance.play)}`);
-      if (g.balance.play > 0) ok('ha cobrado el premio');
-      else bad('el ganador no tiene nada en promocion: no ha cobrado');
-    } else {
-      bad('el campo termino SIN ganador registrado');
-    }
-
-    if (final.rakeCollected > 0) {
-      const esperado = Math.floor(final.buyInsCollected * 0.05);
-      nota(`rake ${formatUnits(final.rakeCollected)}, el 5 % seria ${formatUnits(esperado)}`);
-    } else {
-      bad('el campo termino sin cobrar rake');
-    }
+  if (botsFreeroll > 0) {
+    ok(`${botsFreeroll} bots de relleno en las mesas del freeroll`);
   } else {
-    bad(`EL CAMPO NO TERMINA: se quedo en "${final.status}" con ${final.playersRemaining} vivos`);
-    nota(`Y por eso NADIE COBRA. Un Sit'n'Go que no acaba es una promesa sin pago.`);
-    nota(`Esperados ${OBJETIVO - 1} posiciones, adjudicadas ${(final.results || []).length}.`);
+    bad('no se sento ningun bot: la mesa se quedaria esperando');
+  }
 
-    const mesas = await Table.find({ 'field.fieldId': primero.fieldId });
-    for (const m of mesas) {
-      nota(`mesa ${m.tableId}: ${m.status} fase=${m.hand.phase} asientos=${m.seats.length}`);
-      for (const s of m.seats) {
-        nota(`    asiento ${s.index}: ${s.status} fichas=${s.chips}`);
-      }
+  const miEntrada = (enJuego.registrations || []).find(
+    (r) => Number(r.telegramId) === YOI,
+  );
+  if (miEntrada && (miEntrada.status === 'seated' || miEntrada.status === 'waiting')) {
+    ok(`mi inscripcion sigue viva (${miEntrada.status})`);
+  } else {
+    bad(
+      `mi inscripcion desaparecio: ` +
+      `${miEntrada ? miEntrada.status : 'sin registro'}`,
+    );
+  }
+
+  // El humano no pulsa: el temporizador lo retira y los bots deben seguir
+  // jugando. Se espera al menos una mano.
+  await darVueltas(250);
+  const mesaPropia = mesasFreeroll.find((m) =>
+    m.seats.some((s) => s.kind === 'human' && Number(s.playerId) === YOI),
+  );
+  if (mesaPropia) {
+    const fresca = await Table.findOne({ tableId: mesaPropia.tableId });
+    const botsConManos = fresca
+      ? fresca.seats.filter((s) => s.kind === 'bot' && (s.handsPlayed || 0) > 0).length
+      : 0;
+    if (botsConManos > 0) {
+      ok(`${botsConManos} bots jugaron una mano sin que el humano actuara`);
+    } else {
+      nota('los bots todavia no han cerrado una mano; el reloj del torneo sigue');
     }
   }
 

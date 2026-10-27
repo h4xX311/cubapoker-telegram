@@ -4,6 +4,7 @@ import { unitsToUsdt, formatUnits } from '../config/units';
 import { User } from '../models/User';
 import { PokerGame } from './game.state';
 import { botFactory, BotProfile, decideAction, mulberry32 } from './bot.engine';
+import { botAvatarFor } from '../config/avatars';
 import {
   TABLE_TIERS,
   TABLE_TIER_LIST,
@@ -484,10 +485,16 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
   }
 
   private async tick(): Promise<void> {
+    // Antes esta consulta filtraba `kind: 'cash'`. Los freerolls y centrolls
+    // viven en mesas `kind: 'freeroll'` / `'centroll'`, asi que el gestor
+    // NUNCA las procesaba: se sentaban los jugadores, se repartia el campo y
+    // la mesa se quedaba en `idle` para siempre. El jugador veia su asiento y
+    // su stack, pero no llegaba ni una carta. Aqui entran las tres clases de
+    // mesa; `processTable` decide despues que corresponde a cada una.
     const tables = await Table.find({
       status: { $in: ['waiting', 'running'] },
-      kind: 'cash',
-    }).limit(50);
+      kind: { $in: ['cash', 'freeroll', 'centroll'] },
+    }).limit(80);
 
     for (const table of tables) {
       // Con cerrojo: si el bot esta guardando esta mesa, el ciclo espera en vez de
@@ -555,9 +562,8 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
    *  - si la mesa esta llena, arranca o continua la mano
    */
   private async processTable(table: ITable): Promise<void> {
-    if (table.kind !== 'cash') return;
-
-    const tier = getTier(table.tierId || '');
+    // Las mesas de campo tambien necesitan que este ciclo les reparta manos y
+    // haga actuar a los bots. El filtro por clase se hace arriba, en `tick`.
     const maxSeats = table.maxSeats;
 
     // --- Rellenar con bots ---
@@ -565,36 +571,21 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
     const bots = table.seats.filter(s => s.kind === 'bot').length;
     const occupied = table.seats.length;
 
-    // ------------------------------------------------------------------
-    // UNA MESA DE CAMPO YA ARRANCADA NO RECIBE MAS BOTS
-    //
-    // Antes no habia ninguna comprobacion, y el campo no terminaba nunca.
-    //
-    // Cuando un bot caia, `finishHand` lo quita de la mesa y en el siguiente ciclo
-    // `needBots` volvia a ser cierto, asi que entraba un bot NUEVO con las fichas
-    // enteras. Los humanos solo tenian que ganar contra un rival recien nacido, y
-    // como siempre ganaban, ninguno se eliminaba jams. El campo se quedava con
-    // once vivos para siempre y ningun campo podia terminar.
-    //
-    // Se comprobo jugando un campo entero: 4 000 rondas, once vivos constantes,
-    // tres eliminados y ni uno ms. Con 300 jugadores, 43 mesas, esto es un producto
-    // que no acaba nunca y bloquea el dinero de todos en el campo.
-    //
-    // El bots siguen rellenando huecos mientras el campo se ESTA LLENANDO, que es
-    // justo cuando hacen falta. Una vez que arranca, la plantilla esta cerrada:
-    // los que no entraron no entran, y los que entraron no se van hasta que ganan
-    // oUntil que se les elimina.
-    const esCampoArrancado =
-      this.isFieldTable(table) &&
-      (table.field?.fieldStatus === 'running' || table.field?.fieldStatus === 'final');
-
-    // Nunca llena la mesa: el último asiento queda para un humano. En una HU
+    // Nunca llena la mesa: el ultimo asiento queda para un humano. En una HU
     // de 2 asientos esto es la diferencia entre una sala accesible y una sala
     // que el lobby muestra llena de bots y en la que nadie puede sentarse.
+    //
+    // Solo las ring tables cash se rellenan solas. En un campo (cash, freeroll
+    // o centroll) los bots los pone el gestor del campo al arrancar, en el
+    // numero justo para poder jugar. Si este ciclo los añadiera antes, un
+    // jugador que se inscribiera temprano veria la mesa llena de bots horas
+    // antes de la hora, y el campo arrancaria con una plantilla que nadie
+    // registro. Ademas, esos bots no son parte del bote del campo.
+    const esRingCash = table.kind === 'cash' && !this.isFieldTable(table);
     const desiredBots = botsForTable(maxSeats, humans);
 
     const needBots =
-      !esCampoArrancado &&
+      esRingCash &&
       occupied < maxSeats &&
       bots < Math.min(desiredBots, maxSeats - occupied);
 
@@ -654,8 +645,9 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
     // que no se mueve. Un jugador que levanta la cabeza ve una mesa parada y no tiene por que
     // saber que sus fichas (las de la mesa, no las suyas) estan ahi dentro.
     //
-    // Que se abandone es lo unico razonable: sin humano no hay partida, asi que las apuestas
-    // se devuelven a sus asientos y la mano se cierra sin ganador. El bote se recoge entero.
+    // Que se abandone es lo unico razonable: sin humano no hay partida. Lo aportado
+    // por el humano que se fue queda para la casa, como su apuesta al retirarse; los
+    // bots no tienen dinero propio. La mesa se vacia y vuelve al lobby.
     // ------------------------------------------------------------------------
     if (table.hand.phase !== 'idle' && table.hand.phase !== 'idle-awaiting') {
       const humanosVivos = table.seats.filter(
@@ -669,7 +661,8 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
       if (humanosVivos === 0 && !esDeCampo) {
         logger.warn(
           `Mesa ${table.tableId}: mano a medias (${table.hand.phase}) sin ningun humano ` +
-          `sentado. Se abandona y el bote (${table.hand.pot}) se devuelve a los bots.`,
+          `sentado. Se abandona; el bote (${table.hand.pot}) queda para la casa y la mesa ` +
+          'se vacia.',
         );
         await this.abandonHand(table);
       }
@@ -694,9 +687,16 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
       // asiento. Es lo que haria el jugador al pulsar "salir", pero sin que tenga que
       // pulsarlo, y sin dejar la mesa bloqueada mientras tanto.
       // ------------------------------------------------------------------
-      const humansSinFichas = table.seats.filter(
-        s => s.kind === 'human' && s.status === 'active' && s.chips <= 0,
-      );
+      // En un campo, un humano sin fichas es una ELIMINACION, no un busted
+      // de cash: la posicion y el dinero los decide `field.manager`. Si este
+      // ciclo le quitara el asiento antes de que el campo lo recoja, se
+      // perderia su posicion y las fichas que le quedaran en el bote.
+      const esDeCampoParaBust = this.isFieldTable(table);
+      const humansSinFichas = esDeCampoParaBust
+        ? []
+        : table.seats.filter(
+            s => s.kind === 'human' && s.status === 'active' && s.chips <= 0,
+          );
 
       for (const seat of humansSinFichas) {
         logger.warn(
@@ -746,28 +746,28 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
   }
 
   /**
-   * Abandona una mano en la que no queda ningun humano: devuelve cada apuesta a su asiento y
-   * cierra la mano sin ganador.
+   * Abandona una mano en la que no queda ningun humano: cierra la mano sin ganador,
+   * limpia apuestas y vacia la mesa.
    *
-   * Sin humano no hay partida, asi que no hay showdown posible. Las apuestas vuelven
-   * enteras a los bots (nadie gana ni pierde) y el bote se recoge. La mesa vuelve a `idle`
-   * y puede seguir jugando cuando vuelva a haber alguien.
-   *
-   * Las fichas de un BOT no salen de ningun sitio: las creo los bots al entrar. Devolverlas
-   * es lo correcto y es lo que mantiene el total de la mesa constante.
+   * Sin humano no hay partida ni showdown posible. Lo aportado por el humano que se
+   * fue queda para la casa, igual que su apuesta al retirarse. Los bots no tienen
+   * dinero propio, asi que devolverles el bote solo inflaria una mesa que se va a
+   * vaciar. La mesa vuelve a `waiting` para que el lobby no la muestre ocupada.
    */
   private async abandonHand(table: ITable): Promise<void> {
     // El motor de la mano se tira: sin humanos no hay mano que terminar, y dejarlo puesto
     // haria que el siguiente arranque de mano se encontrara un motor con estado viejo.
     this.engines.delete(table.tableId);
 
-    let devuelto = 0;
+    const bote = Math.max(0, table.hand.pot ?? 0);
+
+    // El bote NO se devuelve a los bots. Lo aportado por el humano que se fue
+    // queda para la casa, igual que su apuesta al retirarse: en cash, abandonar
+    // una mano no es cobrar la parte que ya pusiste. Los bots tampoco son
+    // jugadores con dinero propio. Lo que no se puede hacer es dejar el bote
+    // dentro de una mesa que se va a vaciar y decir en el log que se devolvio.
     for (const seat of table.seats) {
-      if (seat.bet > 0) {
-        seat.chips += seat.bet;
-        devuelto += seat.bet;
-        seat.bet = 0;
-      }
+      seat.bet = 0;
       seat.totalBet = 0;
     }
 
@@ -775,10 +775,25 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
     table.hand.pot = 0;
     table.hand.currentBet = 0;
     table.hand.lastActionAt = null;
+
+    // Sin humanos, la mesa vuelve al lobby y se vacia. Antes se quedaba
+    // `running` con bots sentados y una mano `idle`: ocupaba un slot, no
+    // arrancaba nunca y el siguiente humano podia acabar sentado en una mesa
+    // fantasma.
+    const humanosVivos = table.seats.filter(
+      s => s.kind === 'human' && s.status !== 'out',
+    ).length;
+
+    if (humanosVivos === 0) {
+      table.status = 'waiting';
+      table.seats = [];
+    }
+
     await table.save();
 
     logger.info(
-      `Mesa ${table.tableId}: mano abandonada, ${devuelto} unidades devueltas a los bots.`,
+      `Mesa ${table.tableId}: mano abandonada sin humanos. ` +
+      `${bote} unidades del bote quedan para la casa; la mesa vuelve a esperar.`,
     );
   }
 
@@ -846,6 +861,7 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
       kind: 'bot',
       playerId: profile.id,
       displayName: profile.name,
+      avatar: botAvatarFor(profile.name),
       chips: buyIn,
       bet: 0,
       totalBet: 0,
@@ -958,11 +974,28 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
     // Motor en memoria. `maxSeats` se pasa como tope del motor: sin el, el
     // motor limitaba a 6 jugadores y una mesa de 500 nunca arrancaba.
     const handSeed = Date.now() % 1000000;
+
+    // El rake se configura al crear el motor, no al cerrar la mano. Así el
+    // bote bruto sigue existiendo cuando hay que cobrarlo; antes `endGame`
+    // ponía `state.pot = 0` y `finishHand` calculaba un rake de cero.
+    const esRing = !this.isFieldTable(table);
+    const rakeConfig = table.kind === 'cash'
+      ? {
+          percentage: RAKE.cashPercentage,
+          cap: esRing
+            ? rakeCapFor(table.tierId, activeSeats.length)
+            : RAKE.cashMax,
+          minPot: RAKE.minPot,
+          requireFlopOr3Bet: esRing,
+        }
+      : undefined;
+
     const engine = new PokerGame(
       table.tableId,
       table.smallBlind,
       table.bigBlind,
       table.maxSeats,
+      rakeConfig,
     );
 
     // 7-max: entran todos los activos, sin tandas ni rotaciones. La confusion
@@ -1041,8 +1074,32 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
 
     table.hand.pot = state.pot;
     table.hand.currentBet = state.currentBet;
-    table.hand.actingSeat = state.currentPlayerIndex;
-    table.hand.dealerSeat = state.dealerIndex;
+
+    // ------------------------------------------------------------------
+    // `currentPlayerIndex` NO ES UN INDICE DE ASIENTO
+    //
+    // Es la posicion dentro de `state.players`, que es la lista de los que
+    // entraron en ESTA mano. En una mesa con huecos (el asiento 1 se libero, por
+    // ejemplo) la lista es [0, 2, 3] y `currentPlayerIndex = 1` significa el
+    // asiento 2, no el 1.
+    //
+    // Guardarlo en crudo hacia que `hand.actingSeat` apuntase a otro jugador:
+    // la API rechazaba la accion del humano con "No es tu turno" y la mesa se
+    // quedaba esperando a un asiento que no tenia el turno. Se traduce aqui, en
+    // el unico punto que escribe el estado publico.
+    // ------------------------------------------------------------------
+    const actingPlayer =
+      ACTION_PHASES.has(state.phase) ? state.players[state.currentPlayerIndex] : undefined;
+    const actingSeat = actingPlayer ? parseInt(actingPlayer.id, 10) : -1;
+    table.hand.actingSeat = Number.isNaN(actingSeat) ? -1 : actingSeat;
+
+    // Lo mismo con el boton. `dealerIndex` tambien es una posicion dentro de
+    // `state.players`, no el numero de asiento que se guarda en la mesa y que
+    // usa `startHand` para rotar. Sin esta traduccion el boton saltaba asientos
+    // o se quedaba clavado en cuanto habia un hueco.
+    const dealerPlayer = state.players[state.dealerIndex];
+    const dealerSeat = dealerPlayer ? parseInt(dealerPlayer.id, 10) : -1;
+    table.hand.dealerSeat = Number.isNaN(dealerSeat) ? -1 : dealerSeat;
     table.hand.communityCards = state.communityCards.map(
       c => `${c.rank}|${c.suit}`,
     );
@@ -1200,10 +1257,25 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
       // que el bot tarda en decidir. Decidir fuera del cerrojo dejaria una ventana entre
       // "ha decidido" y "va a guardar" por la que se cuela el ciclo.
       // ------------------------------------------------------------------
+      const tableId = table.tableId;
+      const manoDelTimer = table.hand.handNumber;
       const timer = setTimeout(() => {
-        this.withTableLock(table.tableId, () => this.playBotTurn(table)).catch((e) =>
-          logger.error('Error bot turn:', e),
-        );
+        // RELEER DENTRO DEL CERROJO, NO USAR LA COPIA DEL `setTimeout`.
+        //
+        // El temporizador captura el documento que habia cuando se programo. Si
+        // mientras tanto el jugador se levanta, se sienta otro o el tick guarda
+        // la mesa, esa copia queda con una version vieja. El cerrojo evita que
+        // las escrituras se pisen, pero no arregla la copia: al guardar salta
+        // `VersionError` y el turno del bot se pierde.
+        //
+        // Se revalida tambien la mano. Un timer de la mano anterior no debe
+        // actuar sobre una mano nueva que ya empezo.
+        this.withTableLock(tableId, async () => {
+          const actual = await Table.findOne({ tableId });
+          if (!actual) return;
+          if (actual.hand.handNumber !== manoDelTimer) return;
+          await this.playBotTurn(actual);
+        }).catch((e) => logger.error('Error bot turn:', e));
       }, delay);
       timer.unref?.();
       this.turnTimers.set(table.tableId, timer);
@@ -1314,6 +1386,8 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
       profile,
       position: seat.index,
       playersLeft: activePlayers,
+      currentBet: state.currentBet,
+      minRaise: state.minRaise,
     });
 
     // ------------------------------------------------------------------
@@ -1459,6 +1533,13 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
 
   /** Cierra la mano: reparte el bote, cobra rake y limpia para la siguiente. */
   private async finishHand(table: ITable, engine: PokerGame): Promise<void> {
+    // Cerrojo de liquidación: `applyHumanAction`, el turno del bot y el tick
+    // pueden coincidir al ver la mano terminada. Sin esto, el rake y las
+    // estadísticas se cobrarían dos veces. El motor se saca del mapa en el
+    // primer intento; el segundo no encuentra nada y se va.
+    if (!this.engines.has(table.tableId)) return;
+    this.engines.delete(table.tableId);
+
     const state = engine.getState();
 
     // Limpiar timer
@@ -1468,38 +1549,19 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
       this.turnTimers.delete(table.tableId);
     }
 
-    // --- Rake ---
-    //
-    // Regla de CoinPoker: en cash solo se cobra rake si hubo flop o si hubo
-    // una 3-bet preflop. Una mano que se resuelve preflop con un raise normal
-    // no paga. El tope depende de la sala y de cuántos jugadores recibieron
-    // cartas; el tope global de 100 unidades era el de la micro y convertía
-    // las mesas altas en mesas sin rake.
-    let rake = 0;
-    const jugadoresConCartas = state.players.filter(p => p.cards.length > 0).length;
-    const huboPostflop = state.communityCards.length > 0;
-    const hubo3Bet = (state.preflopRaises ?? 0) >= 2;
-    // Las mesas de un campo (torneo, freeroll, centroll) no son cash ring: su
-    // economía ya está definida por el campo. La regla de "flop o 3-bet" es
-    // solo para ring tables.
-    const esRing = !this.isFieldTable(table);
+    // El motor ya evaluó, pagó los botes laterales y descontó el rake. Aquí
+    // solo se refleja en la mesa y se contabiliza. NO se vuelve a pagar a los
+    // ganadores: hacerlo era un doble abono invisible, porque el motor ya había
+    // sumado el bote a `player.chips`.
+    this.syncEngineToTable(table, engine);
 
-    if (
-      table.kind === 'cash' &&
-      state.pot >= RAKE.minPot &&
-      (!esRing || huboPostflop || hubo3Bet)
-    ) {
-      rake = Math.min(
-        Math.floor((state.pot * RAKE.cashPercentage) / 100),
-        esRing
-          ? rakeCapFor(table.tierId, jugadoresConCartas)
-          : RAKE.cashMax,
-      );
+    const rake = Math.max(0, Math.floor(state.rake ?? 0));
+    if (rake > 0) {
       table.stats.rakeCollected += rake;
 
-      // El rake de las mesas de un campo se acumula ahi. Lo necesita el field
-      // manager para calcular el bote neto del campo: si no, creeria que el
-      // bote es el bruto y pagaria de mas.
+      // El rake de las mesas de un campo se acumula ahí. Lo necesita el field
+      // manager para calcular el bote neto del campo: si no, creería que el
+      // bote es el bruto y pagaría de más.
       if (this.isFieldTable(table) && table.field?.fieldId) {
         await Field.updateOne(
           { fieldId: table.field.fieldId },
@@ -1507,31 +1569,65 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
         );
       }
 
-      // El rake por jugador se anota aqui, mientras `seat.totalBet` todavia
-      // tiene lo que cada uno aporto a la mano. Despues del reparto se reinicia
-      // y el rakeback saldria siempre cero.
+      // El rake por jugador se anota aquí, mientras `seat.totalBet` todavía
+      // tiene lo que cada uno aportó a la mano. Después del reparto se reinicia
+      // y el rakeback saldría siempre cero.
       await rakebackService.recordTableRake(table, rake);
     }
 
-    const netPot = state.pot - rake;
+    // --- Estadísticas de la sesión --------------------------------------
+    const payouts = new Map(
+      (state.payouts ?? []).map(p => [p.playerId, p.amount]),
+    );
+    const winnerIds = new Set((state.winners ?? []).map(w => w.playerId));
 
-    // --- Reparto ---
-    const winners = state.winners || [];
-    const shareEach = winners.length > 0 ? Math.floor(netPot / winners.length) : 0;
-
-    for (const winner of winners) {
-      const seatIndex = parseInt(winner.playerId, 10);
-      const seat = table.seats.find(s => s.index === seatIndex);
-      if (!seat) continue;
-
-      seat.chips += shareEach;
-      seat.handsWon += 1;
-      seat.netChips += shareEach;
-      // Sincronizar con el saldo real del usuario
-      if (seat.kind === 'human') {
-        await this.settleHumanSeat(table, seat, shareEach);
-      }
+    for (const seat of table.seats) {
+      const id = String(seat.index);
+      const won = payouts.get(id) ?? 0;
+      if (winnerIds.has(id)) seat.handsWon += 1;
+      // Neto real de la mano: lo que cobró menos lo que puso. Antes solo se
+      // sumaban las ganancias y el balance de sesión mentía.
+      seat.netChips += won - (seat.totalBet ?? 0);
     }
+
+    // --- Resultado de la mano para la UI --------------------------------
+    // Se guarda antes de limpiar el estado. La mesa puede volver a `idle` en
+    // milisegundos; sin esto el jugador nunca ve quién ganó ni con qué mano.
+    const seatDe = (engineId: string): ISeat | undefined =>
+      table.seats.find(s => String(s.index) === engineId);
+    const fmt = (c: any): string => `${c.rank}|${c.suit}`;
+
+    table.hand.lastResult = {
+      handNumber: table.hand.handNumber,
+      endedAt: new Date().toISOString(),
+      pot: state.potGross ?? 0,
+      potUsdt: unitsToUsdt(state.potGross ?? 0),
+      rake,
+      rakeUsdt: unitsToUsdt(rake),
+      board: (state.communityCards ?? []).map(fmt),
+      winners: (state.winners ?? []).map(w => {
+        const seat = seatDe(w.playerId);
+        return {
+          seatIndex: seat?.index ?? Number(w.playerId),
+          displayName: seat?.displayName ?? 'Jugador',
+          amount: w.amount,
+          amountUsdt: unitsToUsdt(w.amount),
+          handName: w.hand?.name ?? '',
+          cards: (w.hand?.bestCards ?? []).map(fmt),
+        };
+      }),
+      showdown: (state.showdown ?? []).map(s => {
+        const seat = seatDe(s.playerId);
+        return {
+          seatIndex: seat?.index ?? Number(s.playerId),
+          displayName: seat?.displayName ?? 'Jugador',
+          cards: s.cards.map(fmt),
+          handName: s.hand?.name ?? '',
+        };
+      }),
+      endedByFold: (state.showdown ?? []).length === 0,
+      unit: table.kind === 'cash' && !this.isFieldTable(table) ? 'USDT' : 'PTS',
+    };
 
     // Quitar jugadores que se quedaron sin fichas.
     // El buy-in ya se desconto del wallet al sentarse, asi que perderlo en la
@@ -1557,7 +1653,6 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
     }
 
     // --- Reiniciar el ciclo ---
-    this.engines.delete(table.tableId);
     table.hand.phase = 'idle';
     table.hand.pot = 0;
     table.hand.currentBet = 0;
@@ -1565,8 +1660,10 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
     table.hand.actingSeat = -1;
     table.hand.lastActionAt = undefined;
 
-    // Barajar dealer
-    this.rotateDealer(table);
+    // El boton NO se rota aqui. `startHand` ya lo hace al principio de cada
+    // mano, saltando huecos y asientos eliminados. Rotarlo tambien al cerrar
+    // la mano lo movia DOS veces por vuelta: el boton se saltaba un jugador en
+    // cada mano y repartia las ciegas mal.
 
     // ------------------------------------------------------------------
     // LOS ASIENTOS VUELVEN A `active`
@@ -1603,21 +1700,17 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
     // ------------------------------------------------------------------
     // CAMPO vs MESA CASH
     // ------------------------------------------------------------------
-    // Abajo hay dos caminos distintos y la diferencia no es cosmetica.
+    // MESA CASH (sin `field`): el stack vive en la mesa mientras el jugador
+    // sigue sentado. Se compra una vez al sentarse y se cobra una vez al
+    // levantarse. Antes se abonaba el stack al monedero al final de CADA mano y
+    // se dejaba el asiento a cero: el jugador solo podía jugar una mano, y si
+    // hubiera ganado se le habría pagado dos veces (una al ganar y otra al
+    // "cerrar" la mano).
     //
-    // MESA CASH (sin `field`): al cerrar la mano, las fichas vuelven al
-    // monedero y el jugador vuelve a comprar si le alcanza. Se entra y se sale
-    // cuando uno quiere. Es una mesa de cash normal.
-    //
-    // MESA DE CAMPO (con `field.fieldId`): las fichas NO vuelven al monedero.
-    // El buy-in se cobro una vez al registrarse y queda bloqueado hasta que el
-    // jugador es eliminado o gana el campo. Si devolvieran el saldo cada mano,
-    // un "campo de 500" serian 500 partidas sueltas de una mesa de 7: no habria
-    // ni eliminaciones, ni posiciones, ni mesa final.
-    //
-    // Quien decide cuando se devuelve el dinero es `field.manager.ts`, que
-    // conoce las posiciones. Aqui solo se marca al jugador como eliminado y se
-    // le deja el resto de fichas para que el campo lo liquide.
+    // MESA DE CAMPO (con `field.fieldId`): las fichas tampoco vuelven al
+    // monedero. El buy-in se cobró una vez al registrarse y queda bloqueado
+    // hasta que el jugador es eliminado o gana el campo. Quien decide cuándo se
+    // devuelve el dinero es `field.manager.ts`, que conoce las posiciones.
 
 if (this.isFieldTable(table)) {
       // ------------------------------------------------------------------
@@ -1716,44 +1809,34 @@ if (this.isFieldTable(table)) {
       return;
     }
 
-    // --- Mesa cash: el flujo de siempre ---
-    // Los bots eliminados se van; los humanos se conservan para decidir
-    table.seats = table.seats.filter(
-      s => s.status !== 'eliminated' || s.kind === 'human',
-    );
-
-    // Evaluar humanos: si ya no alcanzan el buy-in minimo, se retiran y se les
-    // devuelve lo que queda en la mesa (que en cash es saldo real).
-    const stillPlaying: ISeat[] = [];
-    for (const seat of table.seats) {
-      if (seat.kind !== 'human') {
-        stillPlaying.push(seat);
-        continue;
+    // --- Mesa cash -------------------------------------------------------
+    // El stack se queda en la mesa. Solo se retiran los que se quedaron a cero:
+    // un humano sin fichas no puede jugar la siguiente mano y, si se dejara
+    // sentado, bloquearía el arranque. Su buy-in ya se perdió; no hay nada que
+    // abonarle (devolver 0 no es una operación de dinero).
+    const humanosSinFichas: number[] = [];
+    table.seats = table.seats.filter(seat => {
+      if (seat.status === 'out') return false;
+      if (seat.chips <= 0) {
+        if (seat.kind === 'human') {
+          const telegramId = Number(seat.playerId);
+          if (Number.isFinite(telegramId)) humanosSinFichas.push(telegramId);
+        }
+        return false;
       }
+      seat.status = 'active';
+      return true;
+    });
 
-      if (seat.chips > 0) {
-        await User.updateOne(
-          { telegramId: Number(seat.playerId) },
-          { $inc: { 'balance.real': seat.chips } },
-        );
-        seat.chips = 0;
-      }
-
-      //Sigue pudiendo comprar entrada para la siguiente mano? El umbral es el
-      // buy-in de la mesa. Si no alcanza, se retira y se le queda lo que tenia.
-      //
-      // Esto es de MESA CASH suelta. En un campo (rama de arriba) el jugador no
-      // vuelve a comprar: su_stack vive hasta que lo eliminan.
-      const user = await User.findOne({ telegramId: Number(seat.playerId) });
-      const available = user ? user.balance.real + user.balance.play : 0;
-      if (available >= table.buyInUnits) {
-        seat.status = 'active';
-        stillPlaying.push(seat);
-      }
+    for (const telegramId of humanosSinFichas) {
+      await User.updateOne(
+        { telegramId },
+        { $set: { activeTableId: null } },
+      );
     }
-    table.seats = stillPlaying;
 
-    // Si no quedan humanos, la mesa se vacia y vuelve a esperar
+    // Si no quedan humanos, la mesa se vacía y vuelve a esperar. Los bots no
+    // sostienen una mesa cash: sin un humano no hay partida que cobrar.
     const humansLeft = table.seats.filter(s => s.kind === 'human').length;
     if (humansLeft === 0) {
       table.status = 'waiting';
@@ -1776,40 +1859,6 @@ if (this.isFieldTable(table)) {
   }
 
   /**
-   * Sincroniza el saldo de un humano tras ganar.
-   * El dinero que gana en la mesa es retirable (viene de mesas cash con buy-in
-   * de saldo real), salvo que la mesa sea freeroll.
-   *
-   * EXCEPCION DEL CAMPO: en una mesa de campo NO se abona aqui. Las fichas se
-   * quedan en el asiento (suben a `seat.chips`) y el `field.manager` las
-   * liquida al final. Si se abonaran al monedero en cada mano, el jugador
-   * tendria su dinero en la cartera mientras sigue sentado, y podria
-   * reiniciarse el servicio y perder el saldo de la mesa sin que nadie lo
-   * supiera.
-   */
-  private async settleHumanSeat(
-    table: ITable,
-    seat: ISeat,
-    amount: number,
-  ): Promise<void> {
-    if (this.isFieldTable(table)) return;
-
-    const field = table.kind === 'freeroll' ? 'balance.play' : 'balance.real';
-    await User.updateOne(
-      { telegramId: Number(seat.playerId) },
-      { $inc: { [field]: amount } },
-    );
-  }
-
-  private rotateDealer(table: ITable): void {
-    if (table.seats.length === 0) {
-      table.hand.dealerSeat = 0;
-      return;
-    }
-    table.hand.dealerSeat = (table.hand.dealerSeat + 1) % table.seats.length;
-  }
-
-  /**
    * Aplica una accion de un jugador humano.
    *
    * Es el unico punto por el que la Mini App modifica el estado de una mano,
@@ -1826,21 +1875,27 @@ if (this.isFieldTable(table)) {
     // Tercer punto de entrada, y el que mas duele cuando falla: es la accion del jugador
     // de verdad, y si se pierde, el usuario ve que no le pasa nada y no sabe por que.
     return this.withTableLock(mesa.tableId, async () => {
-      const table = mesa;
+      // RELEER DENTRO DEL CERROJO. La mesa que llega desde la ruta se leyo
+      // antes de esperar el turno; si un bot guardo mientras tanto, esa copia
+      // tiene una version vieja y `save()` lanzaria `VersionError`. La accion
+      // del humano se perderia justo cuando mas importa.
+      const table = await Table.findOne({ tableId: mesa.tableId });
+      if (!table) return false;
+
       const entry = this.engines.get(table.tableId);
       if (!entry) return false;
 
-    const { engine } = entry;
+      const { engine } = entry;
 
-    const applied = engine.performAction(seatIndex.toString(), action, amount);
-    if (!applied) return false;
+      const applied = engine.performAction(seatIndex.toString(), action, amount);
+      if (!applied) return false;
 
-    this.syncEngineToTable(table, engine);
-    table.hand.lastActionAt = new Date();
-    await table.save();
+      this.syncEngineToTable(table, engine);
+      table.hand.lastActionAt = new Date();
+      await table.save();
 
-    // Si la mano termino, liquidar
-    const state = engine.getState();
+      // Si la mano termino, liquidar
+      const state = engine.getState();
       if (state.phase === 'finished' || state.phase === 'showdown') {
         await this.finishHand(table, engine);
       } else {
@@ -1863,25 +1918,34 @@ if (this.isFieldTable(table)) {
       .sort({ kind: 1, tierId: 1 })
       .limit(60);
 
-    return tables.map(t => ({
-      tableId: t.tableId,
-      kind: t.kind,
-      tierId: t.tierId,
-      prizeTier: t.prizeTier,
-      status: t.status,
-      // Todo en USDT para la UI. Internamente son unidades (ver config/units).
-      smallBlind: unitsToUsdt(t.smallBlind),
-      bigBlind: unitsToUsdt(t.bigBlind),
-      buyIn: unitsToUsdt(t.buyInUnits),
-      maxSeats: t.maxSeats,
-      // Sin desglose humano/bot: el lobby publico solo necesita saber si hay sitio.
-      occupied: t.seats.length,
-      pot: t.hand.pot,
-      phase: t.hand.phase,
-      handNumber: t.hand.handNumber,
-      rakeCollected: t.stats.rakeCollected,
-      prizePaid: t.stats.prizePaid,
-    }));
+    return tables.map(t => {
+      const esCashRing = t.kind === 'cash' && !t.field?.fieldId;
+      return {
+        tableId: t.tableId,
+        kind: t.kind,
+        tierId: t.tierId,
+        formatId: t.formatId ?? '7max',
+        prizeTier: t.prizeTier,
+        status: t.status,
+        mode: esCashRing ? 'USDT' : 'PTS',
+        // Ciegas y buy-in en USDT para la UI del lobby. Internamente son
+        // unidades (ver config/units). En torneos el cliente usa `mode` para
+        // pintar puntos y no dólares.
+        smallBlind: unitsToUsdt(t.smallBlind),
+        bigBlind: unitsToUsdt(t.bigBlind),
+        buyIn: unitsToUsdt(t.buyInUnits),
+        maxSeats: t.maxSeats,
+        // Sin desglose humano/bot: el lobby público solo necesita saber si hay
+        // sitio. Los bots no se anuncian en ninguna pantalla.
+        occupied: t.seats.length,
+        pot: t.hand.pot,
+        potUsdt: unitsToUsdt(t.hand.pot),
+        phase: t.hand.phase,
+        handNumber: t.hand.handNumber,
+        rakeCollected: t.stats.rakeCollected,
+        prizePaid: t.stats.prizePaid,
+      };
+    });
   }
 
   /** Vista publica de una mesa para un jugador concreto. */
@@ -1918,13 +1982,30 @@ if (this.isFieldTable(table)) {
           suit: c.suit,
         }));
       }
-      view.isMyTurn = entry.engine.getState().currentPlayerIndex === seat.index;
+      const engineState = entry.engine.getState();
+      const enTurno = ['preflop', 'flop', 'turn', 'river'].includes(engineState.phase)
+        && engineState.currentPlayerIndex === seat.index;
+
+      view.isMyTurn = enTurno;
+      view.myHand = playerState?.myHand ?? null;
+      view.myChips = playerState?.myChips ?? seat.chips;
+      view.myBet = playerState?.myBet ?? seat.bet;
+      view.toCall = playerState?.toCall ?? 0;
+      view.minRaise = playerState?.minRaise ?? engineState.minRaise;
+      view.canCheck = playerState?.canCheck ?? false;
+      view.canRaise = playerState?.canRaise ?? false;
     } else {
       view.myCards = [];
       view.isMyTurn = false;
+      view.myChips = seat.chips;
+      view.myBet = 0;
+      view.toCall = 0;
+      view.minRaise = table.bigBlind;
+      view.canCheck = false;
+      view.canRaise = false;
     }
 
-    view.turnEndsAt = table.hand.lastActionAt
+    view.turnEndsAt = view.isMyTurn && table.hand.lastActionAt
       ? new Date(
           new Date(table.hand.lastActionAt).getTime() + TURN_TIMER.humanMs,
         ).toISOString()
@@ -1947,7 +2028,9 @@ if (this.isFieldTable(table)) {
     if (total < minBuyIn) {
       return {
         ok: false,
-        reason: `Necesitas ${minBuyIn} CUP para esta mesa. Tienes ${total}.`,
+        reason:
+          `Necesitas ${unitsToUsdt(minBuyIn)} USDT para esta mesa. ` +
+          `Tienes ${unitsToUsdt(total)} USDT.`,
         real: user.balance.real,
         play: user.balance.play,
       };

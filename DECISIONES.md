@@ -307,9 +307,10 @@ el plan `elite` desapareció del 3-Bet Club y VIP Arena pasó al lobby de cash.
 - No hay precio de acceso ni botón de compra. Se entra con el buy-in, como en cualquier mesa.
 - Los jugadores reciben un **profit share semanal del 15 %** del rake que generaron en esa sala,
   pagado los lunes UTC a `balance.real`.
-- Es un programa aparte del 3-Bet Club: un miembro del 3-Bet que juegue en Arena cobra su 10 %
-  sobre todo el rake cash **y además** el 15 % del rake de Arena. Los pagos se guardan en
-  `ArenaPayout`, con índice único `{telegramId, weekKey}`, separado de `RakebackPayout`.
+- Es un programa aparte del 3-Bet Club y las dos bolsas no se suman: el 10 % del 3-Bet se paga
+  solo sobre mesas cash normales, y el 15 % de Arena se paga solo sobre el rake de esa sala. Un
+  miembro que juegue Arena recibe el 15 %, no el 25 %. Los pagos se guardan en `ArenaPayout`,
+  con índice único `{telegramId, weekKey}`, separado de `RakebackPayout`.
 - El reintento de Arena usa la clave `arena_profit_share:YYYY-MM-DD`, distinta de la del
   3-Bet. El mismo jugador puede cobrar ambos programas de la misma semana sin que uno bloquee
   al otro ni se acredite dos veces.
@@ -324,3 +325,104 @@ el plan `elite` desapareció del 3-Bet Club y VIP Arena pasó al lobby de cash.
 - Pasarelas reales de depósito/retiro: requieren cuenta de empresa y credenciales; hoy se
   simulan.
 - Validación con Telegram real y token de @BotFather: pendiente.
+
+---
+
+## 7 · Bots y salida de mesa: reglas que no se tocan
+
+### 7.1 · Los bots no se anuncian
+
+`toPublicTable` no envía `kind`, `botProfile` ni identificadores internos del
+asiento. La vista pública solo lleva nombre, avatar, fichas, apuesta, estado y
+acciones. Los bots usan nombres y avatares del catálogo común; nunca un avatar
+exclusivo de miembro ni una etiqueta que insinúe que son bots.
+
+### 7.2 · Deciden con precio, no con una lista fija
+
+La IA usa fuerza de mano, **pot odds** y proyectos de color/escalera:
+
+- Aire contra un bote grande se retira; 7-2 no paga cualquier cosa.
+- Una pareja débil o un proyecto no se trata como aire: puede igualar o
+  semi-farolear.
+- Una mano fuerte no se retira por precio; con un bote grande puede meter el
+  stack para que el torneo avance.
+- Con pocos jugadores sube la presión y se amplía el rango de subida.
+- El retardo de decisión sigue siendo variable; no hay un metrónomo.
+
+El objetivo no es que los bots ganen, sino que no se puedan leer en dos órbitas.
+La prueba `test-bot-pace.js` mide el ritmo y las decisiones; la de `test-cash`
+mide que el dinero de las manos cuadre.
+
+### 7.3 · No se quita un asiento a mitad de mano
+
+`standUp` rechaza con 409 mientras `hand.phase` no sea `idle` o
+`idle-awaiting`, aunque la apuesta viva sea cero. Quitar el asiento y
+reindexar la mesa dejaría al motor en memoria apuntando a índices viejos y la
+mano seguiría con los jugadores equivocados.
+
+Los timers de bots releen la mesa dentro del cerrojo y comprueban que la mano
+no haya cambiado. Sin eso, un `setTimeout` guardaba una copia vieja y producía
+`VersionError` justo cuando el jugador se levantaba o el tick avanzaba.
+
+### 7.4 · Freerolls y centrolls también se procesan
+
+`tableManager.tick()` consulta `cash`, `freeroll` y `centroll`. Antes solo
+buscaba `cash`, así que un freeroll se llenaba de jugadores y se quedaba en
+`idle` para siempre, sin repartir una sola carta. El relleno automático de bots
+sigue limitado a ring cash; en los campos los pone el gestor del campo al
+arrancar.
+
+---
+
+## 8 · Unidades enteras y conservación de fichas
+
+**Decisión:** las ciegas, los stacks, las apuestas y el rake son **unidades
+enteras**. No existe media ficha. El motor rechaza una mesa con ciegas
+fraccionarias al construirla, en lugar de aceptarla y descubrir el descuadre
+cuando ya hay dinero dentro.
+
+### 8.1 · Por qué
+
+Las unidades internas son milésimas de USDT. Una ciega de 12,5 unidades no es
+representable en el ledger: cualquier división posterior produce fracciones y
+el reparto deja de cuadrar. La primera versión del test de conservación generó
+por error una ciega pequeña de 12,5 y encontró el síntoma; el motor ahora lo
+rechaza en la puerta.
+
+El rake ya se calcula con `Math.floor`: **nunca se redondea hacia arriba**.
+Cobrar una unidad de más en una mano es un bug de dinero; cobrar una de menos
+es una decisión conservadora y se queda en la casa. El tope por mesa se aplica
+después del redondeo.
+
+### 8.2 · Invariante
+
+Para cada mano:
+
+1. El total inicial es la suma de los stacks de todos los jugadores.
+2. Después de cualquier acción legal:
+
+   `suma(chips de jugadores) + bote = total inicial`
+
+3. Al cerrar la mano:
+
+   `suma(chips de jugadores) + rake = total inicial`
+
+4. El bote queda en cero y ningún jugador puede tener fichas negativas.
+
+La prueba `scripts/test-chip-conservation.js` ejecuta 240 manos aleatorias con
+2–7 jugadores, ciegas variadas, stacks desiguales, all-in y rake, además de
+casos límite de heads-up, all-in múltiple y botes laterales. Está en el runner
+estándar y también se puede ejecutar sola con `npm run test:fichas`.
+
+### 8.3 · Qué se toma de otros proyectos
+
+- La **propiedad** de conservación de fichas está inspirada en
+  `poker-engine-ts` (MIT). El motor, el reducer y el modelo de eventos no se
+  copiaron: CubaPoker conserva su motor y solo adopta la invariante y la forma
+  de probarla.
+- La idea de que una acción forzada por tiempo también debe **entregarse** al
+  cliente viene de los errores documentados de QvaPoker (AGPL). No se copió su
+  servidor C++.
+- La separación entre rake y saldo del jugador viene de la misma fuente: el
+  rake no es una transferencia de la cuenta del jugador, es una parte del bote
+  que no se reparte.

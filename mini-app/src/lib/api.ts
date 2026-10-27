@@ -131,6 +131,11 @@ export interface DepositOrder {
 export const api = {
   // Sesion
   me: () => request<any>('/me'),
+  updateAvatar: (avatar: string) =>
+    request<{ success: boolean; avatar: string; avatarCatalog: any[] }>('/me/avatar', {
+      method: 'POST',
+      body: { avatar },
+    }),
 
   // Pagos
   chains: () => request<{ chains: ChainInfo[]; simulate: boolean }>('/payment/chains'),

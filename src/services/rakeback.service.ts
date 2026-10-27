@@ -15,7 +15,10 @@ import { logger } from '../utils/logger';
  *   - Se atribuye rake a cada humano en proporcion a lo que aporto al bote de
  *     la mano. Es la forma mas justa sin guardar el historial completo de la
  *     mano: quien puso mas dinero, genero mas rake.
- *   - El pago es del 10% (15% en VIP Arena) del rake de la semana anterior.
+ *   - El pago es del 10% del rake de la semana anterior en mesas cash
+ *     NORMALES. VIP Arena queda fuera: su rake se reparte aparte como profit
+ *     share (15%) entre los participantes de esa sala. Asi el mismo rake no
+ *     se paga dos veces a un miembro que juegue Arena.
  *   - Se paga una sola vez por jugador y semana, garantizado por el indice
  *     unico de `RakebackPayout`.
  *   - El dinero va a `balance.real`: es retirable, no saldo de promocion.
@@ -83,7 +86,7 @@ export interface RakebackStatus {
   weekStart: string;
   weekEnd: string;
   rakebackPercent: number;
-  /** Rake generado en la semana que se esta pagando. */
+  /** Rake de mesas cash normales en la semana que se esta pagando. */
   rakeUnits: number;
   /** Lo que corresponde por esa semana. */
   estimatedUnits: number;
@@ -113,11 +116,25 @@ export interface ArenaStatus {
   nextPayoutAt: string;
 }
 
+/**
+ * Suma el rake de un jugador en un intervalo.
+ *
+ * `soloArena` no es un booleano cualquiera: distingue las dos bolsas que no
+ * pueden mezclarse.
+ *
+ *   true  -> solo eventos de VIP Arena (profit share del 15%)
+ *   false -> solo mesas cash normales (rakeback del 3-Bet Club)
+ *   null  -> todos (solo para diagnostico; no usar para pagar)
+ *
+ * Antes el 3-Bet Club sumaba tambien Arena y un miembro recibia 10% + 15%
+ * sobre el mismo rake. Eso convertia la sala premium en un agujero: el
+ * porcentaje de devolucion superaba el margen que la mesa pretendia dejar.
+ */
 const rakeBetween = async (
   telegramId: number,
   start: Date,
   end: Date,
-  soloArena = false,
+  soloArena: boolean | null = null,
 ): Promise<number> => {
   if (start >= end) return 0;
 
@@ -125,7 +142,8 @@ const rakeBetween = async (
     telegramId,
     at: { $gte: start, $lt: end },
   };
-  if (soloArena) match.arena = true;
+  if (soloArena === true) match.arena = true;
+  else if (soloArena === false) match.arena = { $ne: true };
 
   const rows = await RakeEvent.aggregate<{ _id: null; total: number }>([
     { $match: match },
@@ -286,14 +304,19 @@ class RakebackService {
     const inicioElegible =
       vip.startDate > previa.start ? vip.startDate : previa.start;
     const finElegible = vip.endDate < previa.end ? vip.endDate : previa.end;
-    const rakeSemana = await rakeBetween(telegramId, inicioElegible, finElegible);
+    const rakeSemana = await rakeBetween(
+      telegramId,
+      inicioElegible,
+      finElegible,
+      false,
+    );
 
     const inicioSemanaActual = startOfWeekUtc(now);
     const inicioActual =
       vip.startDate > inicioSemanaActual ? vip.startDate : inicioSemanaActual;
     const rakeActual =
       vip.endDate > now
-        ? await rakeBetween(telegramId, inicioActual, now)
+        ? await rakeBetween(telegramId, inicioActual, now, false)
         : 0;
 
     const estimado = Math.floor((rakeSemana * porcentaje) / 100);

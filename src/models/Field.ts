@@ -273,6 +273,8 @@ export interface IField extends Document {
 export interface FieldRegistration {
   telegramId: number;
   username?: string;
+  /** Clave del catálogo de avatares, copiada al inscribirse. */
+  avatar?: string;
   /** Lo que pago, en unidades internas. Se guarda aparte por si el buy-in cambia. */
   buyIn: number;
   status: 'waiting' | 'seated' | 'eliminated' | 'refunded';
@@ -345,6 +347,7 @@ const fieldRegistrationSchema = new Schema<FieldRegistration>(
   {
     telegramId: { type: Number, required: true },
     username: String,
+    avatar: String,
     buyIn: { type: Number, required: true },
     status: {
       type: String,

@@ -48,6 +48,12 @@ import { User } from '../models/User';
 import { getAuthedTelegramId, requireTelegramAuth } from '../middleware/telegramAuth';
 import { unitsToUsdt } from '../config/units';
 import { monetizationService } from '../services/monetization.service';
+import {
+  avatarCatalog,
+  canUseAvatar,
+  DEFAULT_AVATAR,
+  getAvatar,
+} from '../config/avatars';
 import { logger } from '../utils/logger';
 
 const router = Router();
@@ -156,6 +162,8 @@ router.get('/me', requireTelegramAuth, async (req: Request, res: Response) => {
           },
           activeTableId: null,
           vip: null,
+          avatar: DEFAULT_AVATAR,
+          avatarCatalog: avatarCatalog(false),
         },
       });
       return;
@@ -220,11 +228,66 @@ router.get('/me', requireTelegramAuth, async (req: Request, res: Response) => {
         // otra vez. Si los dos no coinciden, manda el asiento.
         activeTableId: user.activeTableId ?? null,
         vip: vipLevel,
+        avatar: getAvatar(user.avatar)?.id ?? DEFAULT_AVATAR,
+        avatarCatalog: avatarCatalog(!!vipLevel),
       },
     });
   } catch (error) {
     logger.error('Error en GET /me:', error);
     res.status(500).json({ error: 'No se pudo cargar la sesion.' });
+  }
+});
+
+/**
+ * Cambia el avatar del jugador.
+ *
+ * Se valida contra el catálogo cerrado. Los de miembro exigen una membresía
+ * activa; si venció, se conserva la clave guardada pero no se puede volver a
+ * elegir hasta renovar. El cambio se propaga a los asientos abiertos para que
+ * la mesa lo refleje sin esperar a la siguiente mano.
+ */
+router.post('/me/avatar', requireTelegramAuth, async (req: Request, res: Response) => {
+  try {
+    const telegramId = getAuthedTelegramId(req);
+    const avatarId = String(req.body?.avatar ?? '');
+
+    if (!getAvatar(avatarId)) {
+      res.status(400).json({ error: 'Ese avatar no existe.' });
+      return;
+    }
+
+    const vipLevel = await monetizationService.getVIPLevel(telegramId);
+    if (!canUseAvatar(avatarId, !!vipLevel)) {
+      res.status(403).json({
+        error: 'Ese avatar es exclusivo del 3-Bet Club. Activa tu membresía para usarlo.',
+      });
+      return;
+    }
+
+    await asegurarUsuario(telegramId);
+    await User.updateOne({ telegramId }, { $set: { avatar: avatarId } });
+
+    // Si ya está sentado, el asiento cambia con él. `arrayFilters` limita la
+    // escritura a su asiento: no se tocan los avatares de los demás.
+    const { Table } = await import('../models/Table');
+    await Table.updateMany(
+      { seats: { $elemMatch: { kind: 'human', playerId: String(telegramId) } } },
+      { $set: { 'seats.$[s].avatar': avatarId } },
+      {
+        arrayFilters: [
+          { 's.kind': 'human', 's.playerId': String(telegramId) },
+        ],
+      },
+    );
+
+    res.json({
+      success: true,
+      avatar: avatarId,
+      avatarCatalog: avatarCatalog(!!vipLevel),
+    });
+  } catch (error) {
+    logger.error('Error en POST /me/avatar:', error);
+    res.status(500).json({ error: 'No se pudo cambiar el avatar.' });
   }
 });
 

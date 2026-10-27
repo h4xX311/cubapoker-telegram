@@ -21,6 +21,7 @@ import { logger } from '../utils/logger';
 import { unlockService } from '../services/unlock.service';
 import { formatUnits, usdtToUnits, unitsToUsdt, blindsFor } from '../config/units';
 import { splitPrize, fieldPayout, prizeDisclosure } from '../services/payout.service';
+import { DEFAULT_AVATAR, getAvatar } from '../config/avatars';
 
 export class TableError extends Error {
   status: number;
@@ -125,10 +126,14 @@ export class SeatingService {
     const fromReal = finalBuyIn - fromPlay;
 
     const seat: ISeat = {
-      index: table.seats.length,
+      // Se reasigna dentro del cerrojo, cuando se conocen los huecos reales.
+      // `seats.length` no sirve: al salir un asiento intermedio el array se
+      // acorta y el siguiente jugador recibiría un índice ya ocupado.
+      index: -1,
       kind: 'human',
       playerId: String(telegramId),
       displayName: user.firstName || user.username || `Jugador${telegramId}`,
+      avatar: getAvatar(user.avatar)?.id ?? DEFAULT_AVATAR,
       chips: finalBuyIn,
       bet: 0,
       totalBet: 0,
@@ -168,6 +173,16 @@ export class SeatingService {
       if (actual.seats.some((s) => s.kind === 'human' && s.playerId === String(telegramId))) {
         throw new TableError('Ya estas sentado en esta mesa.', 409);
       }
+
+      // Primer entero libre, no la longitud del array. Es la misma regla que
+      // usan los bots (`table.manager.addBotSeat`) y el campo.
+      const usados = new Set(actual.seats.map((s) => s.index));
+      let indiceLibre = 0;
+      while (usados.has(indiceLibre)) indiceLibre++;
+      if (indiceLibre >= actual.maxSeats) {
+        throw new TableError('La mesa esta llena', 409);
+      }
+      seat.index = indiceLibre;
 
       actual.seats.push(seat);
 
@@ -333,12 +348,13 @@ export class SeatingService {
 
     const seat = table.seats[seatIndex];
 
-    // Si hay una mano en curso no se puede abandonar a mitad: eso permitiria
-    // robarse el bote. Se marca para sentarse despues.
+    // Si hay una mano en curso no se puede abandonar a mitad, aunque la
+    // apuesta viva sea cero (las apuestas ya estan en el bote al cerrar la
+    // calle). Quitar el asiento obliga a reindexar la mesa, y el motor en
+    // memoria sigue apuntando a los indices viejos: la mano continuaria con
+    // los jugadores equivocados. Se espera al cierre de la mano.
     const midHand =
-      table.hand.phase !== 'idle' &&
-      seat.status === 'active' &&
-      seat.bet > 0;
+      table.hand.phase !== 'idle' && table.hand.phase !== 'idle-awaiting';
 
     if (midHand) {
       throw new TableError(
@@ -368,9 +384,13 @@ export class SeatingService {
 
       const asiento = actual.seats[indiceActual];
 
-      // Si la mano ha avanzado y ahora hay apuesta en curso, sigue sin poder salir: abandonarse
-      // con fichas en el bote seria robarlo.
-      if (actual.hand.phase !== 'idle' && asiento.status === 'active' && asiento.bet > 0) {
+      // Se revalida con el documento fresco y con la misma regla: ni una mano
+      // en curso, ni siquiera con la apuesta viva a cero. Reindexar a mitad
+      // descuadra el motor.
+      if (
+        actual.hand.phase !== 'idle' &&
+        actual.hand.phase !== 'idle-awaiting'
+      ) {
         throw new TableError(
           'Hay una mano en curso. Espera a que termine para salir.',
           409,
@@ -589,11 +609,19 @@ export class SeatingService {
       ),
     );
 
+    const usados = new Set(freeroll.seats.map((s) => s.index));
+    let indiceLibre = 0;
+    while (usados.has(indiceLibre)) indiceLibre++;
+    if (indiceLibre >= freeroll.maxSeats) {
+      throw new TableError('El freeroll ya esta lleno', 409);
+    }
+
     const seat: ISeat = {
-      index: freeroll.seats.length,
+      index: indiceLibre,
       kind: 'human',
       playerId: String(telegramId),
       displayName: user.firstName || user.username || `Jugador${telegramId}`,
+      avatar: getAvatar(user.avatar)?.id ?? DEFAULT_AVATAR,
       chips: startChips,
       bet: 0,
       totalBet: 0,

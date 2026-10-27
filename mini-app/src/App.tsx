@@ -12,6 +12,7 @@ import { Centroll } from './pages/Centroll';
 import { Freeroll } from './pages/Freeroll';
 import { Profile } from './pages/Profile';
 import { SimulatePay } from './pages/SimulatePay';
+import { Source } from './pages/Source';
 import { api, ApiError, type DepositOrder } from './lib/api';
 import { fmtUsdt } from './components/Balance';
 import { pageFromPath as resolvePage, type Page, type Session } from './lib/types';
@@ -207,6 +208,25 @@ export default function App() {
 
   // --- Estados de carga / error a pantalla completa ---
 
+  // ------------------------------------------------------------------
+  // LA OFERTA DE CODIGO FUENTE NO EXIGE TELEGRAM
+  //
+  // La AGPL pide que el codigo este disponible para cualquiera que use el
+  // servicio por red. Si /source quedara detras del login de Telegram, un
+  // visitante sin Telegram no podria ver ni descargar la version que se esta
+  // ejecutando. Por eso esta pagina se pinta antes de la comprobacion de
+  // sesion; el resto de la app sigue cerrada.
+  // ------------------------------------------------------------------
+  if (page === 'source' && status !== 'ready') {
+    return (
+      <div className="min-h-screen bg-[#0f0f1a] text-white">
+        <main className="max-w-md mx-auto">
+          <Source onBack={() => window.location.assign('/')} />
+        </main>
+      </div>
+    );
+  }
+
   if (status === 'loading') {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center px-6 text-center">
@@ -283,6 +303,7 @@ export default function App() {
             onBack={back}
             onDeposit={() => navigate('deposit')}
             onWithdraw={() => navigate('withdraw')}
+            onNavigate={navigate}
           />
         );
       case 'deposit':
@@ -345,6 +366,8 @@ export default function App() {
         return <Referrals user={user} onBack={back} />;
       case 'achievements':
         return <Achievements onBack={back} />;
+      case 'source':
+        return <Source onBack={back} />;
       default:
         return (
           <Home

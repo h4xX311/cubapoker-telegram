@@ -2,6 +2,7 @@
   "name": "cubapoker-telegram-bot",
   "version": "1.0.0",
   "description": "CubaPoker - Mini App de Telegram",
+  "license": "AGPL-3.0",
   "main": "dist/bot.js",
   "scripts": {
     "dev": "ts-node src/bot.ts",
@@ -20,10 +21,12 @@
     "test:all:unit": "node scripts/run-tests.js",
     "test:engine": "node scripts/test-engine.js",
     "test:mano": "cd mini-app && npx tsx ../scripts/test-fuerza-mano.ts",
+    "test:fichas": "npm run build && node scripts/test-chip-conservation.js",
     "test:pote": "npm run build && node scripts/test-conservacion-pote.js",
     "test:indices": "npm run build && node scripts/asegurar-indices.js",
     "test:cancelar": "npm run build && node scripts/test-cancelar-campo.js",
-    "test:centroll": "npm run build && node scripts/test-centroll.js"
+    "test:centroll": "npm run build && node scripts/test-centroll.js",
+    "test:cash": "npm run build && node scripts/test-cash-integration.js"
   },
   "dependencies": {
     "@types/cors": "^2.8.16",

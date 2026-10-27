@@ -19,6 +19,7 @@ export const PAGES = [
   'vip',
   'referrals',
   'achievements',
+  'source',
 ] as const;
 
 export type Page = (typeof PAGES)[number];
@@ -51,6 +52,15 @@ export interface UserStats {
   totalFreerollWon: number;
 }
 
+export interface AvatarOption {
+  id: string;
+  emoji: string;
+  label: string;
+  memberOnly: boolean;
+  /** El servidor ya resolvió si la membresía lo desbloquea. */
+  unlocked: boolean;
+}
+
 export interface Session {
   id: string;
   telegramId: number;
@@ -61,6 +71,9 @@ export interface Session {
   stats: UserStats;
   activeTableId: string | null;
   vip: string | null;
+  /** Clave del catálogo de avatares. */
+  avatar?: string;
+  avatarCatalog?: AvatarOption[];
 }
 
 // --- Mesas ---
@@ -217,8 +230,17 @@ export interface FreerollSummary {
 export interface SeatView {
   index: number;
   displayName: string;
+  /** Clave del catálogo de avatares. Puede estar vacío. */
+  avatar?: string;
+  /** Emoji ya resuelto por el servidor. */
+  avatarEmoji?: string;
   chips: number;
+  chipsUsdt: number;
+  /** Lo que debe pintar la UI: USDT en cash ring, puntos en torneos. */
+  displayChips: number;
   bet: number;
+  betUsdt: number;
+  displayBet: number;
   status: string;
   isDealer: boolean;
   isSmallBlind: boolean;
@@ -227,15 +249,52 @@ export interface SeatView {
   isYou: boolean;
 }
 
+export interface LastHandWinner {
+  seatIndex: number;
+  displayName: string;
+  amount: number;
+  amountUsdt: number;
+  handName: string;
+  cards: string[];
+}
+
+export interface LastHandShowdown {
+  seatIndex: number;
+  displayName: string;
+  cards: string[];
+  handName: string;
+}
+
+export interface LastHandResult {
+  handNumber: number;
+  endedAt: string;
+  pot: number;
+  potUsdt: number;
+  rake: number;
+  rakeUsdt: number;
+  board: string[];
+  winners: LastHandWinner[];
+  showdown: LastHandShowdown[];
+  endedByFold: boolean;
+  unit: 'USDT' | 'PTS';
+}
+
 export interface TableView {
   tableId: string;
   kind: 'cash' | 'freeroll' | 'centroll';
   tierId?: string;
+  formatId?: string;
   prizeTier?: number;
   status: string;
-  /** Ciegas en fichas de la mesa, no en USDT. */
+  /** USDT en cash ring; PTS en torneos, freerolls y centrolls. */
+  mode: 'USDT' | 'PTS';
+  /** Ciegas en unidades internas. Para pintar, usar `smallBlindUsdt`. */
   smallBlind: number;
   bigBlind: number;
+  smallBlindUsdt: number;
+  bigBlindUsdt: number;
+  buyInUnits: number;
+  buyInUsdt: number;
   maxSeats: number;
   occupied: number;
   hand: {
@@ -243,10 +302,22 @@ export interface TableView {
     phase: string;
     communityCards: string[];
     pot: number;
+    potUsdt: number;
     currentBet: number;
+    currentBetUsdt: number;
+    /** Indice del asiento con el turno; -1 si nadie esta pensando. */
+    actingSeat: number;
+    lastResult?: LastHandResult;
   };
   seats: SeatView[];
   myCards?: { rank: string; suit: string }[];
+  myHand?: { rank: string; name: string; cards?: string[] } | null;
+  myChips?: number;
+  myBet?: number;
+  toCall?: number;
+  minRaise?: number;
+  canCheck?: boolean;
+  canRaise?: boolean;
   isMyTurn?: boolean;
   turnEndsAt?: string | null;
 }

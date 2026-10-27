@@ -168,6 +168,8 @@ async function main() {
           },
           position: asiento.index,
           playersLeft: mesa.seats.filter((s) => s.status === 'active').length,
+          currentBet: estado.currentBet,
+          minRaise: estado.minRaise,
         });
 
         const aplicada = await tableManager.applyHumanAction(

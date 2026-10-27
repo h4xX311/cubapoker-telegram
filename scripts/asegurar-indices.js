@@ -44,6 +44,34 @@ require('../dist/models/index');
 
   const modelos = ['User', 'Table', 'Field', 'PaymentOrder', 'Transaction'];
 
+  /**
+   * `indexes()` lanza NamespaceNotFound (codigo 26) si la coleccion aun no
+   * existe. En una base recien creada eso es normal, no un fallo: el script
+   * tiene que poder preparar todas las colecciones desde cero.
+   */
+  const listarIndices = async (nombre) => {
+    try {
+      return await db.collection(nombre).indexes();
+    } catch (err) {
+      if (err.code === 26 || err.codeName === 'NamespaceNotFound') return [];
+      throw err;
+    }
+  };
+
+  const asegurarColeccion = async (nombre) => {
+    const existe = await db
+      .listCollections({ name: nombre }, { nameOnly: true })
+      .hasNext();
+    if (existe) return;
+    try {
+      await db.createCollection(nombre);
+      console.log(`  ${nombre}: coleccion creada (base nueva)`);
+    } catch (err) {
+      // Otra instancia pudo crearla entre la comprobacion y el create.
+      if (err.code !== 48 && err.codeName !== 'NamespaceExists') throw err;
+    }
+  };
+
   for (const nombre of modelos) {
     let modelo;
     try {
@@ -53,10 +81,12 @@ require('../dist/models/index');
       continue;
     }
 
-    const antes = await db.collection(modelo.collection.name).indexes();
+    const coleccion = modelo.collection.name;
+    await asegurarColeccion(coleccion);
+    const antes = await listarIndices(coleccion);
     try {
       await modelo.syncIndexes();
-      const despues = await db.collection(modelo.collection.name).indexes();
+      const despues = await listarIndices(coleccion);
       const nuevos = despues.filter((d) => !antes.some((a) => a.name === d.name));
       console.log(`  ${nombre}: ${antes.length} -> ${despues.length} indices`);
       for (const n of nuevos) console.log(`      + ${n.name}`);
@@ -71,7 +101,7 @@ require('../dist/models/index');
   // VERIFICACION DEL INDICE QUE IMPORTA
   // ------------------------------------------------------------------
   console.log('\n=== un_campo_vivo_por_nivel ===');
-  const idx = (await db.collection('fields').indexes()).find(
+  const idx = (await listarIndices('fields')).find(
     (i) => i.name === 'un_campo_vivo_por_nivel',
   );
 

@@ -548,6 +548,13 @@ export function Home({ user, onNavigate, onPlay }: HomeProps) {
           </p>
         </div>
       </div>
+
+      <button
+        onClick={() => onNavigate('source')}
+        className="w-full text-center text-[10px] text-[#6c6c80] hover:text-[#a0a0b0] transition-colors pt-4 pb-1"
+      >
+        Código fuente · CubaPoker es software libre bajo AGPL-3.0
+      </button>
     </div>
   );
 }

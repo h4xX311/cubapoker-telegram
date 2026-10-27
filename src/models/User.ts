@@ -75,6 +75,13 @@ export interface IUser extends Document {
   activeTableId?: string;
 
   /**
+   * Clave del catálogo de avatares (`config/avatars.ts`). Se copia al asiento
+   * al sentarse para que la mesa no tenga que consultar el usuario en cada
+   * render. Si la clave ya no existe, la interfaz cae al avatar común.
+   */
+  avatar?: string;
+
+  /**
    * Créditos de payouts ya aplicados, por clave idempotente.
    *
    * Vive en el mismo documento que `balance.real` a propósito. El pago de
@@ -123,6 +130,9 @@ const userSchema = new Schema<IUser>({
   },
 
   activeTableId: { type: String, default: null },
+
+  // Clave del catálogo, no una URL. Se valida en la ruta que la cambia.
+  avatar: { type: String, default: 'fox' },
 
   // Ver el comentario de `payoutCredits` en la interfaz. `_id: false` porque
   // no es una colección de entidades: es un conjunto de claves idempotentes.

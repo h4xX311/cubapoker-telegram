@@ -32,6 +32,7 @@ import {
 import { logger } from '../utils/logger';
 import { assignPosition } from './field.atomic';
 import { formatUnits, unitsToUsdt } from '../config/units';
+import { DEFAULT_AVATAR, getAvatar } from '../config/avatars';
 import { unlockService } from '../services/unlock.service';
 
 /**
@@ -76,6 +77,7 @@ interface QueuedPlayer {
   telegramId: number;
   chips: number;
   username?: string;
+  avatar?: string;
 }
 
 export class FieldError extends Error {
@@ -443,6 +445,8 @@ export const fieldManager = {
     }
 
     const { startChips } = this.blindsDeCampo(field);
+    const perfil = await User.findOne({ telegramId }).select('avatar').lean();
+    const avatar = getAvatar(perfil?.avatar)?.id ?? DEFAULT_AVATAR;
 
     // La anotacion. En un freeroll no hay cobro, asi que no hay nada que deshacer si falla:
     // o queda la entrada o no queda. Aun asi se hace en UNA escritura, para que el contador
@@ -455,6 +459,7 @@ export const fieldManager = {
           registrations: {
             telegramId,
             username,
+            avatar,
             // 0: no pago nada. Se guarda igual para que la liquidacion sepa que esta
             // inscrito y no lo confunda con un hueco.
             buyIn: 0,
@@ -468,7 +473,7 @@ export const fieldManager = {
     field.waiting += 1;
 
     const queue = queues.get(field.fieldId) ?? [];
-    queue.push({ telegramId, chips: startChips, username });
+    queue.push({ telegramId, chips: startChips, username, avatar });
     queues.set(field.fieldId, queue);
 
     const position = queue.length;
@@ -545,6 +550,9 @@ export const fieldManager = {
       );
     }
 
+    const perfil = await User.findOne({ telegramId }).select('avatar').lean();
+    const avatar = getAvatar(perfil?.avatar)?.id ?? DEFAULT_AVATAR;
+
     // --- Cobro del buy-in, una sola vez ---
     const charged = await this.chargeBuyIn(telegramId, tier.buyInUnits);
     if (!charged) {
@@ -577,6 +585,7 @@ export const fieldManager = {
             registrations: {
               telegramId,
               username,
+              avatar,
               buyIn: tier.buyInUnits,
               status: 'waiting',
               at: new Date(),
@@ -597,7 +606,7 @@ export const fieldManager = {
     field.buyInsCollected += tier.buyInUnits;
 
     const queue = queues.get(field.fieldId) ?? [];
-    queue.push({ telegramId, chips: tier.buyInUnits, username });
+    queue.push({ telegramId, chips: tier.buyInUnits, username, avatar });
     queues.set(field.fieldId, queue);
 
     const position = queue.length;
@@ -894,7 +903,13 @@ export const fieldManager = {
           continue;
         }
 
-        const seat = this.buildSeat(table, player.telegramId, player.chips, player.username);
+        const seat = this.buildSeat(
+          table,
+          player.telegramId,
+          player.chips,
+          player.username,
+          player.avatar,
+        );
         table.seats.push(seat);
         await table.save();
 
@@ -1238,12 +1253,14 @@ export const fieldManager = {
     telegramId: number,
     chips: number,
     username?: string,
+    avatar?: string,
   ): ISeat {
     return {
       index: this.primerIndiceLibre(table.seats),
       kind: 'human',
       playerId: String(telegramId),
       displayName: username || `Jugador ${telegramId}`,
+      avatar: getAvatar(avatar)?.id ?? DEFAULT_AVATAR,
       chips,
       bet: 0,
       totalBet: 0,
@@ -2995,6 +3012,7 @@ export const fieldManager = {
         telegramId: r.telegramId,
         chips: startChips,
         username: r.username,
+        avatar: r.avatar,
       });
       yaEnCola.add(r.telegramId);
       anyadidos++;
