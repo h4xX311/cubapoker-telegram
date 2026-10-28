@@ -117,6 +117,102 @@ test('la serializacion completa no contiene las claves prohibidas', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 1b. Historial: cartas propias y solo rivales de showdown
+// ---------------------------------------------------------------------------
+const mesaConHistorial = {
+  ...mesaFalsa,
+  hand: {
+    ...mesaFalsa.hand,
+    lastResult: {
+      handNumber: 12,
+      endedAt: new Date().toISOString(),
+      pot: 300,
+      potUsdt: 0.3,
+      rake: 0,
+      rakeUsdt: 0,
+      board: ['2|hearts', '3|hearts', '4|hearts', '5|hearts', '6|hearts'],
+      winners: [
+        {
+          seatIndex: 0,
+          displayName: 'Marta79',
+          amount: 300,
+          amountUsdt: 0.3,
+          handName: 'Color',
+          cards: ['A|spades', 'K|spades'],
+        },
+      ],
+      showdown: [],
+      endedByFold: true,
+      unit: 'USDT',
+    },
+  },
+  handHistory: [
+    {
+      handNumber: 12,
+      endedAt: new Date().toISOString(),
+      pot: 300,
+      rake: 0,
+      board: ['2|hearts', '3|hearts', '4|hearts', '5|hearts', '6|hearts'],
+      unit: 'USDT',
+      endedByFold: true,
+      players: [
+        { seatIndex: 0, displayName: 'Marta79', cards: ['A|spades', 'K|spades'], folded: false },
+        { seatIndex: 1, displayName: 'Carlos', cards: ['Q|hearts', 'Q|diamonds'], folded: false },
+        { seatIndex: 2, displayName: 'Rival', cards: ['9|diamonds', '8|diamonds'], folded: true },
+      ],
+      winners: [
+        {
+          seatIndex: 0,
+          displayName: 'Marta79',
+          amount: 300,
+          handName: 'Color',
+          cards: ['A|spades', 'K|spades'],
+        },
+      ],
+      showdown: [],
+    },
+  ],
+};
+
+const vistaHistorial = toPublicTable(mesaConHistorial, 1);
+const entrada = vistaHistorial.history[0];
+
+test('el historial no envia las cartas privadas de todos', () => {
+  assert.strictEqual('players' in entrada, false, 'el historial envia players');
+  assert.strictEqual(JSON.stringify(entrada).includes('"players"'), false, 'players en el JSON');
+  assert.strictEqual(JSON.stringify(entrada).includes('9|diamonds'), false, 'carta privada de un rival');
+});
+
+test('el historial muestra mis cartas y no las de un rival que no hizo showdown', () => {
+  assert.deepStrictEqual(entrada.myCards, ['Q|hearts', 'Q|diamonds']);
+  assert.deepStrictEqual(entrada.winners[0].cards, [], 'el ganador por fold revelo su mano');
+  assert.deepStrictEqual(vistaHistorial.hand.lastResult.winners[0].cards, []);
+});
+
+test('el historial si muestra las cartas de un showdown', () => {
+  const conShowdown = {
+    ...mesaConHistorial,
+    handHistory: [{
+      ...mesaConHistorial.handHistory[0],
+      endedByFold: false,
+      showdown: [
+        { seatIndex: 0, displayName: 'Marta79', cards: ['A|spades', 'K|spades'], handName: 'Color' },
+        { seatIndex: 1, displayName: 'Carlos', cards: ['Q|hearts', 'Q|diamonds'], handName: 'Pareja' },
+      ],
+    }],
+  };
+  const v = toPublicTable(conShowdown, 1);
+  assert.deepStrictEqual(v.history[0].winners[0].cards, ['A|spades', 'K|spades']);
+  assert.strictEqual(v.history[0].showdown.length, 2);
+});
+
+test('sin espectador el historial no entrega cartas propias', () => {
+  const v = toPublicTable(mesaConHistorial);
+  assert.deepStrictEqual(v.history[0].myCards, []);
+  assert.deepStrictEqual(v.history[0].winners[0].cards, []);
+});
+
+// ---------------------------------------------------------------------------
 // 2. La lista publica de mesas tampoco desglosa por tipo
 // ---------------------------------------------------------------------------
 test('listTables no vuelve a introducir humans/bots', () => {

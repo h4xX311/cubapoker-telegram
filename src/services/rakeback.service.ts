@@ -7,8 +7,8 @@ import type { ITable } from '../models/Table';
 import { logger } from '../utils/logger';
 
 /**
- * RAKEBACK SEMANAL DEL 3-BET CLUB
- * ================================
+ * RAKEBACK SEMANAL DE QVA-BET
+ * ===========================
  *
  * Reglas:
  *
@@ -123,10 +123,10 @@ export interface ArenaStatus {
  * pueden mezclarse.
  *
  *   true  -> solo eventos de VIP Arena (profit share del 15%)
- *   false -> solo mesas cash normales (rakeback del 3-Bet Club)
+ *   false -> solo mesas cash normales (rakeback del QVA-Bet Club)
  *   null  -> todos (solo para diagnostico; no usar para pagar)
  *
- * Antes el 3-Bet Club sumaba tambien Arena y un miembro recibia 10% + 15%
+ * Antes el QVA-Bet Club sumaba tambien Arena y un miembro recibia 10% + 15%
  * sobre el mismo rake. Eso convertia la sala premium en un agujero: el
  * porcentaje de devolucion superaba el margen que la mesa pretendia dejar.
  */
@@ -456,7 +456,7 @@ class RakebackService {
 
     if (credito === 'already') {
       logger.info(
-        `Rakeback 3-Bet Club: la semana ${pago.weekKey} de ${telegramId} ya ` +
+        `Rakeback QVA-Bet Club: la semana ${pago.weekKey} de ${telegramId} ya ` +
           'estaba acreditada; se marca el pago sin volver a sumar saldo.',
       );
       return { paid: 0, weekKey: pago.weekKey, reason: 'ya acreditado' };
@@ -485,7 +485,7 @@ class RakebackService {
     }
 
     logger.info(
-      `Rakeback 3-Bet Club: ${telegramId} cobra ${pago.amountUnits} unidades ` +
+      `Rakeback QVA-Bet Club: ${telegramId} cobra ${pago.amountUnits} unidades ` +
       `(${estado.rakebackPercent}% de ${pago.rakeUnits}) por la semana ${pago.weekKey}`,
     );
 

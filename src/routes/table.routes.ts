@@ -4,6 +4,7 @@ import { seatingService, TableError } from '../game/seating.service';
 import { fieldManager, FieldError } from '../game/field.manager';
 import { centrollService, CentrollError } from '../game/centroll.service';
 import { freerollManager, FreerollError } from '../game/freeroll.service';
+import { tournamentManager, TournamentError } from '../game/tournament.service';
 import { Field, toPublicField } from '../models/Field';
 import { Table } from '../models/Table';
 import { requireTelegramAuth, getAuthedTelegramId } from '../middleware/telegramAuth';
@@ -134,6 +135,29 @@ router.post('/sit', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * Volver a comprar entrada en la misma mesa cash tras quedarse sin fichas.
+ *
+ * No es un top-up: el servidor exige que el asiento esté a cero. Si el gestor
+ * ya retiró el asiento, reutiliza `sitDown` con la misma mesa.
+ */
+router.post('/rebuy', async (req: Request, res: Response) => {
+  try {
+    const telegramId = getAuthedTelegramId(req);
+    const { tableId } = req.body;
+    if (typeof tableId !== 'string' || !tableId) {
+      return res.status(400).json({ error: 'Falta la mesa' });
+    }
+    const result = await seatingService.rebuy(telegramId, tableId);
+    res.json({ success: true, ...result });
+  } catch (error) {
+    const status = error instanceof TableError ? error.status : 500;
+    res.status(status).json({
+      error: error instanceof Error ? error.message : 'No se pudo recargar',
+    });
+  }
+});
+
 // ==========================================================================
 // Campos multi-mesa
 // ==========================================================================
@@ -187,6 +211,99 @@ router.get('/fields/:fieldId', async (req: Request, res: Response) => {
     const status = error instanceof FieldError ? 404 : 500;
     res.status(status).json({
       error: error instanceof Error ? error.message : 'Error al leer el campo',
+    });
+  }
+});
+
+// ======================================================================
+// TORNEOS Y SPIN & GO
+// ======================================================================
+
+/**
+ * Lobby de torneos. El premio que se muestra es el garantizado y, ademas, el
+ * bote que resultaria de las entradas actuales. La UI no debe prometer un
+ * premio que no se pueda pagar.
+ */
+router.get('/tournaments', async (req: Request, res: Response) => {
+  try {
+    const telegramId = getAuthedTelegramId(req);
+    const estado = await tournamentManager.estado(telegramId);
+    res.json({ success: true, ...estado });
+  } catch (error) {
+    logger.error('GET /game/tournaments:', error);
+    res.status(500).json({
+      error: error instanceof Error ? error.message : 'Error al leer los torneos',
+    });
+  }
+});
+
+/** Inscribirse a un torneo o abrir un Spin & Go. */
+router.post('/tournaments/register', async (req: Request, res: Response) => {
+  try {
+    const telegramId = getAuthedTelegramId(req);
+    const user = await User.findOne({ telegramId });
+    const eventId =
+      typeof req.body?.eventId === 'string'
+        ? req.body.eventId
+        : typeof req.body?.id === 'string'
+          ? req.body.id
+          : '';
+
+    if (!eventId) {
+      res.status(400).json({ error: 'Falta el torneo' });
+      return;
+    }
+
+    const result = await tournamentManager.registrar(
+      telegramId,
+      eventId,
+      user?.username,
+    );
+    res.json({ success: true, ...result });
+  } catch (error) {
+    const status =
+      error instanceof TournamentError || error instanceof FieldError ? 400 : 500;
+    res.status(status).json({
+      error: error instanceof Error ? error.message : 'No se pudo inscribir',
+    });
+  }
+});
+
+/** Cancelar la inscripcion antes de que arranque, con devolucion del buy-in. */
+router.post('/tournaments/leave', async (req: Request, res: Response) => {
+  try {
+    const telegramId = getAuthedTelegramId(req);
+    const fieldId = req.body?.fieldId;
+
+    if (typeof fieldId !== 'string') {
+      res.status(400).json({ error: 'Falta el torneo' });
+      return;
+    }
+
+    const result = await tournamentManager.salir(telegramId, fieldId);
+    res.json({ success: true, ...result });
+  } catch (error) {
+    const status =
+      error instanceof TournamentError || error instanceof FieldError ? 400 : 500;
+    res.status(status).json({
+      error: error instanceof Error ? error.message : 'No se pudo cancelar',
+    });
+  }
+});
+
+/** Estado de una mesa de torneo concreta mientras el jugador espera. */
+router.get('/tournaments/:fieldId', async (req: Request, res: Response) => {
+  try {
+    const telegramId = getAuthedTelegramId(req);
+    const estado = await tournamentManager.estadoCampo(
+      req.params.fieldId,
+      telegramId,
+    );
+    res.json({ success: true, ...estado });
+  } catch (error) {
+    const status = error instanceof TournamentError ? 404 : 500;
+    res.status(status).json({
+      error: error instanceof Error ? error.message : 'Error al leer el torneo',
     });
   }
 });
@@ -405,6 +522,30 @@ router.post('/action', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * Usar el banco de tiempo del turno.
+ *
+ * Es una acción de reloj, no de poker: no cambia fichas, bote ni cartas. El
+ * servidor devuelve el nuevo vencimiento para que la cuenta atrás se actualice
+ * sin esperar al siguiente sondeo.
+ */
+router.post('/time-bank', async (req: Request, res: Response) => {
+  try {
+    const telegramId = getAuthedTelegramId(req);
+    const { tableId } = req.body;
+    if (typeof tableId !== 'string') {
+      return res.status(400).json({ error: 'Falta la mesa' });
+    }
+    const result = await seatingService.useTimeBank(telegramId, tableId);
+    res.json({ success: true, ...result });
+  } catch (error) {
+    const status = error instanceof TableError ? error.status : 500;
+    res.status(status).json({
+      error: error instanceof Error ? error.message : 'No se pudo usar el banco',
+    });
+  }
+});
+
 /** Levantarse de la mesa. */
 router.post('/stand', async (req: Request, res: Response) => {
   try {
@@ -445,6 +586,23 @@ router.post('/stand', async (req: Request, res: Response) => {
  * tu `playerId` que no sea `out`. Y se devuelve tambien si la mesa es de un campo, que es
  * justo el caso que fallaba.
  */
+/**
+ * Todas las mesas abiertas del jugador.
+ *
+ * Es la fuente del selector multi-mesa. Se consulta por asientos, igual que
+ * `/my-table`, para que funcione tambien cuando el jugador entro por un campo
+ * y `activeTableId` no se escribio.
+ */
+router.get('/my-tables', requireTelegramAuth, async (req: Request, res: Response) => {
+  try {
+    const telegramId = getAuthedTelegramId(req);
+    const tables = await tableManager.listMyTables(telegramId);
+    res.json({ success: true, tables });
+  } catch (error) {
+    res.status(500).json({ error: 'No se pudieron cargar tus mesas' });
+  }
+});
+
 router.get('/my-table', requireTelegramAuth, async (req: Request, res: Response) => {
   try {
     const telegramId = getAuthedTelegramId(req);

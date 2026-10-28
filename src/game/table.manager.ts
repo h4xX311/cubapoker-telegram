@@ -1,8 +1,18 @@
-import { Table, ITable, ISeat, toPublicTable } from '../models/Table';
+import {
+  Table,
+  ITable,
+  ISeat,
+  AllInReveal,
+  HandHistoryEntry,
+  toPublicTable,
+} from '../models/Table';
 import { Field } from '../models/Field';
 import { unitsToUsdt, formatUnits } from '../config/units';
 import { User } from '../models/User';
-import { PokerGame } from './game.state';
+import { PokerGame, GameState } from './game.state';
+import { calculateEquity } from './hand.equity';
+import { evaluateHand } from './hand.evaluator';
+import { blindLevelFor } from './blind.levels';
 import { botFactory, BotProfile, decideAction, mulberry32 } from './bot.engine';
 import { botAvatarFor } from '../config/avatars';
 import {
@@ -43,12 +53,40 @@ export interface TurnNotice {
   cards: { rank: string; suit: string }[];
   /** Vida maxima del aviso: si no responde, el motor juega por el. */
   deadlineMs: number;
+  /**
+   * Instante exacto en que vence el turno, en ISO 8601. Es el mismo dato que
+   * `turnEndsAt` en `getPlayerView`; viaja también en el aviso para que el
+   * cliente pueda pintar la cuenta atrás sin pedir la mesa otra vez.
+   */
+  deadlineAt: string;
 }
 
 export type TurnNotifier = (notice: TurnNotice) => void | Promise<void>;
 
 /** Fases en las que hay una decision pendiente de un jugador concreto. */
 const ACTION_PHASES = new Set<string>(['preflop', 'flop', 'turn', 'river']);
+
+/**
+ * Cuántas manos se conservan para el historial de la mesa.
+ *
+ * 30 es suficiente para revisar la sesión sin que una mesa cash que vive
+ * varios días acumule documentos enormes. La entrada más reciente va primero.
+ */
+const HAND_HISTORY_LIMIT = 30;
+
+/**
+ * Pausa entre manos. La mesa queda en `idle` con el resultado visible antes de
+ * repartir la siguiente. En un all-in se alarga para que se puedan ver las
+ * calles y los porcentajes; el cliente reproduce ese mismo replay.
+ *
+ * Se puede bajar por entorno en pruebas de integracion, que conducen las manos
+ * a mano y no deben esperar doce segundos por cada all-in.
+ */
+const HAND_PAUSE_MS = Math.max(0, Number(process.env.HAND_PAUSE_MS ?? 6_000));
+const ALLIN_HAND_PAUSE_MS = Math.max(
+  HAND_PAUSE_MS,
+  Number(process.env.ALLIN_HAND_PAUSE_MS ?? 12_000),
+);
 
 /**
  * Gestor de mesas.
@@ -493,7 +531,7 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
     // mesa; `processTable` decide despues que corresponde a cada una.
     const tables = await Table.find({
       status: { $in: ['waiting', 'running'] },
-      kind: { $in: ['cash', 'freeroll', 'centroll'] },
+      kind: { $in: ['cash', 'freeroll', 'centroll', 'tournament'] },
     }).limit(80);
 
     for (const table of tables) {
@@ -705,6 +743,13 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
         );
         await this.sitOutBustedHuman(table, seat);
       }
+
+      // Pausa entre manos: el resultado acaba de guardarse y la siguiente
+      // mano no debe taparlo. En all-in el `nextHandAt` es mas lejano.
+      const esperaHasta = table.hand.nextHandAt
+        ? new Date(table.hand.nextHandAt).getTime()
+        : 0;
+      if (esperaHasta > Date.now()) return;
 
       const activeHumans2 = table.seats.filter(
         s => s.kind === 'human' && s.status === 'active' && s.chips > 0,
@@ -930,9 +975,52 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
   // Ciclo de una mano
   // ======================================================================
 
+  /**
+   * Aplica el nivel de ciegas del reloj a una mesa de campo.
+   *
+   * Se llama justo antes de crear el motor, nunca a mitad de mano: cambiar las
+   * ciegas con el bote y las apuestas vivas descuadra la mano. La mesa cash no
+   * entra aquí: sus ciegas son fijas.
+   */
+  private applyBlindLevel(table: ITable): void {
+    if (!this.isFieldTable(table)) return;
+
+    const baseSmall = Math.max(1, table.blindBaseSmall ?? table.smallBlind);
+    const baseBig = Math.max(baseSmall, table.blindBaseBig ?? table.bigBlind);
+    const inicio = table.blindLevelStartedAt
+      ?? table.createdAt
+      ?? new Date();
+
+    const nivel = blindLevelFor(baseSmall, baseBig, inicio);
+    const cambio =
+      nivel.level !== (table.blindLevel ?? 0) ||
+      nivel.small !== table.smallBlind ||
+      nivel.big !== table.bigBlind;
+
+    table.blindBaseSmall = baseSmall;
+    table.blindBaseBig = baseBig;
+    table.blindLevel = nivel.level;
+    table.smallBlind = nivel.small;
+    table.bigBlind = nivel.big;
+
+    if (cambio) {
+      logger.info(
+        `Mesa ${table.tableId}: nivel de ciegas ${nivel.level} ` +
+        `(${nivel.small}/${nivel.big}).`,
+      );
+    }
+  }
+
   private async startHand(table: ITable): Promise<void> {
     const activeSeats = table.seats.filter(s => s.status === 'active' && s.chips > 0);
     if (activeSeats.length < 2) return;
+
+    // La pausa ya cumplio su funcion: la mano nueva puede empezar.
+    table.hand.nextHandAt = undefined;
+
+    // Las ciegas se actualizan entre manos. Si el nivel cambió mientras la
+    // mesa estaba esperando, la mano nueva ya nace con las ciegas nuevas.
+    this.applyBlindLevel(table);
 
     // ------------------------------------------------------------------
     // `status` DE LOS ASIENTOS VUELVE A `active` ANTES DE ESTA COMPROBACION
@@ -963,6 +1051,11 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
       seat.bet = 0;
       seat.totalBet = 0;
       seat.lastAction = undefined;
+      // El banco de tiempo es por mano. Sin este reinicio, una mano larga
+      // dejaría a un humano sin banco para el resto de la sesión.
+      if (seat.kind === 'human') {
+        seat.timeBankMs = TURN_TIMER.timeBankMs;
+      }
 
       // EL ORDEN IMPORTA: out SE RESPETA SIEMPRE.
       if (seat.status === 'out') continue;
@@ -1321,6 +1414,14 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
       this.turnNotified = new Set(Array.from(this.turnNotified).slice(-1000));
     }
 
+    // El aviso y la vista usan el mismo punto de partida. Si `lastActionAt`
+    // todavía no existe (mesa restaurada a medias), se toma ahora: es mejor
+    // dar un turno completo que uno ya vencido.
+    const inicioTurno = table.hand.lastActionAt
+      ? new Date(table.hand.lastActionAt).getTime()
+      : Date.now();
+    const deadlineAt = new Date(inicioTurno + TURN_TIMER.humanMs).toISOString();
+
     const notice: TurnNotice = {
       telegramId: Number(seat.playerId),
       tableId: table.tableId,
@@ -1331,6 +1432,7 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
       pot: state.pot,
       cards: player.cards.map(c => ({ rank: c.rank, suit: c.suit })),
       deadlineMs: TURN_TIMER.humanMs,
+      deadlineAt,
     };
 
     Promise.resolve(this.notifier(notice)).catch((e) =>
@@ -1388,6 +1490,13 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
       playersLeft: activePlayers,
       currentBet: state.currentBet,
       minRaise: state.minRaise,
+      bigBlind: state.bigBlind,
+      dealerIndex: state.dealerIndex,
+      currentPlayerIndex: state.currentPlayerIndex,
+      tablePlayers: state.players.length,
+      isSmallBlind: botPlayer.isSmallBlind,
+      isBigBlind: botPlayer.isBigBlind,
+      preflopRaises: state.preflopRaises ?? 0,
     });
 
     // ------------------------------------------------------------------
@@ -1531,6 +1640,123 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
     this.scheduleTurn(table);
   }
 
+  /**
+   * Prepara el replay de un all-in.
+   *
+   * No cambia el resultado: la mano ya esta pagada por el motor. Solo calcula
+   * una fotografia de equidad por calle para que la interfaz pueda ensenar las
+   * cartas y los porcentajes con una pausa, en vez de saltar directamente al
+   * ganador. El board y las cartas salen del showdown, asi que nunca se
+   * revela la mano de alguien que se retiro.
+   */
+  private buildAllInReveal(
+    state: GameState,
+    seatDe: (engineId: string) => ISeat | undefined,
+    handNumber: number,
+  ): AllInReveal | undefined {
+    if (
+      !state.allInStreet ||
+      !state.showdown ||
+      state.showdown.length < 2 ||
+      state.communityCards.length < 5
+    ) {
+      return undefined;
+    }
+
+    const calles = ['preflop', 'flop', 'turn', 'river'] as const;
+    const cartasPorCalle = { preflop: 0, flop: 3, turn: 4, river: 5 } as const;
+    const startStreet = (
+      ['preflop', 'flop', 'turn', 'river'].includes(state.allInStreet)
+        ? state.allInStreet
+        : 'preflop'
+    ) as AllInReveal['startStreet'];
+
+    const board = state.communityCards;
+    const conocidos = state.showdown.map((s) => ({
+      id: s.playerId,
+      cards: s.cards,
+    }));
+
+    const equity = new Map<string, AllInReveal['players'][number]['equity']>();
+    const nombres = new Map<string, AllInReveal['players'][number]['handName']>();
+
+    for (const calle of calles) {
+      const n = cartasPorCalle[calle];
+      const boardParcial = board.slice(0, n);
+      const resultados = calculateEquity(
+        conocidos,
+        boardParcial,
+        1_200,
+        handNumber * 17 + n * 101,
+      );
+      const porJugador = new Map(resultados.map((r) => [r.playerId, r.equity]));
+
+      for (const s of state.showdown) {
+        const previas = equity.get(s.playerId) ?? {
+          preflop: 0,
+          flop: 0,
+          turn: 0,
+          river: 0,
+        };
+        previas[calle] = porJugador.get(s.playerId) ?? 0;
+        equity.set(s.playerId, previas);
+
+        const nombresPrevios = nombres.get(s.playerId) ?? {
+          preflop: '',
+          flop: '',
+          turn: '',
+          river: '',
+        };
+        nombresPrevios[calle] = evaluateHand([...s.cards, ...boardParcial]).name;
+        nombres.set(s.playerId, nombresPrevios);
+      }
+    }
+
+    // En el river no se estima: se usa la mano real. Asi el ganador muestra
+    // 100 % (o el reparto exacto de un empate) y los demas 0 %, sin decimales
+    // de una simulacion que ya no hace falta.
+    const valoresFinales = state.showdown.map((s) => ({
+      id: s.playerId,
+      valor: s.hand?.value ?? evaluateHand([...s.cards, ...board]).value,
+    }));
+    const maximo = Math.max(...valoresFinales.map((v) => v.valor));
+    const ganadores = new Set(
+      valoresFinales.filter((v) => v.valor === maximo).map((v) => v.id),
+    );
+    const pctGanador = 100 / Math.max(1, ganadores.size);
+    for (const s of state.showdown) {
+      const e = equity.get(s.playerId);
+      if (e) e.river = ganadores.has(s.playerId) ? Math.round(pctGanador) : 0;
+      const n = nombres.get(s.playerId);
+      if (n) n.river = s.hand?.name ?? evaluateHand([...s.cards, ...board]).name;
+    }
+
+    return {
+      startStreet,
+      board: board.map((c) => `${c.rank}|${c.suit}`),
+      players: state.showdown.map((s) => {
+        const seat = seatDe(s.playerId);
+        return {
+          seatIndex: seat?.index ?? Number(s.playerId),
+          displayName: seat?.displayName ?? 'Jugador',
+          cards: s.cards.map((c) => `${c.rank}|${c.suit}`),
+          equity: equity.get(s.playerId) ?? {
+            preflop: 0,
+            flop: 0,
+            turn: 0,
+            river: 0,
+          },
+          handName: nombres.get(s.playerId) ?? {
+            preflop: '',
+            flop: '',
+            turn: '',
+            river: '',
+          },
+        };
+      }),
+    };
+  }
+
   /** Cierra la mano: reparte el bote, cobra rake y limpia para la siguiente. */
   private async finishHand(table: ITable, engine: PokerGame): Promise<void> {
     // Cerrojo de liquidación: `applyHumanAction`, el turno del bot y el tick
@@ -1596,6 +1822,11 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
     const seatDe = (engineId: string): ISeat | undefined =>
       table.seats.find(s => String(s.index) === engineId);
     const fmt = (c: any): string => `${c.rank}|${c.suit}`;
+    const allIn = this.buildAllInReveal(
+      state,
+      seatDe,
+      table.hand.handNumber,
+    );
 
     table.hand.lastResult = {
       handNumber: table.hand.handNumber,
@@ -1627,7 +1858,62 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
       }),
       endedByFold: (state.showdown ?? []).length === 0,
       unit: table.kind === 'cash' && !this.isFieldTable(table) ? 'USDT' : 'PTS',
+      allIn,
     };
+
+    // La siguiente mano no empieza de inmediato. El resultado, las cartas del
+    // showdown y el replay de porcentajes necesitan unos segundos en pantalla;
+    // un all-in necesita mas porque se reproducen las calles una a una.
+    table.hand.nextHandAt = new Date(
+      Date.now() + (allIn ? ALLIN_HAND_PAUSE_MS : HAND_PAUSE_MS),
+    );
+
+    // ------------------------------------------------------------------
+    // HISTORIAL DE LA MANO
+    //
+    // `lastResult` es el escaparate de la mano recién cerrada. El historial
+    // necesita una cosa más: las cartas privadas de cada participante, para
+    // que cada jugador pueda revisar sus propias manos después. Se guardan
+    // aquí y `toPublicTable()` las recorta por espectador; nunca se envían
+    // las de un rival que no llegó al showdown.
+    // ------------------------------------------------------------------
+    const resultado = table.hand.lastResult!;
+    const entradaHistorial: HandHistoryEntry = {
+      handNumber: resultado.handNumber,
+      endedAt: resultado.endedAt,
+      pot: resultado.pot,
+      rake: resultado.rake,
+      board: resultado.board,
+      unit: resultado.unit,
+      endedByFold: resultado.endedByFold,
+      players: state.players.map((p) => {
+        const seat = seatDe(p.id);
+        return {
+          seatIndex: seat?.index ?? Number(p.id),
+          displayName: seat?.displayName ?? 'Jugador',
+          cards: (p.cards ?? []).map(fmt),
+          folded: Boolean(p.folded),
+        };
+      }),
+      winners: resultado.winners.map((w) => ({
+        seatIndex: w.seatIndex,
+        displayName: w.displayName,
+        amount: w.amount,
+        handName: w.handName,
+        cards: w.cards,
+      })),
+      showdown: resultado.showdown.map((s) => ({
+        seatIndex: s.seatIndex,
+        displayName: s.displayName,
+        cards: s.cards,
+        handName: s.handName,
+      })),
+    };
+
+    table.handHistory = [
+      entradaHistorial,
+      ...(table.handHistory ?? []),
+    ].slice(0, HAND_HISTORY_LIMIT);
 
     // Quitar jugadores que se quedaron sin fichas.
     // El buy-in ya se desconto del wallet al sentarse, asi que perderlo en la
@@ -1961,6 +2247,92 @@ if (this.isFieldTable(table)) {
     return toPublicTable(table, viewerSeat);
   }
 
+  /**
+   * Mesas abiertas de un jugador para el selector multi-mesa.
+   *
+   * Un jugador puede estar sentado en varias mesas cash a la vez. La app
+   * necesita una lista pequena con lo justo para pintar una pestana: cuanto
+   * tiene en esa mesa, si le toca y cuanto le queda. No se envia ninguna carta
+   * ni ningun dato de los rivales.
+   */
+  async listMyTables(telegramId: number): Promise<any[]> {
+    const tables = await Table.find({
+      seats: {
+        $elemMatch: {
+          kind: 'human',
+          playerId: String(telegramId),
+          status: { $ne: 'out' },
+        },
+      },
+    })
+      .sort({ updatedAt: -1 })
+      .limit(12);
+
+    return tables.map((table) => {
+      const seat = table.seats.find(
+        (s) => s.kind === 'human' && s.playerId === String(telegramId),
+      );
+      if (!seat) return null;
+
+      const esCashRing = table.kind === 'cash' && !table.field?.fieldId;
+      const modo: 'USDT' | 'PTS' = esCashRing ? 'USDT' : 'PTS';
+      const enMano = ACTION_PHASES.has(table.hand.phase);
+      const esMiTurno = enMano && table.hand.actingSeat === seat.index;
+      const inicioTurno = table.hand.lastActionAt
+        ? new Date(table.hand.lastActionAt).getTime()
+        : 0;
+
+      return {
+        tableId: table.tableId,
+        kind: table.kind,
+        tierId: table.tierId,
+        formatId: table.formatId ?? '7max',
+        label:
+          table.kind === 'cash'
+            ? getTier(table.tierId)?.label ?? 'Cash'
+            : table.kind === 'freeroll'
+            ? 'Freeroll'
+            : table.kind === 'tournament'
+            ? 'Torneo'
+            : 'Centroll',
+        field: table.field
+          ? {
+              fieldId: table.field.fieldId,
+              tableNumber: table.field.tableNumber,
+              targetField: table.field.targetField,
+              registered: table.field.registered,
+            }
+          : undefined,
+        status: table.status,
+        mode: modo,
+        phase: table.hand.phase,
+        handNumber: table.hand.handNumber,
+        seatIndex: seat.index,
+        chips: seat.chips,
+        displayChips: modo === 'USDT' ? unitsToUsdt(seat.chips) : seat.chips,
+        buyInUsdt: unitsToUsdt(table.buyInUnits),
+        smallBlindUsdt: unitsToUsdt(table.smallBlind),
+        bigBlindUsdt: unitsToUsdt(table.bigBlind),
+        pot: table.hand.pot,
+        displayPot:
+          modo === 'USDT' ? unitsToUsdt(table.hand.pot) : table.hand.pot,
+        blindLevel: table.blindLevel ?? 0,
+        isMyTurn: esMiTurno,
+        turnEndsAt:
+          esMiTurno && inicioTurno > 0
+            ? new Date(inicioTurno + TURN_TIMER.humanMs).toISOString()
+            : null,
+        turnStartedAt:
+          esMiTurno && inicioTurno > 0
+            ? new Date(inicioTurno).toISOString()
+            : null,
+        nextHandAt: table.hand.nextHandAt
+          ? new Date(table.hand.nextHandAt).toISOString()
+          : null,
+      };
+    }).filter(Boolean);
+  }
+
   /** Vista de la mesa incluyendo las cartas propias del jugador. */
   async getPlayerView(tableId: string, telegramId: number) {
     const table = await Table.findOne({ tableId });
@@ -1990,6 +2362,7 @@ if (this.isFieldTable(table)) {
       view.myHand = playerState?.myHand ?? null;
       view.myChips = playerState?.myChips ?? seat.chips;
       view.myBet = playerState?.myBet ?? seat.bet;
+      view.myTimeBankMs = Math.max(0, seat.timeBankMs ?? TURN_TIMER.timeBankMs);
       view.toCall = playerState?.toCall ?? 0;
       view.minRaise = playerState?.minRaise ?? engineState.minRaise;
       view.canCheck = playerState?.canCheck ?? false;
@@ -1999,16 +2372,31 @@ if (this.isFieldTable(table)) {
       view.isMyTurn = false;
       view.myChips = seat.chips;
       view.myBet = 0;
+      view.myTimeBankMs = Math.max(0, seat.timeBankMs ?? 0);
       view.toCall = 0;
       view.minRaise = table.bigBlind;
       view.canCheck = false;
       view.canRaise = false;
     }
 
-    view.turnEndsAt = view.isMyTurn && table.hand.lastActionAt
-      ? new Date(
-          new Date(table.hand.lastActionAt).getTime() + TURN_TIMER.humanMs,
-        ).toISOString()
+    // El reloj del turno viaja para TODOS los que miran la mesa, no solo para
+    // el que tiene que actuar. El aro del avatar del rival tambien baja; si
+    // solo se enviara a `isMyTurn`, la interfaz no podria mostrar el tiempo de
+    // decision de los demas. Los bots no tienen reloj humano: no se envia.
+    const asientoEnTurno = table.seats[table.hand.actingSeat];
+    const turnoHumano =
+      asientoEnTurno?.kind === 'human' &&
+      ['preflop', 'flop', 'turn', 'river'].includes(table.hand.phase) &&
+      !!table.hand.lastActionAt;
+    const inicioTurnoMs = turnoHumano
+      ? new Date(table.hand.lastActionAt!).getTime()
+      : 0;
+
+    view.turnStartedAt = inicioTurnoMs
+      ? new Date(inicioTurnoMs).toISOString()
+      : null;
+    view.turnEndsAt = inicioTurnoMs
+      ? new Date(inicioTurnoMs + TURN_TIMER.humanMs).toISOString()
       : null;
 
     return view;

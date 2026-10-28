@@ -265,14 +265,19 @@ casa; si el importe es menor que la comisión, se cobra como máximo el importe 
 El fee de red es un **coste interno**, no un segundo cobro al jugador. La UI muestra comisión
 y neto antes de confirmar.
 
-### 6.4 · 3-Bet Club: rakeback semanal, no descuento de rake
+### 6.4 · QVA-Bet Club: membresía con rakeback, no descuento de rake
 
-Se abandona el descuento de rake. El VIP reparte un porcentaje del rake que el jugador generó:
+`QVA-Bet Club` es el **programa de membresía**, igual que el 3-Bet Club de CoinPoker. El club
+no se compra: se activa un **plan** dentro de él. El plan mensual se llama `QVA Member`; el
+trimestral se llama `QVA Premium` y nunca `VIP Premium`.
+
+Se abandona el descuento de rake. La membresía reparte un porcentaje del rake que el jugador
+generó:
 
 | Plan | Precio | Duración | Rakeback | Power Ups | Torneos |
 |---|---:|---:|---:|---:|---:|
-| Mensual | 35 USDT | 30 días | 10 % | 6 | — |
-| Trimestral | 100 USDT | 90 días | 10 % | 18 | −5 % |
+| Mensual (QVA Member) | 35 USDT | 30 días | 10 % | 6 | — |
+| Trimestral (QVA Premium) | 100 USDT | 90 días | 10 % | 18 | −5 % |
 
 Reglas de dinero:
 
@@ -295,30 +300,72 @@ Reglas de dinero:
 - El porcentaje contratado se guarda en la membresía y no se cambia retroactivamente si
   mañana cambian los planes.
 
-El job corre al arrancar y cada 6 horas. También se puede cobrar desde la pantalla VIP; ambos
-caminos usan la misma operación idempotente.
+El job corre al arrancar y cada 6 horas. También se puede cobrar desde la pantalla Membresía;
+ambos caminos usan la misma operación idempotente.
 
 ### 6.5 · VIP Arena: una sala, no una membresía
 
 En CoinPoker, **VIP Arena es una sala de cash**, no un plan que se compra. Se corrigió el modelo:
-el plan `elite` desapareció del 3-Bet Club y VIP Arena pasó al lobby de cash.
+el plan `elite` desapareció de QVA-Bet Club y VIP Arena pasó al lobby de cash.
 
 - Ciegas **50/100 USDT**, buy-in **10.000 USDT** (100 BB) y formatos 7-max, 6-max y Heads-Up.
 - No hay precio de acceso ni botón de compra. Se entra con el buy-in, como en cualquier mesa.
 - Los jugadores reciben un **profit share semanal del 15 %** del rake que generaron en esa sala,
   pagado los lunes UTC a `balance.real`.
-- Es un programa aparte del 3-Bet Club y las dos bolsas no se suman: el 10 % del 3-Bet se paga
-  solo sobre mesas cash normales, y el 15 % de Arena se paga solo sobre el rake de esa sala. Un
-  miembro que juegue Arena recibe el 15 %, no el 25 %. Los pagos se guardan en `ArenaPayout`,
-  con índice único `{telegramId, weekKey}`, separado de `RakebackPayout`.
-- El reintento de Arena usa la clave `arena_profit_share:YYYY-MM-DD`, distinta de la del
-  3-Bet. El mismo jugador puede cobrar ambos programas de la misma semana sin que uno bloquee
-  al otro ni se acredite dos veces.
+- Es un programa aparte de QVA-Bet Club y las dos bolsas no se suman: el 10 % de la membresía
+  se paga solo sobre mesas cash normales, y el 15 % de Arena se paga solo sobre el rake de esa
+  sala. Un miembro que juegue Arena recibe el 15 %, no el 25 %. Los pagos se guardan en
+  `ArenaPayout`, con índice único `{telegramId, weekKey}`, separado de `RakebackPayout`.
+- El reintento de Arena usa la clave `arena_profit_share:YYYY-MM-DD`, distinta de la de
+  QVA-Bet Club. El mismo jugador puede cobrar ambas bolsas la misma semana sin que una bloquee
+  a la otra ni se acredite dos veces.
 - El job de los lunes paga ambos programas. Un fallo en uno no cancela el otro.
 - No hay lista de "miembros de Arena": la elegibilidad nace de haber generado rake en la sala.
   La selección curada de CoinPoker se puede añadir después con invitaciones, sin vender acceso.
+- En la Mini App son dos pantallas distintas y con nombres distintos: `/membership` es la
+  membresía QVA-Bet Club y `/vip` es la sala VIP Arena. La primera vende planes; la segunda
+  solo explica la sala, muestra el profit share y enlaza al lobby de cash. Ninguna pantalla
+  presenta Arena como un plan ni la membresía como acceso a la sala.
 
-### 6.6 · Lo que sigue siendo una decisión abierta
+### 6.6 · Torneos pagados y Spin & Go
+
+El buy-in va ligado al premio garantizado, como en CoinPoker:
+
+| Evento | Buy-in | Garantizado | Plazas | Reparto |
+|---|---:|---:|---:|---|
+| Daily Micro | 1 USDT | 100 USDT | 120 | 45/25/15/9/6 |
+| Daily Main | 5 USDT | 500 USDT | 150 | 45/25/15/9/6 |
+| Weekly Major | 25 USDT | 2.500 USDT | 180 | 45/25/15/9/6 |
+| Spin & Go | 1 / 5 / 25 USDT | 2,85 / 14,25 / 71,25 USDT | 3 | 100 % |
+
+- Los stacks y las ciegas internas se muestran como **puntos del torneo**; el buy-in y el
+  premio se muestran en **USDT**. El jugador nunca compra puntos con el monedero.
+- El premio se paga en `balance.real` (retirable). La garantía se calcula con las entradas
+  cobradas menos el 5 % de rake; si no se cubre, la diferencia es **overlay de la casa** y se
+  registra en `Field.overlayUnits`. El overlay es un gasto, no saldo inventado.
+- Los torneos pagados **no se rellenan con bots**. Arrancan a su hora con dos humanos como
+  mínimo; un Spin & Go arranca al llenar sus tres plazas. Si al cerrar el registro tardío (12
+  minutos) no hay dos humanos, se cancela y se devuelve el buy-in.
+- El registro tardío sienta con el stack inicial completo y se cobra una sola vez.
+- El plan QVA Premium anuncia un 5 % de descuento en torneos. Se aplica al cobrar la entrada;
+  el importe realmente cobrado se guarda en `registrations.buyIn` y es el que se devuelve si
+  el torneo se cancela.
+
+### 6.7 · Multimesa, relojes y replay del all-in
+
+- Un jugador puede tener varias mesas cash abiertas. La fuente de verdad son los asientos;
+  `activeTableId` solo sirve como pista de reconexión. `GET /game/my-tables` devuelve stack,
+  fase, ciegas, bote y plazos de cada mesa, y la barra superior permite entrar con un toque.
+- Cada avatar muestra el tiempo de decisión del jugador que tiene el turno, no solo el propio.
+  El plazo viaja a todos los espectadores de la mesa y el timeout ejecuta una acción real del
+  motor, no una acción simulada por el cliente.
+- Entre manos hay una pausa de 6 s (12 s si hubo all-in), configurable con `HAND_PAUSE_MS` y
+  `ALLIN_HAND_PAUSE_MS`, para que se vean ganador, muck y showdown.
+- En un all-in se muestran las cartas y la equidad por calle. Las probabilidades son Monte
+  Carlo con semilla determinista; en el river el ganador sale al 100 % y el perdedor al 0 %,
+  con la carabelita. Si hay empate, el 100 % se reparte entre los ganadores.
+
+### 6.8 · Lo que sigue siendo una decisión abierta
 
 - PLO/PLO5/PLO6/Short Deck: requieren motor de variantes.
 - Juegos de práctica con play chips y Level Up Freerolls: aún no implementados.

@@ -16,6 +16,7 @@ export const PAGES = [
   'freeroll',
   'centroll',
   'tournaments',
+  'membership',
   'vip',
   'referrals',
   'achievements',
@@ -71,6 +72,18 @@ export interface Session {
   stats: UserStats;
   activeTableId: string | null;
   vip: string | null;
+  /**
+   * Acceso automatico a VIP Arena. No es una membresia comprable: se obtiene
+   * por participar en la sala. `user.vip` es la membresia QVA-Bet Club y no se usa
+   * para decidir esto.
+   */
+  vipArena?: {
+    participating: boolean;
+    profitSharePercent: number;
+    estimatedUsdt?: number;
+    claimableUsdt?: number;
+    nextPayoutAt?: string;
+  };
   /** Clave del catálogo de avatares. */
   avatar?: string;
   avatarCatalog?: AvatarOption[];
@@ -179,7 +192,7 @@ export interface ProductConfig {
 
 export interface TableSummary {
   tableId: string;
-  kind: 'cash' | 'freeroll' | 'centroll';
+  kind: 'cash' | 'freeroll' | 'centroll' | 'tournament';
   tierId?: string;
   /** Formato cash: 7max, 6max o hu. */
   formatId?: string;
@@ -265,6 +278,30 @@ export interface LastHandShowdown {
   handName: string;
 }
 
+/**
+ * Fotografia de equidad por calle de un all-in.
+ *
+ * `players` solo lleva jugadores que llegaron al showdown. Las cartas de quien
+ * se retiro no estan aqui y no deben mostrarse.
+ */
+export type AllInStreetName = 'preflop' | 'flop' | 'turn' | 'river';
+
+export interface AllInRevealPlayer {
+  seatIndex: number;
+  displayName: string;
+  cards: string[];
+  /** Porcentaje por calle. El backend lo normaliza a 100. */
+  equity: Record<AllInStreetName, number>;
+  /** Nombre de la mano que se ve en cada calle. */
+  handName: Record<AllInStreetName, string>;
+}
+
+export interface AllInReveal {
+  startStreet: AllInStreetName;
+  board: string[];
+  players: AllInRevealPlayer[];
+}
+
 export interface LastHandResult {
   handNumber: number;
   endedAt: string;
@@ -277,11 +314,34 @@ export interface LastHandResult {
   showdown: LastHandShowdown[];
   endedByFold: boolean;
   unit: 'USDT' | 'PTS';
+  allIn?: AllInReveal;
+}
+
+/**
+ * Una mano cerrada dentro del historial de la mesa.
+ *
+ * `myCards` son las cartas del espectador en ESA mano. Las de los rivales solo
+ * aparecen en `showdown` o en `winners` si llegaron a enseñarlas. El backend
+ * ya recorta el resto antes de enviar la vista.
+ */
+export interface TableHistoryEntry {
+  handNumber: number;
+  endedAt: string;
+  pot: number;
+  potUsdt: number;
+  rake: number;
+  rakeUsdt: number;
+  board: string[];
+  unit: 'USDT' | 'PTS';
+  endedByFold: boolean;
+  myCards: string[];
+  winners: LastHandWinner[];
+  showdown: LastHandShowdown[];
 }
 
 export interface TableView {
   tableId: string;
-  kind: 'cash' | 'freeroll' | 'centroll';
+  kind: 'cash' | 'freeroll' | 'centroll' | 'tournament';
   tierId?: string;
   formatId?: string;
   prizeTier?: number;
@@ -293,6 +353,9 @@ export interface TableView {
   bigBlind: number;
   smallBlindUsdt: number;
   bigBlindUsdt: number;
+  /** Nivel de ciegas en torneos; 0 en cash. */
+  blindLevel?: number;
+  blindLevelStartedAt?: string;
   buyInUnits: number;
   buyInUsdt: number;
   maxSeats: number;
@@ -319,7 +382,74 @@ export interface TableView {
   canCheck?: boolean;
   canRaise?: boolean;
   isMyTurn?: boolean;
+  /** Banco de tiempo que le queda al espectador en la mano actual. */
+  myTimeBankMs?: number;
+  /** Cuando empezo el turno actual y cuando vence. */
+  turnStartedAt?: string | null;
   turnEndsAt?: string | null;
+  /** Cuando arranca la proxima mano durante la pausa. */
+  nextHandAt?: string | null;
+  /** Últimas manos de la mesa, de la más reciente a la más antigua. */
+  history?: TableHistoryEntry[];
+}
+
+/** Resumen de una mesa abierta, para el selector multi-mesa. */
+export interface MyTable {
+  tableId: string;
+  kind: 'cash' | 'freeroll' | 'centroll' | 'tournament';
+  tierId?: string;
+  formatId?: string;
+  label: string;
+  field?: {
+    fieldId: string;
+    tableNumber: number;
+    targetField: number;
+    registered: number;
+  };
+  status: string;
+  mode: 'USDT' | 'PTS';
+  phase: string;
+  handNumber: number;
+  seatIndex: number;
+  chips: number;
+  displayChips: number;
+  buyInUsdt: number;
+  smallBlindUsdt: number;
+  bigBlindUsdt: number;
+  blindLevel: number;
+  pot: number;
+  displayPot: number;
+  isMyTurn: boolean;
+  turnEndsAt: string | null;
+  turnStartedAt: string | null;
+  nextHandAt: string | null;
+}
+
+// --- Torneos y Spin & Go ---
+
+export interface TournamentLobbyEntry {
+  id: string;
+  label: string;
+  description: string;
+  kind: 'torneo' | 'spingo';
+  buyInUsdt: number;
+  premioGarantizadoUsdt: number;
+  premioActualUsdt: number;
+  boteEntradasUsdt: number;
+  fieldSize: number;
+  startingChips: number;
+  blinds: { small: number; big: number };
+  lateRegMinutes: number;
+  payout: number[];
+  scheduled: boolean;
+  fieldId: string | null;
+  status: string;
+  jugadores: number;
+  jugadoresVivos: number;
+  startsAt: string | null;
+  lateRegUntil: string | null;
+  inscrito: boolean;
+  maxPorMesa: number;
 }
 
 /** Resuelve la ruta de la URL a una pagina de la app. */

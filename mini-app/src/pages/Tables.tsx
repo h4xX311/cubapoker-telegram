@@ -9,6 +9,8 @@ interface Props {
   onBack: () => void;
   onBalanceChange?: () => void | Promise<any>;
   onPlay: (tableId: string) => void;
+  /** Abre la pantalla de VIP Arena para cobrar el profit share. */
+  onOpenArena?: () => void;
 }
 
 /**
@@ -30,6 +32,7 @@ export function Tables({
   onBack,
   onBalanceChange,
   onPlay,
+  onOpenArena,
 }: Props) {
   const [tiers, setTiers] = useState<CashTier[]>([]);
   const [formats, setFormats] = useState<CashFormat[]>([]);
@@ -221,10 +224,18 @@ export function Tables({
                         </span>
                       </div>
                       <p className="text-[10px] text-[#a0a0b0] mt-1 leading-relaxed">
-                        Sala premium, separada de las mesas cash. No se compra
-                        acceso: entras con el buy-in y cobras profit share del
-                        rake que generes.
+                        Sala de cash separada de las mesas normales. No es una
+                        membresía ni se compra acceso: entras con el buy-in y
+                        cobras profit share del rake que generes.
                       </p>
+                      {onOpenArena && (
+                        <button
+                          onClick={onOpenArena}
+                          className="text-[10px] font-semibold text-[#ffd700] mt-1"
+                        >
+                          Ver mi profit share →
+                        </button>
+                      )}
                     </div>
                   )}
 

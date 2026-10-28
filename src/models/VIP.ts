@@ -1,8 +1,8 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
 /**
- * MEMBRESÍA 3-BET CLUB
- * ====================
+ * MEMBRESÍA QVA-BET CLUB
+ * ======================
  *
  * El VIP de CubaPoker no es un descuento de rake: es un reparto semanal del
  * rake que el jugador genera. Es el modelo de CoinPoker y el único que se
@@ -17,7 +17,7 @@ import mongoose, { Document, Schema } from 'mongoose';
  * de high stakes con su propio profit share. Mezclarlos hacía que la UI
  * vendiera una "membresía VIP Arena" que en CoinPoker no existe.
  *
- * El rake de Arena no entra en el 10% del 3-Bet Club: se reparte aparte como
+ * El rake de Arena no entra en el 10% del QVA-Bet Club: se reparte aparte como
  * profit share del 15% entre quienes jugaron esa sala. Si se sumaran ambos, un
  * miembro que jugara Arena recuperaria el 25% del rake de la mesa.
  */
@@ -69,7 +69,7 @@ export interface VIPPlan {
 }
 
 /**
- * Planes del 3-Bet Club.
+ * Planes del QVA-Bet Club.
  *
  * Precios de referencia de CoinPoker: 35 USD al mes y 100 USD al trimestre.
  * `price` está en unidades internas (1 USDT = 1000), que es lo que descuenta
@@ -79,7 +79,7 @@ export interface VIPPlan {
  */
 export const VIP_CONFIG: Record<VIPLevel, VIPPlan> = {
   basic: {
-    name: '3-Bet Club · Mensual',
+    name: 'QVA Member · Mensual',
     price: 35_000,
     duration: 30,
     rakebackPercent: 10,
@@ -88,22 +88,24 @@ export const VIP_CONFIG: Record<VIPLevel, VIPPlan> = {
     benefits: [
       '10% de rakeback semanal sobre el rake de mesas cash (fuera de Arena)',
       '6 Power Ups al mes (1,5x durante 12 h)',
-      'Badge 3-Bet Club en la mesa',
+      'Badge QVA-Bet Club en la mesa',
       'Pagos de rakeback los lunes',
     ],
   },
   premium: {
-    name: '3-Bet Club · Trimestral',
+    name: 'QVA Premium · Trimestral',
     price: 100_000,
     duration: 90,
     rakebackPercent: 10,
-    powerUpsPerMonth: 6,
+    // Son 18 en el trimestre completo, no 18 cada mes. El campo conserva el
+    // nombre histórico, pero guarda lo incluido en el periodo contratado.
+    powerUpsPerMonth: 18,
     tournamentDiscount: 5,
     benefits: [
       '10% de rakeback semanal sobre el rake de mesas cash (fuera de Arena)',
       '18 Power Ups en el trimestre',
       '5% de descuento en buy-ins de torneos',
-      'Badge trimestral y prioridad en retiros',
+      'Badge QVA Premium y prioridad en retiros',
       'Pagos de rakeback los lunes',
     ],
   },

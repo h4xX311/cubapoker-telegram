@@ -82,6 +82,14 @@ export interface GameState {
   payouts?: HandPayout[];
   /** Cartas y manos de los que llegaron al showdown. Vacío si todos se retiraron. */
   showdown?: ShowdownEntry[];
+  /**
+   * Calle en la que se quedo sin fichas el primer jugador all-in.
+   *
+   * La UI la usa para no ensenar un porcentaje preflop cuando la mano se
+   * cerro en el turn. El motor sigue resolviendo la mano de golpe; esto es
+   * solo informacion de presentacion.
+   */
+  allInStreet?: GamePhase;
   lastAction?: { playerId: string; action: PlayerAction; amount?: number };
   createdAt: Date;
   updatedAt: Date;
@@ -230,6 +238,7 @@ export class PokerGame {
     this.state.winners = undefined;
     this.state.payouts = undefined;
     this.state.showdown = undefined;
+    this.state.allInStreet = undefined;
     this.state.lastAction = undefined;
 
     this.state.players.forEach(p => {
@@ -296,7 +305,17 @@ export class PokerGame {
     player.totalBet += actualAmount;
     this.state.pot += actualAmount;
 
-    if (player.chips === 0) player.allIn = true;
+    if (player.chips === 0) this.markAllIn(player);
+  }
+
+  /**
+   * Marca al jugador all-in y recuerda la calle de la primera vez. Se usa en
+   * ciegas, calls, subidas y all-in directo; centralizarlo evita que una de
+   * las ramas se olvide y la UI ensene un board que no toca.
+   */
+  private markAllIn(player: Player): void {
+    player.allIn = true;
+    if (!this.state.allInStreet) this.state.allInStreet = this.state.phase;
   }
 
   /** Reparte dos cartas a cada jugador. */
@@ -371,7 +390,7 @@ export class PokerGame {
         player.bet += callAmount;
         player.totalBet += callAmount;
         this.state.pot += callAmount;
-        if (player.chips === 0) player.allIn = true;
+        if (player.chips === 0) this.markAllIn(player);
         player.lastAction = 'call';
         break;
       }
@@ -403,7 +422,7 @@ export class PokerGame {
           this.state.preflopRaises = (this.state.preflopRaises ?? 0) + 1;
         }
 
-        if (player.chips === 0) player.allIn = true;
+        if (player.chips === 0) this.markAllIn(player);
         player.lastAction = isAllIn ? 'all_in' : 'raise';
         this.clearOthersAction(player);
         break;
@@ -420,7 +439,7 @@ export class PokerGame {
         player.bet = newBet;
         player.totalBet += allInAmount;
         this.state.pot += allInAmount;
-        player.allIn = true;
+        this.markAllIn(player);
         player.lastAction = 'all_in';
 
         if (newBet > this.state.currentBet) {

@@ -3,7 +3,8 @@ import { Home } from './pages/Home';
 import { Deposit } from './pages/Deposit';
 import { Withdraw } from './pages/Withdraw';
 import { Tournaments } from './pages/Tournaments';
-import { VIP } from './pages/VIP';
+import { VipArena } from './pages/VipArena';
+import { Membership } from './pages/Membership';
 import { Referrals } from './pages/Referrals';
 import { Achievements } from './pages/Achievements';
 import { Tables } from './pages/Tables';
@@ -15,7 +16,13 @@ import { SimulatePay } from './pages/SimulatePay';
 import { Source } from './pages/Source';
 import { api, ApiError, type DepositOrder } from './lib/api';
 import { fmtUsdt } from './components/Balance';
-import { pageFromPath as resolvePage, type Page, type Session } from './lib/types';
+import { MyTablesBar } from './components/MyTablesBar';
+import {
+  pageFromPath as resolvePage,
+  type MyTable,
+  type Page,
+  type Session,
+} from './lib/types';
 
 export default function App() {
   const [page, setPage] = useState<Page>(() => resolvePage(window.location.pathname));
@@ -25,6 +32,7 @@ export default function App() {
   const [errorCode, setErrorCode] = useState<string>('');
   const [checkout, setCheckout] = useState<DepositOrder | null>(null);
   const [activeTable, setActiveTable] = useState<string | null>(null);
+  const [myTables, setMyTables] = useState<MyTable[]>([]);
 
   // ------------------------------------------------------------------
   // SI LA URL ES DE MESA, A QUE MESA VA
@@ -206,6 +214,40 @@ export default function App() {
     });
   }, []);
 
+  // ------------------------------------------------------------------
+  // SELECTOR MULTI-MESA
+  //
+  // Las mesas abiertas se leen de los asientos, no de `activeTableId`: un
+  // jugador puede tener cash y torneo a la vez, y `activeTableId` solo guarda
+  // una pista de reconexion. Se refresca cada 6 segundos y al volver a la app.
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    if (status !== 'ready') return;
+
+    let cancelado = false;
+    const cargar = async () => {
+      try {
+        const data = await api.myTables();
+        if (!cancelado) setMyTables(data.tables ?? []);
+      } catch {
+        // La barra es una comodidad: si falla, la mesa abierta sigue
+        // funcionando y el lobby no debe romperse por esto.
+      }
+    };
+
+    void cargar();
+    const timer = setInterval(() => void cargar(), 6000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void cargar();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      cancelado = true;
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [status]);
+
   // --- Estados de carga / error a pantalla completa ---
 
   // ------------------------------------------------------------------
@@ -324,6 +366,7 @@ export default function App() {
             onBack={back}
             onBalanceChange={refreshUser}
             onPlay={setActiveTable}
+            onOpenArena={() => navigate('vip')}
           />
         );
       case 'freeroll':
@@ -359,9 +402,33 @@ export default function App() {
           />
         );
       case 'tournaments':
-        return <Tournaments onBack={back} onNavigate={navigate} />;
+        return (
+          <Tournaments
+            onBack={back}
+            onPlay={(tableId) => {
+              setActiveTable(tableId);
+              navigate('game');
+            }}
+          />
+        );
+      case 'membership':
+        return (
+          <Membership
+            user={user}
+            onBack={back}
+            onBalanceChange={refreshUser}
+          />
+        );
       case 'vip':
-        return <VIP user={user} onBack={back} onBalanceChange={refreshUser} />;
+        return (
+          <VipArena
+            user={user}
+            onBack={back}
+            onBalanceChange={refreshUser}
+            onGoTables={() => navigate('tables')}
+            onGoMembership={() => navigate('membership')}
+          />
+        );
       case 'referrals':
         return <Referrals user={user} onBack={back} />;
       case 'achievements':
@@ -392,22 +459,19 @@ export default function App() {
             className="flex items-center gap-2 font-bold"
             aria-label="Ir al inicio"
           >
-            <span
-              className="w-7 h-7 rounded-lg flex items-center justify-center text-black text-base font-bold"
-              style={{
-                background: 'linear-gradient(135deg, #00d26a 0%, #00b894 100%)',
-              }}
+            <img
+              src="/logo.png"
+              alt=""
+              className="w-7 h-7 rounded-lg object-cover"
               aria-hidden="true"
-            >
-              ♠
-            </span>
+            />
             <span className="text-[#ffd700]">CubaPoker</span>
           </button>
 
           <div className="flex items-center gap-2">
             {user?.vip && (
               <span className="badge badge-warning text-[10px] uppercase">
-                {user.vip}
+                {user.vip === 'premium' ? 'QVA Premium' : 'QVA Member'}
               </span>
             )}
             <button
@@ -433,6 +497,14 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      <MyTablesBar
+        tables={myTables}
+        onOpen={(tableId) => {
+          setActiveTable(tableId);
+          navigate('game');
+        }}
+      />
 
       <main className="max-w-md mx-auto">{renderPage()}</main>
     </div>

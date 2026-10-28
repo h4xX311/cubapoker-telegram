@@ -20,6 +20,7 @@ import { SIMULATION_ENABLED, pruneSimulatedOrders } from './services/payment/gat
 import { tableManager, shutdownEngine } from './game/table.manager';
 import { fieldManager } from './game/field.manager';
 import { freerollManager } from './game/freeroll.service';
+import { tournamentManager } from './game/tournament.service';
 import { centrollService } from './game/centroll.service';
 import { rakebackService } from './services/rakeback.service';
 import { SUIT_SYMBOL } from './game/card.utils';
@@ -106,6 +107,28 @@ if (SIN_TOKEN) {
 const bot = new TelegramBot(TELEGRAM_TOKEN || '0:dry-run-sin-token', {
   polling: !USE_WEBHOOK && !SIN_TOKEN,
 });
+
+// El menú de comandos de Telegram se publica desde el propio bot. Sin esto,
+// BotFather conserva el menú viejo y `/vip` sigue apareciendo aunque el código
+// ya no lo anuncie. `/membresia` es el nombre visible; `/vip` queda solo como
+// alias interno para enlaces antiguos.
+if (!SIN_TOKEN) {
+  void bot
+    .setMyCommands([
+      { command: 'play', description: 'Abrir el lobby' },
+      { command: 'tournaments', description: 'Torneos y Spin & Go' },
+      { command: 'membresia', description: 'Membresía QVA-Bet Club' },
+      { command: 'balance', description: 'Ver saldo' },
+      { command: 'deposit', description: 'Depositar USDT' },
+      { command: 'withdraw', description: 'Retirar USDT' },
+      { command: 'referrals', description: 'Invitar y ganar' },
+      { command: 'achievements', description: 'Ver logros' },
+      { command: 'help', description: 'Ayuda' },
+    ])
+    .catch((error) => {
+      logger.warn('No se pudo publicar el menú de comandos de Telegram:', error);
+    });
+}
 
 /**
  * Avisos de turno.
@@ -390,7 +413,7 @@ Poker online en USDT. Sin bancos y sin intermediarios.
 🎮 *Todo lo que puedes hacer:*
 /play - Abrir el lobby
 /tournaments - Torneos y freerolls (uno cada hora)
-/vip - Niveles VIP
+/membresia - Membresía QVA-Bet Club
 /referrals - Invita y gana
 /achievements - Logros
 /deposit - Depositar USDT
@@ -412,7 +435,7 @@ Poker online en USDT. Sin bancos y sin intermediarios.
         { text: '💸 Retirar', web_app: { url: `${app}/withdraw` } },
       ],
       [
-        { text: '👑 VIP', web_app: { url: `${app}/vip` } },
+        { text: '👑 Membresía', web_app: { url: `${app}/membership` } },
         { text: '🎖️ Logros', web_app: { url: `${app}/achievements` } },
       ],
     ],
@@ -508,37 +531,44 @@ bot.onText(/\/tournaments/, async (msg) => {
   });
 });
 
-bot.onText(/\/vip/, async (msg) => {
+// `/membresia` es el comando visible. `/vip` y `/premium` siguen aceptándose
+// para no romper enlaces o costumbres antiguas, pero no se anuncian: el
+// producto es una membresía con planes, no la compra del club.
+bot.onText(/^\/(membresia|premium|vip)(@\w+)?$/, async (msg) => {
   const chatId = msg.chat.id;
   const user = msg.from!;
 
   const dbUser = await User.findOne({ telegramId: user.id });
   const vipLevel = await monetizationService.getVIPLevel(user.id);
 
-  let message = `👑 *VIP - CubaPoker*\n\n`;
+  let message = `👑 *QVA-Bet Club - Membresía*\n\n`;
   
   if (vipLevel) {
     const config = VIP_CONFIG[vipLevel];
-    message += `✅ *Tu nivel actual:* ${config.name}\n\n`;
+    message += `✅ *Tu plan actual:* ${config.name}\n\n`;
     message += `🎁 *Beneficios:*\n`;
     config.benefits.forEach(b => { message += `• ${b}\n`; });
   } else {
-    message += `❌ No tienes suscripción VIP\n\n`;
+    message += `❌ No tienes una membresía QVA-Bet Club activa\n\n`;
   }
 
-  message += `\n📊 *Planes disponibles:*\n\n`;
+  message += `\n📊 *Planes de membresía:*\n\n`;
   
   Object.entries(VIP_CONFIG).forEach(([key, config]) => {
     message += `*${config.name}*\n`;
-    message += `💰 Precio: ${formatUnits(config.price)} USDT/mes\n`;
+    message += `💰 Precio: ${formatUnits(config.price)} USDT / ${config.duration} días\n`;
     message += `🎁 Beneficios:\n`;
     config.benefits.forEach(b => { message += `  • ${b}\n`; });
     message += `\n`;
   });
 
+  message +=
+    'La membresía QVA-Bet Club no es la sala VIP Arena. ' +
+    'La Arena no se compra: se entra con el buy-in de la mesa.\n';
+
   const keyboard = {
     inline_keyboard: [
-      [{ text: '👑 Ver VIP', web_app: { url: `${process.env.MINI_APP_URL}/vip` } }],
+      [{ text: '👑 Ver membresía', web_app: { url: `${process.env.MINI_APP_URL}/membership` } }],
     ]
   };
 
@@ -675,7 +705,7 @@ bot.onText(/\/balance/, async (msg) => {
 • *Promoción (solo jugar):* ${formatUnits(dbUser.balance.play)} USDT
 • *Total:* ${formatUnits(dbUser.balance.real + dbUser.balance.play)} USDT
 
-👑 *VIP:* ${vipLevel ? VIP_CONFIG[vipLevel].name : 'No VIP'}
+👑 *Membresía QVA-Bet Club:* ${vipLevel ? VIP_CONFIG[vipLevel].name : 'No activa'}
 🔥 *Racha:* ${streak.current} días
 
 El saldo de promoción sirve para jugar en cualquier mesa cash pero *no se puede retirar*.
@@ -697,7 +727,7 @@ bot.onText(/\/help/, (msg) => {
 /start - Iniciar y registrarse
 /play - Jugar poker
 /tournaments - Ver torneos
-/vip - Comprar VIP
+/membresia - Membresía QVA-Bet Club
 /referrals - Ver referidos
 /achievements - Ver logros
 /deposit - Depositar fondos
@@ -805,6 +835,24 @@ const start = async () => {
   }, 30_000);
   freerollTimer.unref();
 
+  // Torneos programados y Spin & Go. El reloj es el mismo que el de los
+  // freerolls, pero la politica es distinta: un torneo pagado sin dos humanos
+  // se cancela y devuelve el buy-in; nunca se rellena con bots.
+  try {
+    const primeraTorneos = await tournamentManager.procesar();
+    logger.info(
+      `Torneos: vuelta inicial (${primeraTorneos.arrancados} arrancados, ` +
+      `${primeraTorneos.cancelados} cancelados).`,
+    );
+  } catch (error) {
+    logger.error('Torneos: fallo la vuelta inicial:', error);
+  }
+
+  const tournamentTimer = setInterval(() => {
+    void tournamentManager.procesar();
+  }, 30_000);
+  tournamentTimer.unref();
+
   // Red de seguridad del centroll: si un jugador quedo sentado y el proceso se
   // reinicio antes de arrancar, esta vuelta completa la mesa con bots y la
   // arranca. Es idempotente: con el campo ya en running no hace nada.
@@ -813,7 +861,7 @@ const start = async () => {
   }, 5_000);
   centrollTimer.unref();
 
-  // Rakeback del 3-Bet Club y profit share de VIP Arena. Se paga la semana
+  // Rakeback del QVA-Bet Club y profit share de VIP Arena. Se paga la semana
   // cerrada y los índices únicos de `RakebackPayout` y `ArenaPayout` impiden
   // pagar dos veces, aunque el proceso se reinicie o corran dos instancias. La
   // primera vuelta se retrasa un minuto para no retrasar el arranque.

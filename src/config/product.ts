@@ -274,7 +274,7 @@ export interface TableTier {
  *
  * En CoinPoker, VIP Arena es una SALA de cash de high stakes, no un plan que se
  * compra. Los jugadores reciben un profit share semanal por el rake que
- * generan. Se puede sumar al 3-Bet Club: no son el mismo producto.
+ * generan. Se puede sumar al QVA-Bet Club: no son el mismo producto.
  *
  * Ciegas 50/100 USDT y buy-in de 10.000 USDT = 100 BB. Es el escalón de
  * entrada de la sala real. Para un jugador nuevo es inalcanzable, y está bien:
@@ -290,6 +290,174 @@ export const VIP_ARENA = {
     'Mesa premium de high stakes. Los jugadores reciben un 15 % del rake ' +
     'que generan, pagado cada lunes. No es una membresía: se entra con el buy-in.',
 } as const;
+
+// ==========================================================================
+// TORNEOS PROGRAMADOS Y SPIN & GO
+// ==========================================================================
+
+/**
+ * Reparto de los torneos con buy-in. Suma 100 y no se mezcla con el reparto
+ * del freeroll (50/30/20): son productos distintos.
+ *
+ * El bote es el 95 % de las entradas. Si el torneo no llega al aforo, la casa
+ * completa hasta el premio garantizado. Ese overlay se anota y se paga como
+ * gasto de adquisición, nunca se inventa saldo de la nada.
+ */
+export const TOURNAMENT_PAYOUT = [45, 25, 15, 9, 6] as const;
+
+export interface TournamentSchedule {
+  /** null = se juega en cualquier día; el torneo arranca al llenarse. */
+  weekdayUtc: number | null;
+  hourUtc: number;
+  minuteUtc: number;
+}
+
+export interface TournamentEvent {
+  id: string;
+  label: string;
+  description: string;
+  /** false = Spin & Go, arranca al llenarse y no tiene hora fija. */
+  scheduled: boolean;
+  /** true = 3-max winner-take-all. */
+  spin: boolean;
+  buyInUsdt: number;
+  buyInUnits: number;
+  /** Premio garantizado por la casa, en unidades internas. */
+  guaranteedPrizeUsdt: number;
+  guaranteedPrizeUnits: number;
+  maxPlayers: number;
+  startingChips: number;
+  blinds: { small: number; big: number };
+  lateRegMinutes: number;
+  /** Porcentaje por posición. Para Spin & Go es [100]. */
+  payout: readonly number[];
+  schedule: TournamentSchedule | null;
+}
+
+const torneo = (
+  id: string,
+  label: string,
+  description: string,
+  buyInUsdt: number,
+  guaranteedPrizeUsdt: number,
+  maxPlayers: number,
+  startingChips: number,
+  blinds: { small: number; big: number },
+  schedule: TournamentSchedule | null,
+  spin = false,
+): TournamentEvent => ({
+  id,
+  label,
+  description,
+  scheduled: !spin,
+  spin,
+  buyInUsdt,
+  buyInUnits: usdtToUnits(buyInUsdt),
+  guaranteedPrizeUsdt,
+  guaranteedPrizeUnits: usdtToUnits(guaranteedPrizeUsdt),
+  maxPlayers,
+  startingChips,
+  blinds,
+  lateRegMinutes: 12,
+  // Un Spin & Go paga una sola plaza: el ganador se lleva el bote. Los
+  // torneos programados usan el reparto de cinco posiciones.
+  payout: spin ? ([100] as const) : TOURNAMENT_PAYOUT,
+  schedule,
+});
+
+/**
+ * Catálogo de torneos.
+ *
+ * El buy-in y el premio garantizado están emparejados a propósito: el jugador
+ * nunca ve un premio que no se explique por su entrada. Un evento de 1 USDT
+ * garantiza 100 USDT, uno de 5 garantiza 500 y uno de 25 garantiza 2.500.
+ * El overlay de la casa aparece si el campo no se llena; el torneo se juega
+ * igualmente y nadie tiene que esperar a que se complete el aforo.
+ *
+ * Los horarios son UTC. La interfaz los convierte a la hora del jugador.
+ */
+export const TOURNAMENT_EVENTS: TournamentEvent[] = [
+  torneo(
+    'daily-micro',
+    'Micro Diario',
+    'Torneo diario de buy-in bajo. 120 plazas, ciegas de 8 minutos y premio garantizado.',
+    1,
+    100,
+    120,
+    3_000,
+    { small: 25, big: 50 },
+    { weekdayUtc: null, hourUtc: 18, minuteUtc: 0 },
+  ),
+  torneo(
+    'daily-main',
+    'Main Diario',
+    'El torneo de la noche. 150 plazas, stack de 5.000 puntos y 500 USDT garantizados.',
+    5,
+    500,
+    150,
+    5_000,
+    { small: 50, big: 100 },
+    { weekdayUtc: null, hourUtc: 20, minuteUtc: 0 },
+  ),
+  torneo(
+    'weekly-major',
+    'Major Semanal',
+    'Evento de sábado. 180 plazas, stack de 10.000 puntos y 2.500 USDT garantizados.',
+    25,
+    2_500,
+    180,
+    10_000,
+    { small: 100, big: 200 },
+    { weekdayUtc: 6, hourUtc: 21, minuteUtc: 0 },
+  ),
+  torneo(
+    'spingo-1',
+    'Spin & Go 1 USDT',
+    'Mesa de 3 jugadores. Arranca al llenarse; el ganador se lleva el bote.',
+    1,
+    2.85,
+    3,
+    500,
+    { small: 10, big: 20 },
+    null,
+    true,
+  ),
+  torneo(
+    'spingo-5',
+    'Spin & Go 5 USDT',
+    'Mesa de 3 jugadores. Arranca al llenarse; el ganador se lleva el bote.',
+    5,
+    14.25,
+    3,
+    500,
+    { small: 10, big: 20 },
+    null,
+    true,
+  ),
+  torneo(
+    'spingo-25',
+    'Spin & Go 25 USDT',
+    'Mesa de 3 jugadores. Arranca al llenarse; el ganador se lleva el bote.',
+    25,
+    71.25,
+    3,
+    500,
+    { small: 10, big: 20 },
+    null,
+    true,
+  ),
+];
+
+export const getTournamentEvent = (id: string): TournamentEvent | undefined =>
+  TOURNAMENT_EVENTS.find((event) => event.id === id);
+
+/**
+ * Un identificador de torneo se compone de evento y ocurrencia. La hora va
+ * dentro para que el índice único de `Field.tierId` deje convivir el torneo de
+ * hoy con el de mañana, pero impida abrir dos veces el mismo.
+ */
+export const tournamentSlotKey = (eventId: string, start: Date): string =>
+  `${eventId}-${start.toISOString().slice(0, 13).replace(/[-:T]/g, '')}`;
 
 /**
  * Construye un tier.
@@ -669,6 +837,12 @@ export const RAKE = {
 /** Tiempo maximo para actuar antes de que el bot juegue por el usuario. */
 export const TURN_TIMER = {
   humanMs: 30_000,
+  /**
+   * Banco de tiempo por mano. El jugador puede pedirlo una vez y añade este
+   * tiempo al turno actual. No se acumula entre manos: se reinicia al empezar
+   * cada una para que una desconexión no deje a alguien con un turno eterno.
+   */
+  timeBankMs: 30_000,
   botMs: 2_000,
   warnBeforeMs: 10_000,
 } as const;

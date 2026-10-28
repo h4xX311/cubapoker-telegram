@@ -10,21 +10,29 @@ interface Props {
 }
 
 /**
- * 3-BET CLUB
- * ==========
+ * MEMBRESÍA QVA-BET CLUB
+ * ======================
  *
- * La membresía no descuenta rake: devuelve un porcentaje del rake que el
- * jugador generó durante la semana anterior. El dinero se paga los lunes y va
- * a `balance.real`, así que es retirable.
+ * Esta pantalla es SOLO de la membresía. La sala VIP Arena tiene su propia
+ * pantalla (`VipArena.tsx`) porque no es un plan: es una mesa de cash a la que
+ * se entra con el buy-in y cuyo profit share se cobra allí.
  *
- * Esta pantalla muestra tres cosas que antes no existían:
- *   1. Cuánto rake generó el jugador en la semana que se está pagando.
- *   2. Cuánto rakeback le corresponde y cuánto falta por cobrar.
- *   3. La fecha del próximo pago.
+ * QVA-Bet Club funciona como el 3-Bet Club de CoinPoker: el club no se compra,
+ * se activa un plan (mensual o trimestral). La membresía no descuenta rake:
+ * devuelve un porcentaje del rake generado en las mesas cash normales.
  */
+
 const LEVELS: Record<string, { icon: string; gradient: string; accent: string }> = {
-  basic: { icon: '🥉', gradient: 'from-[#3498db] to-[#2980b9]', accent: 'text-[#3498db]' },
-  premium: { icon: '🥈', gradient: 'from-[#ffd700] to-[#e6a800]', accent: 'text-[#ffd700]' },
+  basic: {
+    icon: '🥉',
+    gradient: 'from-[#3498db] to-[#2980b9]',
+    accent: 'text-[#3498db]',
+  },
+  premium: {
+    icon: '🥈',
+    gradient: 'from-[#ffd700] to-[#e6a800]',
+    accent: 'text-[#ffd700]',
+  },
 };
 
 const ORDER = ['basic', 'premium'];
@@ -37,19 +45,21 @@ const fechaCorta = (iso: string | null | undefined) => {
   });
 };
 
-export function VIP({ user, onBack, onBalanceChange }: Props) {
+export function Membership({ user, onBack, onBalanceChange }: Props) {
   const [status, setStatus] = useState<any>(null);
   const [currentLevel, setCurrentLevel] = useState<string | null>(null);
   const [configs, setConfigs] = useState<Record<string, any>>({});
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [claiming, setClaiming] = useState(false);
-  const [claimingArena, setClaimingArena] = useState(false);
   const [error, setError] = useState('');
 
   const load = async () => {
     try {
-      const [statusRes, configRes] = await Promise.all([api.vip(), api.vipConfig()]);
+      const [statusRes, configRes] = await Promise.all([
+        api.vip(),
+        api.vipConfig(),
+      ]);
       setStatus(statusRes);
       setCurrentLevel(statusRes.level ?? null);
       setConfigs(configRes.config || {});
@@ -99,59 +109,31 @@ export function VIP({ user, onBack, onBalanceChange }: Props) {
     }
   };
 
-  const claimArena = async () => {
-    setClaimingArena(true);
-    setError('');
-    try {
-      const res = await api.claimArenaProfitShare();
-      await onBalanceChange?.();
-      await load();
-      if (!res?.paidUsdt && res?.reason) {
-        setError(res.reason);
-      }
-    } catch (err) {
-      setError(
-        err instanceof ApiError
-          ? err.message
-          : 'No se pudo cobrar el profit share de VIP Arena.',
-      );
-    } finally {
-      setClaimingArena(false);
-    }
-  };
-
   const realBalance = user?.balance?.real ?? 0;
   const rb = status?.rakeback;
   const available = rb?.claimableUsdt ?? 0;
   const percent = rb?.percent ?? 0;
-  // Un pago `pending` ya salió del estado "nada pagado" pero todavía no está
-  // confirmado. No se ofrece cobrar de nuevo: el índice único lo rechazaría y
-  // el jugador vería un error sin explicación.
   const payoutPending = rb?.payoutStatus === 'pending';
-
-  const arena = status?.arena;
-  const arenaAvailable = arena?.claimableUsdt ?? 0;
-  const arenaPercent = arena?.percent ?? 15;
-  const arenaPayoutPending = arena?.payoutStatus === 'pending';
 
   return (
     <div className="p-4 pb-10 animate-fadeIn">
-      <PageHeader title="VIP y Arena" onBack={onBack} />
+      <PageHeader title="Membresía QVA-Bet Club" onBack={onBack} />
 
       <div
         className="rounded-2xl p-4 mb-5"
         style={{ background: '#16213e', border: '1px solid #2a2a4a' }}
       >
         <p className="text-[10px] uppercase tracking-[0.18em] text-[#ffd700] font-bold">
-          CubaPoker Rewards
+          CubaPoker Rewards · Membresía
         </p>
         <h2 className="text-xl font-bold text-white mt-1">
           Recupera tu rake cada semana
         </h2>
         <p className="text-xs text-[#a0a0b0] mt-1 leading-relaxed">
-          El 10% del rake que generas en mesas cash normales vuelve a tu saldo
-          retirable. El rake de Arena se reparte aparte. Los pagos se
-          procesan los lunes.
+          QVA-Bet Club es el programa de membresía, como el 3-Bet Club de
+          CoinPoker. El club no se compra: se activa un plan mensual o trimestral
+          y el 10% del rake de tus mesas cash normales vuelve a tu saldo
+          retirable.
         </p>
       </div>
 
@@ -161,94 +143,6 @@ export function VIP({ user, onBack, onBalanceChange }: Props) {
         </div>
       ) : (
         <>
-          {/*
-            VIP Arena es una SALA, no un plan. Se muestra aquí porque es donde
-            el jugador cobra su profit share, pero no se vende: no hay botón de
-            compra ni precio de membresía.
-          */}
-          <div
-            className="rounded-2xl p-4 mb-5"
-            style={{
-              background: 'linear-gradient(135deg, #1c1730 0%, #16131f 100%)',
-              border: '1px solid rgba(255, 215, 0, 0.45)',
-            }}
-          >
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <p className="text-[10px] uppercase tracking-[0.18em] text-[#ffd700] font-bold">
-                  VIP Arena · Sala de cash
-                </p>
-                <h3 className="text-lg font-bold text-white mt-1">
-                  High stakes con profit share
-                </h3>
-              </div>
-              <span className="text-[10px] font-bold text-[#ffd700] bg-[#ffd700]/10 border border-[#ffd700]/30 rounded-full px-2 py-1 whitespace-nowrap">
-                {arenaPercent}% semanal
-              </span>
-            </div>
-
-            <p className="text-xs text-[#a0a0b0] mt-2 leading-relaxed">
-              No se compra una membresía para entrar: es una mesa de cash de
-              50/100 USDT. Cada lunes recibes el {arenaPercent}% del rake que
-              generaste allí.
-            </p>
-
-            <div className="grid grid-cols-2 gap-2 mt-4">
-              <div className="rounded-xl p-3" style={{ background: '#0f0d17' }}>
-                <p className="text-[9px] text-[#a0a0b0] uppercase tracking-wide">
-                  Rake en Arena
-                </p>
-                <p className="text-lg font-bold text-white mt-1">
-                  {fmtUsdt(arena?.rakeUsdt ?? 0)}
-                  <span className="text-[10px] font-normal text-[#a0a0b0] ml-1">
-                    USDT
-                  </span>
-                </p>
-                <p className="text-[9px] text-[#a0a0b0] mt-1">
-                  {fechaCorta(arena?.weekStart)} – {fechaCorta(arena?.weekEnd)}
-                </p>
-              </div>
-              <div className="rounded-xl p-3" style={{ background: '#0f0d17' }}>
-                <p className="text-[9px] text-[#a0a0b0] uppercase tracking-wide">
-                  Tu profit share
-                </p>
-                <p className="text-lg font-bold text-[#ffd700] mt-1">
-                  {fmtUsdt(arena?.estimatedUsdt ?? 0)}
-                  <span className="text-[10px] font-normal text-[#a0a0b0] ml-1">
-                    USDT
-                  </span>
-                </p>
-                <p className="text-[9px] text-[#a0a0b0] mt-1">
-                  {arena?.payoutStatus === 'paid'
-                    ? 'Pagado'
-                    : arenaPayoutPending
-                    ? 'En revisión'
-                    : arenaAvailable > 0
-                    ? 'Disponible'
-                    : 'Sin rake esta semana'}
-                </p>
-              </div>
-            </div>
-
-            {arenaAvailable > 0 && !arenaPayoutPending ? (
-              <button
-                onClick={claimArena}
-                disabled={claimingArena}
-                className="w-full btn btn-primary py-2.5 text-sm mt-3 disabled:opacity-50"
-              >
-                {claimingArena
-                  ? 'Cobrando…'
-                  : `Cobrar ${fmtUsdt(arenaAvailable)} USDT`}
-              </button>
-            ) : (
-              <p className="text-[10px] text-[#a0a0b0] mt-3">
-                {arenaPayoutPending
-                  ? 'Tu profit share está en revisión. No hace falta volver a cobrarlo.'
-                  : `Próximo pago: ${fechaCorta(arena?.nextPayoutAt)}. Juega en la sala VIP Arena del lobby de cash.`}
-              </p>
-            )}
-          </div>
-
           {currentLevel && status?.active && (
             <div
               className="rounded-2xl p-4 mb-5"
@@ -258,10 +152,10 @@ export function VIP({ user, onBack, onBalanceChange }: Props) {
                 <span className="text-3xl">{LEVELS[currentLevel]?.icon ?? '★'}</span>
                 <div className="flex-1 min-w-0">
                   <p className="text-[10px] text-[#a0a0b0] uppercase tracking-wide">
-                    Tu membresía
+                    Tu membresía QVA-Bet Club
                   </p>
                   <p className="font-bold text-white">
-                    {configs[currentLevel]?.name ?? status?.config?.name ?? '3-Bet Club'}
+                    {configs[currentLevel]?.name ?? status?.config?.name ?? 'Membresía activa'}
                   </p>
                   <p className="text-[10px] text-[#a0a0b0] mt-0.5">
                     Activa hasta {fechaCorta(status.endDate)}
@@ -299,10 +193,10 @@ export function VIP({ user, onBack, onBalanceChange }: Props) {
                     {rb?.payoutStatus === 'paid'
                       ? 'Pagado'
                       : payoutPending
-                      ? 'En revisión'
-                      : available > 0
-                      ? 'Disponible'
-                      : 'En curso'}
+                        ? 'En revisión'
+                        : available > 0
+                          ? 'Disponible'
+                          : 'En curso'}
                   </p>
                 </div>
               </div>
@@ -347,8 +241,8 @@ export function VIP({ user, onBack, onBalanceChange }: Props) {
               <p className="text-xs text-[#a0a0b0] mt-1 leading-relaxed">
                 Con el plan mensual recuperas el 10% del rake de tus mesas cash
                 normales. Si generas 1.000 USDT de rake al mes, recuperas 100
-                USDT. El rake de VIP Arena no entra aquí: tiene su propio
-                profit share del 15%.
+                USDT. El rake de la sala VIP Arena no entra aquí: esa sala paga
+                su propio profit share y no requiere membresía.
               </p>
             </div>
           )}
@@ -359,7 +253,11 @@ export function VIP({ user, onBack, onBalanceChange }: Props) {
             </div>
           )}
 
-          <SectionLabel>Planes</SectionLabel>
+          <SectionLabel>Planes de membresía</SectionLabel>
+          <p className="text-[10px] text-[#a0a0b0] mb-3 leading-relaxed">
+            El club no se compra: lo que se activa es un plan. El plan mensual
+            dura 30 días y el trimestral 90 días.
+          </p>
           <div className="space-y-3">
             {ORDER.filter((l) => configs[l]).map((level) => {
               const cfg = configs[level];
@@ -419,10 +317,10 @@ export function VIP({ user, onBack, onBalanceChange }: Props) {
                     {busy === level
                       ? 'Procesando…'
                       : !canAfford
-                      ? `Te faltan ${fmtUsdt(price - realBalance)} USDT`
-                      : owned
-                      ? `Añadir ${cfg.duration} días`
-                      : 'Activar'}
+                        ? `Te faltan ${fmtUsdt(price - realBalance)} USDT`
+                        : owned
+                          ? `Añadir ${cfg.duration} días`
+                          : 'Activar plan'}
                   </button>
                 </article>
               );
@@ -431,9 +329,10 @@ export function VIP({ user, onBack, onBalanceChange }: Props) {
 
           <p className="text-[10px] text-[#a0a0b0] mt-4 leading-relaxed">
             El rakeback se calcula solo sobre mesas cash normales y se paga en
-            USDT a tu saldo retirable. VIP Arena queda fuera porque su rake se
-            reparte como profit share entre los participantes de la sala. Los
-            torneos no generan rakeback porque no cobran rake por mano.
+            USDT a tu saldo retirable. La sala VIP Arena queda fuera porque su
+            rake se reparte como profit share entre los participantes de la
+            sala. Los torneos no generan rakeback porque no cobran rake por
+            mano.
           </p>
         </>
       )}

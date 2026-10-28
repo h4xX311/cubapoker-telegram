@@ -112,7 +112,11 @@ export function Profile({
           </p>
           <div className="flex items-center gap-2 mt-1.5">
             <span className="badge badge-warning">
-              {user?.vip ? `VIP ${user.vip}` : 'Sin VIP'}
+              {user?.vip === 'premium'
+                ? 'QVA Premium'
+                : user?.vip
+                  ? 'QVA Member'
+                  : 'Sin membresía'}
             </span>
             <span className="text-[10px] text-[#6c6c80]">
               ID {user?.telegramId ?? '—'}
@@ -132,7 +136,7 @@ export function Profile({
             </span>
           </div>
           <p className="text-[10px] text-[#a0a0b0] leading-relaxed mb-3">
-            Los avatares con corona son exclusivos del 3-Bet Club. Se mantienen
+            Los avatares con corona son exclusivos de la membresía QVA-Bet Club. Se mantienen
             aunque la membresía venza, pero no se pueden elegir de nuevo hasta
             renovar.
           </p>
@@ -149,7 +153,7 @@ export function Profile({
                   title={
                     opcion.unlocked
                       ? opcion.label
-                      : `${opcion.label} · exclusivo del 3-Bet Club`
+                      : `${opcion.label} · exclusivo de la membresía QVA-Bet Club`
                   }
                   className="relative rounded-xl h-12 flex items-center justify-center text-xl transition-transform active:scale-95 disabled:cursor-not-allowed"
                   style={{

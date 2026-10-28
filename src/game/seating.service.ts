@@ -10,6 +10,7 @@ import {
   BOT_CONFIG,
   SEATS_PER_TABLE,
   CENTROLL,
+  TURN_TIMER,
   UNLOCK_RATES,
   CASH_FORMATS,
   CASH_FORMAT_LIST,
@@ -93,11 +94,18 @@ export class SeatingService {
       );
     }
 
-    // No puede estar en dos mesas a la vez
-    const otherSeat = await this.findSeatAnywhere(telegramId, table.tableId);
-    if (otherSeat) {
-      throw new TableError('Ya estas sentado en otra mesa. Sal de ella primero.', 409);
-    }
+    // ------------------------------------------------------------------
+    // VARIAS MESAS A LA VEZ
+    //
+    // Un jugador puede tener varias mesas cash abiertas al mismo tiempo. El
+    // stack de cada una vive en su mesa y el monedero solo paga la entrada de
+    // cada asiento; no hay estado global que impida jugar dos. Los campos si
+    // tienen su propia cola y su propio control de inscripcion.
+    //
+    // Antes habia aqui un `findSeatAnywhere` que devolvia "ya estas sentado en
+    // otra mesa". Eso hacia imposible el multi-tabling y ademas bloqueaba al
+    // jugador si le quedaba un asiento viejo en un freeroll.
+    // ------------------------------------------------------------------
 
     // EL BUY-IN NO SE NEGOCIA EN UNA MESA DE CAMPO.
     //
@@ -309,6 +317,141 @@ export class SeatingService {
   }
 
   /**
+   * Vuelve a comprar entrada en una mesa cash después de quedarse sin fichas.
+   *
+   * Hay dos casos reales:
+   *
+   *   1. El asiento sigue en la mesa con 0 fichas (fin de mano, antes del
+   *      siguiente ciclo): se recarga ese mismo asiento.
+   *   2. El gestor ya retiró el asiento al bustear: se vuelve a sentar en la
+   *      misma mesa, cobrando exactamente el buy-in de la mesa.
+   *
+   * Nunca se permite recargar con fichas vivas: eso sería un top-up a mitad
+   * de sesión y rompería la economía de la mesa.
+   */
+  async rebuy(
+    telegramId: number,
+    tableId: string,
+  ): Promise<{ tableId: string; seatIndex: number; chips: number; rebought: boolean }> {
+    const table = await Table.findOne({ tableId });
+    if (!table) throw new TableError('Mesa no encontrada', 404);
+
+    if (table.field?.fieldId) {
+      throw new TableError(
+        'No se puede recomprar en un campo: tu posición depende de hasta dónde llegues.',
+        409,
+      );
+    }
+    if (table.kind !== 'cash') {
+      throw new TableError('Solo se puede recomprar en una mesa cash', 409);
+    }
+
+    const asiento = table.seats.find(
+      (s) => s.kind === 'human' && s.playerId === String(telegramId),
+    );
+
+    // Caso 2: el asiento ya no existe. `sitDown` reutiliza toda la validación
+    // de saldo, cerrojo, hueco y activeTableId.
+    if (!asiento) {
+      const sentado = await this.sitDown({ telegramId, tableId });
+      return { ...sentado, rebought: true };
+    }
+
+    if (asiento.chips > 0) {
+      throw new TableError(
+        'Todavía tienes fichas en la mesa. No puedes recargar ahora.',
+        409,
+      );
+    }
+    if (
+      table.hand.phase !== 'idle' &&
+      table.hand.phase !== 'idle-awaiting'
+    ) {
+      throw new TableError(
+        'Espera a que termine la mano para volver a comprar entrada.',
+        409,
+      );
+    }
+
+    const user = await User.findOne({ telegramId });
+    if (!user) throw new TableError('Usuario no encontrado', 404);
+
+    // No se comprueba `activeTableId`: con multi-tabling puede apuntar a otra
+    // mesa abierta y eso no impide recargar esta. El asiento y el cerrojo de
+    // la mesa son los que mandan.
+    const buyIn = table.buyInUnits;
+    const disponible = user.balance.real + user.balance.play;
+    if (disponible < buyIn) {
+      throw new TableError(
+        `Necesitas ${formatUnits(buyIn)} USDT para volver a entrar. ` +
+        `Tienes ${formatUnits(disponible)}.`,
+      );
+    }
+
+    let seatIndex = asiento.index;
+    let chips = 0;
+    let fromPlay = 0;
+    let fromReal = 0;
+
+    await tableManager.withTableLock(tableId, async () => {
+      const actual = await Table.findOne({ tableId });
+      if (!actual) throw new TableError('La mesa ya no existe', 404);
+
+      const actualSeat = actual.seats.find(
+        (s) => s.kind === 'human' && s.playerId === String(telegramId),
+      );
+      if (!actualSeat) {
+        throw new TableError(
+          'Tu asiento ya no está en la mesa. Vuelve a sentarte.',
+          409,
+        );
+      }
+      if (actualSeat.chips > 0) {
+        throw new TableError('Ya tienes fichas en la mesa', 409);
+      }
+      if (
+        actual.hand.phase !== 'idle' &&
+        actual.hand.phase !== 'idle-awaiting'
+      ) {
+        throw new TableError('La mano ya empezó. Espera a la siguiente.', 409);
+      }
+
+      // El cobro va DENTRO del cerrojo: dos pulsaciones de "recargar" no
+      // pueden descontar dos buy-ins para un solo asiento. Si la segunda
+      // llega después, ya ve `chips > 0` y no cobra.
+      const split = await unlockService.splitBuyIn(telegramId, buyIn, 'cash');
+      fromPlay = split.fromPlay;
+      fromReal = buyIn - fromPlay;
+
+      actualSeat.chips = buyIn;
+      actualSeat.bet = 0;
+      actualSeat.totalBet = 0;
+      actualSeat.status = 'active';
+      actualSeat.netChips += buyIn;
+      actualSeat.timeBankMs = TURN_TIMER.timeBankMs;
+      seatIndex = actualSeat.index;
+      chips = buyIn;
+
+      await User.updateOne(
+        { telegramId },
+        {
+          $inc: { 'balance.real': -fromReal },
+          $set: { activeTableId: actual.tableId },
+        },
+      );
+
+      await actual.save();
+    });
+
+    logger.info(
+      `Jugador ${telegramId} recompró ${buyIn} unidades en ${tableId} ` +
+      `(${fromPlay} play + ${fromReal} real)`,
+    );
+
+    return { tableId, seatIndex, chips, rebought: true };
+  }
+
+  /**
    * Retira al jugador de una MESA CASH SUELTA y le devuelve lo que tiene.
    *
    * ------------------------------------------------------------------
@@ -441,7 +584,25 @@ export class SeatingService {
         );
       }
 
-      await User.updateOne({ telegramId }, { $set: { activeTableId: null } });
+      // Puede quedar otra mesa abierta. `activeTableId` es solo una pista para
+      // reconectar; la fuente de verdad son los asientos. Se apunta a la
+      // primera mesa que siga ocupada para no dejar el campo en null.
+      const otraMesa = await Table.findOne({
+        tableId: { $ne: actual.tableId },
+        seats: {
+          $elemMatch: {
+            kind: 'human',
+            playerId: String(telegramId),
+            status: { $ne: 'out' },
+          },
+        },
+      })
+        .select('tableId')
+        .lean();
+      await User.updateOne(
+        { telegramId },
+        { $set: { activeTableId: otraMesa?.tableId ?? null } },
+      );
 
       const quedanHumanos = actual.seats.filter((s) => s.kind === 'human').length;
       if (quedanHumanos === 0) {
@@ -453,6 +614,67 @@ export class SeatingService {
     });
 
     return { returned };
+  }
+
+  /**
+   * Usa el banco de tiempo del turno actual.
+   *
+   * No mueve fichas ni cartas: alarga el plazo del turno. Se hace con el mismo
+   * cerrojo que las acciones para que el tick no cierre la mano justo mientras
+   * el jugador pide tiempo. El banco es por mano y se reinicia en `startHand`.
+   */
+  async useTimeBank(
+    telegramId: number,
+    tableId: string,
+  ): Promise<{ timeBankMs: number; turnEndsAt: string }> {
+    return tableManager.withTableLock(tableId, async () => {
+      const table = await Table.findOne({ tableId });
+      if (!table) throw new TableError('Mesa no encontrada', 404);
+
+      const seat = table.seats.find(
+        (s) => s.kind === 'human' && s.playerId === String(telegramId),
+      );
+      if (!seat) throw new TableError('No estas en esa mesa', 403);
+
+      const fases = ['preflop', 'flop', 'turn', 'river'];
+      if (!fases.includes(table.hand.phase)) {
+        throw new TableError('No hay una mano en curso', 409);
+      }
+      if (table.hand.actingSeat !== seat.index) {
+        throw new TableError('No es tu turno', 409);
+      }
+
+      const disponible = Math.max(
+        0,
+        seat.timeBankMs ?? TURN_TIMER.timeBankMs,
+      );
+      if (disponible <= 0) {
+        throw new TableError('Ya usaste tu banco de tiempo en esta mano', 409);
+      }
+
+      const ahora = Date.now();
+      const inicio = table.hand.lastActionAt
+        ? new Date(table.hand.lastActionAt).getTime()
+        : ahora;
+      const restante = Math.max(
+        0,
+        inicio + TURN_TIMER.humanMs - ahora,
+      );
+      const extension = Math.min(disponible, TURN_TIMER.timeBankMs);
+      const nuevoVencimiento = ahora + restante + extension;
+
+      // `lastActionAt` sigue siendo la base del reloj. Se retrocede lo
+      // suficiente para que el vencimiento sea el nuevo, aunque quede en el
+      // futuro inmediato: `checkTurnTimeout` mide el transcurso desde ahí.
+      table.hand.lastActionAt = new Date(nuevoVencimiento - TURN_TIMER.humanMs);
+      seat.timeBankMs = Math.max(0, disponible - extension);
+      await table.save();
+
+      return {
+        timeBankMs: seat.timeBankMs,
+        turnEndsAt: new Date(nuevoVencimiento).toISOString(),
+      };
+    });
   }
 
   /**

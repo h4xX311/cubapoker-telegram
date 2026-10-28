@@ -1,3 +1,5 @@
+import type { MyTable, TournamentLobbyEntry } from './types';
+
 const TIMEOUT_MS = 15000;
 
 export class ApiError extends Error {
@@ -174,9 +176,17 @@ export const api = {
   tableView: (tableId: string) => request<any>(`/game/view/${tableId}`),
   gameAction: (tableId: string, action: string, amount?: number) =>
     request<any>('/game/action', { method: 'POST', body: { tableId, action, amount } }),
+  rebuy: (tableId: string) =>
+    request<any>('/game/rebuy', { method: 'POST', body: { tableId } }),
+  useTimeBank: (tableId: string) =>
+    request<{ timeBankMs: number; turnEndsAt: string }>('/game/time-bank', {
+      method: 'POST',
+      body: { tableId },
+    }),
   stand: (tableId: string) =>
     request<any>('/game/stand', { method: 'POST', body: { tableId } }),
   myTable: () => request<{ tableId: string | null }>('/game/my-table'),
+  myTables: () => request<{ tables: MyTable[] }>('/game/my-tables'),
 
   // Freerolls horarios (campo multi-mesa, gratis)
   freerolls: () => request<any>('/game/freerolls'),
@@ -204,10 +214,24 @@ export const api = {
     request<any>(`/game/fields/${fieldId}/leave`, { method: 'POST' }),
   fieldStatus: (fieldId: string) => request<any>(`/game/fields/${fieldId}`),
 
-  // Torneos
-  tournaments: () => request<any>('/game/tournaments'),
-  registerTournament: (id: string) =>
-    request<any>(`/game/tournaments/${id}/register`, { method: 'POST', body: {} }),
+  // Torneos y Spin & Go
+  tournaments: () =>
+    request<{
+      torneos: TournamentLobbyEntry[];
+      spin: TournamentLobbyEntry[];
+    }>('/game/tournaments'),
+  registerTournament: (eventId: string) =>
+    request<any>('/game/tournaments/register', {
+      method: 'POST',
+      body: { eventId },
+    }),
+  leaveTournament: (fieldId: string) =>
+    request<any>('/game/tournaments/leave', {
+      method: 'POST',
+      body: { fieldId },
+    }),
+  tournamentStatus: (fieldId: string) =>
+    request<any>(`/game/tournaments/${fieldId}`),
 
   // Monetizacion
   vip: () => request<any>('/monetization/vip'),

@@ -20,7 +20,7 @@ export interface IRakeEvent extends Document {
   /**
    * `true` si la mano se jugó en VIP Arena.
    *
-   * Las dos bolsas son excluyentes: el 3-Bet Club paga el 10% del rake de
+   * Las dos bolsas son excluyentes: el QVA-Bet Club paga el 10% del rake de
    * mesas cash normales (`arena: false`) y el profit share de Arena paga el
    * 15% de estas manos. Una misma mano no alimenta los dos programas.
    */
@@ -116,7 +116,7 @@ export const RakebackPayout = mongoose.model<IRakebackPayout>(
  * PROFIT SHARE DE VIP ARENA
  * =========================
  *
- * Es un programa distinto del 3-Bet Club. Un jugador puede cobrar los dos por
+ * Es un programa distinto del QVA-Bet Club. Un jugador puede cobrar los dos por
  * la misma semana: el 10 % del 3-Bet por todo su rake cash y el 15 % de Arena
  * por el rake generado en esa sala. Por eso no se reutiliza `RakebackPayout`:
  * su índice único es por jugador y semana, y bloquearía el segundo pago.

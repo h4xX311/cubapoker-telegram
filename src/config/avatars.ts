@@ -8,7 +8,7 @@
  * dependería de que ese servidor esté vivo. Con un catálogo cerrado, la mesa
  * pinta siempre lo mismo y el servidor puede validar la elección.
  *
- * Los avatares de miembro son un beneficio del 3-Bet Club. No se compran por
+ * Los avatares de miembro son un beneficio del QVA-Bet Club. No se compran por
  * separado: se desbloquean mientras la membresía esté activa. Si la membresía
  * vence, el avatar vuelve al catálogo común, pero no se borra la elección: al
  * renovar, el jugador recupera el que tenía.

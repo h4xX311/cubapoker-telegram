@@ -77,7 +77,7 @@ Abre Telegram → Busca tu bot → Envía `/start`
 /start - Menú principal
 /play - Jugar poker
 /tournaments - Ver torneos
-/vip - Comprar VIP
+/membresia - Planes QVA-Bet Club
 /referrals - Ver referidos
 /achievements - Ver logros
 /deposit - Depositar

@@ -1,6 +1,7 @@
 import { Field, IField, FieldTable } from '../models/Field';
 import { Table, ITable, ISeat } from '../models/Table';
 import { User } from '../models/User';
+import { VIP, VIP_CONFIG } from '../models/VIP';
 import { splitPrize, rakeOfField } from '../services/payout.service';
 import {
   TABLE_TIERS,
@@ -31,6 +32,7 @@ import {
 } from './field.rules';
 import { logger } from '../utils/logger';
 import { assignPosition } from './field.atomic';
+import { blindLevelFor } from './blind.levels';
 import { formatUnits, unitsToUsdt } from '../config/units';
 import { DEFAULT_AVATAR, getAvatar } from '../config/avatars';
 import { unlockService } from '../services/unlock.service';
@@ -350,7 +352,9 @@ export const fieldManager = {
    * es el campo.
    */
   blindsDeCampo(field: IField): { small: number; big: number; startChips: number } {
-    if (field.kind === 'freeroll') {
+    // Freeroll, torneo y Spin & Go guardan sus ciegas en el documento. No
+    // tienen un `tierId` de cash del que deducirlas.
+    if (field.kind === 'freeroll' || field.kind === 'tournament') {
       return {
         small: field.smallBlind ?? CIEGA_PEQUENA_FREEROLL,
         big: field.bigBlind ?? CIEGA_GRANDE_FREEROLL,
@@ -486,6 +490,174 @@ export const fieldManager = {
     );
 
     return { fieldId: field.fieldId, seated, position, late: enTardio };
+  },
+
+  /**
+   * Descuento de torneo de la membresía activa, en porcentaje.
+   *
+   * Se lee del documento de la membresía y no del catálogo actual: si mañana
+   * cambia el plan, quien ya pagó conserva el descuento que contrató. Sin
+   * membresía devuelve 0 y el cobro es el buy-in completo.
+   */
+  async descuentoTorneo(telegramId: number): Promise<number> {
+    const membresia = await VIP.findOne({
+      telegramId,
+      endDate: { $gt: new Date() },
+    }).lean();
+    if (!membresia) return 0;
+
+    const guardado = Number(membresia.tournamentDiscount ?? 0);
+    const delCatalogo = Number(
+      VIP_CONFIG[membresia.level]?.tournamentDiscount ?? 0,
+    );
+    return Math.min(100, Math.max(0, guardado || delCatalogo));
+  },
+
+  /**
+   * Inscribe a un jugador en un torneo pagado o en un Spin & Go.
+   *
+   * Comparte con `register()` las garantias que importan: cobra una sola vez,
+   * anota el pago en `registrations`, y si el asiento falla deshace cobro y
+   * anotacion. La diferencia es que el campo ya existe y puede estar en
+   * registro tardio, igual que un freeroll.
+   */
+  async registrarEnTorneo(
+    field: IField,
+    telegramId: number,
+    username?: string,
+  ): Promise<{ fieldId: string; seated: boolean; position: number; late: boolean }> {
+    if (field.kind !== 'tournament') {
+      throw new FieldError('Ese campo no es un torneo pagado.', 'NOT_TOURNAMENT');
+    }
+
+    const ahora = Date.now();
+    const enFilling = field.status === 'filling';
+    const enTardio =
+      field.status === 'running' &&
+      !!field.lateRegUntil &&
+      ahora < new Date(field.lateRegUntil).getTime();
+
+    if (!enFilling && !enTardio) {
+      throw new FieldError(
+        'La inscripcion de este torneo ya esta cerrada.',
+        'REGISTRATION_CLOSED',
+      );
+    }
+
+    const yaApuntado = await Field.findOne({
+      fieldId: field.fieldId,
+      registrations: {
+        $elemMatch: {
+          telegramId,
+          status: { $in: ['waiting', 'seated'] },
+        },
+      },
+    });
+
+    if (yaApuntado) {
+      throw new FieldError('Ya estas apuntado a este torneo.', 'ALREADY_IN');
+    }
+
+    if (await this.isSeated(telegramId)) {
+      throw new FieldError(
+        'Ya estas jugando en otra mesa. Termina o sal de ella antes de entrar.',
+        'ALREADY_IN_FIELD',
+      );
+    }
+
+    // QVA Premium anuncia un 5 % de descuento en torneos. Se aplica al cobrar
+    // la entrada, no al premio: el garantizado no cambia y el overlay de la
+    // casa sube si hace falta. El descuento se guarda en `registrations.buyIn`,
+    // que es lo que se devuelve si el torneo se cancela.
+    const descuento = await this.descuentoTorneo(telegramId);
+    const precioEntrada = Math.max(
+      1,
+      Math.floor((field.buyInUnits * (100 - descuento)) / 100),
+    );
+
+    if (!this.canAfford(telegramId, precioEntrada)) {
+      throw new FieldError(
+        `No tienes saldo para el buy-in de ${formatUnits(precioEntrada)} USDT.`,
+        'INSUFFICIENT_FUNDS',
+      );
+    }
+
+    const { startChips } = this.blindsDeCampo(field);
+    const perfil = await User.findOne({ telegramId }).select('avatar').lean();
+    const avatar = getAvatar(perfil?.avatar)?.id ?? DEFAULT_AVATAR;
+
+    const charged = await this.chargeBuyIn(telegramId, precioEntrada);
+    if (!charged) {
+      throw new FieldError(
+        'No se pudo cobrar el buy-in. Intentalo de nuevo.',
+        'CHARGE_FAILED',
+      );
+    }
+
+    try {
+      await Field.updateOne(
+        { _id: field._id },
+        {
+          $inc: { waiting: 1, buyInsCollected: precioEntrada },
+          $push: {
+            registrations: {
+              telegramId,
+              username,
+              avatar,
+              buyIn: precioEntrada,
+              status: 'waiting',
+              at: new Date(),
+            },
+          },
+        },
+      );
+    } catch (err) {
+      await this.refund(telegramId, precioEntrada);
+      throw err;
+    }
+
+    field.waiting += 1;
+    field.buyInsCollected += precioEntrada;
+
+    const queue = queues.get(field.fieldId) ?? [];
+    queue.push({ telegramId, chips: startChips, username, avatar });
+    queues.set(field.fieldId, queue);
+
+    const position = queue.length;
+
+    try {
+      const seated = await this.trySeat(field);
+
+      logger.info(
+        `Torneo ${field.fieldId}: ${telegramId} inscrito ` +
+        `(${enTardio ? 'registro tardio' : 'registro normal'}, ` +
+        `${seated ? 'sentado' : 'en cola'})`,
+      );
+
+      return { fieldId: field.fieldId, seated, position, late: enTardio };
+    } catch (err) {
+      logger.error(
+        `Torneo ${field.fieldId}: fallo el asiento de ${telegramId}. Se devuelve el buy-in.`,
+      );
+
+      const cola = queues.get(field.fieldId) ?? [];
+      const i = cola.findIndex((p) => p.telegramId === telegramId);
+      if (i !== -1) {
+        cola.splice(i, 1);
+        queues.set(field.fieldId, cola);
+      }
+
+      await Field.updateOne(
+        { _id: field._id },
+        {
+          $inc: { waiting: -1, buyInsCollected: -precioEntrada },
+          $pull: { registrations: { telegramId } },
+        },
+      );
+      await this.refund(telegramId, precioEntrada);
+
+      throw err;
+    }
   },
 
   /**
@@ -683,6 +855,15 @@ export const fieldManager = {
       );
     }
 
+    // La entrada pudo tener descuento QVA Premium. Se devuelve lo que se cobró
+    // de verdad, no el buy-in nominal del cartel.
+    const registro = (field.registrations ?? []).find(
+      (r) =>
+        r.telegramId === telegramId &&
+        (r.status === 'waiting' || r.status === 'seated'),
+    );
+    const importeEntrada = registro?.buyIn ?? field.buyInUnits;
+
     // ------------------------------------------------------------------
     // (a) ESTA EN LA COLA
     //
@@ -739,21 +920,21 @@ export const fieldManager = {
     if (estabaEnCola) {
       await Field.updateOne(
         { _id: field._id },
-        { $inc: { waiting: -1, buyInsCollected: -field.buyInUnits } },
+        { $inc: { waiting: -1, buyInsCollected: -importeEntrada } },
       );
       field.waiting = Math.max(0, field.waiting - 1);
     } else {
       await Field.updateOne(
         { _id: field._id },
-        { $inc: { seated: -1, playersRemaining: -1, buyInsCollected: -field.buyInUnits } },
+        { $inc: { seated: -1, playersRemaining: -1, buyInsCollected: -importeEntrada } },
       );
       field.seated = Math.max(0, field.seated - 1);
       field.playersRemaining = Math.max(0, field.playersRemaining - 1);
     }
-    field.buyInsCollected = Math.max(0, field.buyInsCollected - field.buyInUnits);
+    field.buyInsCollected = Math.max(0, field.buyInsCollected - importeEntrada);
 
     // Lo que no llego a jugar esta integro: se devuelve entero.
-    await this.refund(telegramId, field.buyInUnits);
+    await this.refund(telegramId, importeEntrada);
 
     // ------------------------------------------------------------------
     // Y SE ANOTA QUE YA SE LE DEVOLVIO
@@ -773,11 +954,11 @@ export const fieldManager = {
     if (soltado.modifiedCount > 0) {
       logger.info(
         `Campo ${fieldId}: el jugador ${telegramId} ha salido del campo antes de ` +
-        `empezar. Se le devuelve ${field.buyInUnits} unidades.`,
+        `empezar. Se le devuelve ${formatUnits(importeEntrada)} USDT.`,
       );
     }
 
-    return { refunded: field.buyInUnits };
+    return { refunded: importeEntrada };
   },
 
   // ======================================================================
@@ -804,7 +985,7 @@ export const fieldManager = {
     // al desplegar.
     // ------------------------------------------------------------------
     const enRegistroTardio =
-      field.kind === 'freeroll' &&
+      (field.kind === 'freeroll' || field.kind === 'tournament') &&
       field.status === 'running' &&
       !!field.lateRegUntil &&
       Date.now() < new Date(field.lateRegUntil).getTime();
@@ -892,7 +1073,16 @@ export const fieldManager = {
       // tick, el campo tardaria muchisimo en completarse y, peor, arrancaria con
       // las mesas a medio llenar.
       while (table.seats.length < capacity) {
-        const queueIdx = nextSeatable(queue, field.buyInUnits, table.buyInUnits);
+        // En un torneo el stack son puntos y no tiene que ser mayor que el
+        // buy-in en USDT del campo. La comprobacion de saldo se hizo al cobrar
+        // la entrada; aqui solo hay que saber si cabe en la mesa.
+        const minimoParaSentarse =
+          field.kind === 'tournament' ? 0 : field.buyInUnits;
+        const queueIdx = nextSeatable(
+          queue,
+          minimoParaSentarse,
+          table.buyInUnits,
+        );
         if (queueIdx === -1) break;
 
         const player = queue[queueIdx];
@@ -994,27 +1184,50 @@ export const fieldManager = {
   async createFieldTable(field: IField, tableNumber: number): Promise<ITable> {
     const { small, big, startChips } = this.blindsDeCampo(field);
     const esFreeroll = field.kind === 'freeroll';
+    const esTorneo = field.kind === 'tournament';
+    const esCampoDePuntos = esFreeroll || esTorneo;
     const tableId = `field-${field.fieldId}-t${tableNumber}`;
+
+    // La mesa nace ya en el nivel que marca el reloj del campo. Si un jugador
+    // entra tarde, no empieza con ciegas de hace media hora.
+    const nivelInicial = blindLevelFor(
+      small,
+      big,
+      field.startedAt ?? new Date(),
+    );
 
     const documento = {
       tableId,
-      // Una mesa de freeroll se marca como tal para que el motor sepa que sus fichas son
-      // puntos del torneo y no saldo del jugador.
-      kind: esFreeroll ? ('freeroll' as const) : ('cash' as const),
+      // Una mesa de freeroll o de torneo se marca como tal para que el motor
+      // sepa que sus fichas son puntos del torneo y no saldo del jugador.
+      kind: esFreeroll
+        ? ('freeroll' as const)
+        : esTorneo
+          ? ('tournament' as const)
+          : ('cash' as const),
       tierId: field.tierId,
       status: 'waiting',
       // Las ciegas salen del campo ya calculadas en unidades internas. No se
       // derivan aqui con `Math.round(buyIn / 100)`: el redondeo puede dar dos
       // valores distintos para el mismo tier segun cuando se cree la mesa, y el
       // jugador lo notaria al pasar de una mesa a otra del mismo campo.
-      smallBlind: small,
-      bigBlind: big,
-      // En un freeroll nadie paga entrada: el buy-in de la mesa es 0. Las fichas con las
-      // que se juega van en `startChips`, que es otra cosa.
-      buyInUnits: esFreeroll ? 0 : field.buyInUnits,
-      // Solo en freeroll. Es lo que usan los bots para entrar con el mismo stack que un
-      // humano; sin esto entrarian con `smallBlind * 2` y caerian en dos manos.
-      ...(esFreeroll ? { startChips } : {}),
+      smallBlind: nivelInicial.small,
+      bigBlind: nivelInicial.big,
+      blindBaseSmall: small,
+      blindBaseBig: big,
+      blindLevel: nivelInicial.level,
+      // El reloj se cuenta desde el arranque del campo, no desde la creación
+      // de esta mesa: una mesa creada en el nivel 2 debe seguir avanzando.
+      blindLevelStartedAt: field.startedAt ?? new Date(),
+      // En freeroll y torneo el buy-in de la mesa es 0: las fichas que se
+      // juegan son puntos del campo y no se compran en la mesa. Guardar el
+      // buy-in del torneo aqui hacía que `nextSeatable` comparara el stack de
+      // 500 puntos del Spin con un buy-in de 1.000 unidades y lo rechazara:
+      // el jugador pagaba y se quedaba en la cola para siempre.
+      buyInUnits: esCampoDePuntos ? 0 : field.buyInUnits,
+      // En freeroll y torneo el stack inicial es el del campo. Es lo que usan
+      // los bots para entrar con el mismo stack que un humano.
+      ...(esCampoDePuntos ? { startChips } : {}),
       maxSeats: SEATS_PER_TABLE,
       seats: [],
       field: {
@@ -1614,6 +1827,25 @@ export const fieldManager = {
           seated: 0,
           buyInsCollected: retenido,
           finishedAt: new Date(),
+        },
+      },
+    );
+
+    // ------------------------------------------------------------------
+    // LAS MESAS DEL CAMPO SE VACIÁN
+    //
+    // Si solo se marcara el campo como cancelado, los asientos seguirían en
+    // `Table.seats` y `isSeated()` impediría a esos jugadores entrar en
+    // cualquier otro torneo. El buy-in ya se devolvió arriba; aquí solo se
+    // retiran las fichas de puntos y se cierran las mesas, sin volver a pagar.
+    // ------------------------------------------------------------------
+    await Table.updateMany(
+      { 'field.fieldId': field.fieldId },
+      {
+        $set: {
+          seats: [],
+          status: 'finished',
+          'field.fieldStatus': 'cancelled',
         },
       },
     );
@@ -2623,6 +2855,7 @@ export const fieldManager = {
     // ------------------------------------------------------------------
     const esFreeroll = field.kind === 'freeroll';
     const esCentroll = field.kind === 'centroll';
+    const esTorneo = field.kind === 'tournament';
     const premioCasa = Math.max(0, field.prizePoolUnits ?? 0);
 
     // ------------------------------------------------------------------
@@ -2650,6 +2883,11 @@ export const fieldManager = {
         ? premioCentroll
         : Math.max(0, grossPot - rake);
 
+    // Un torneo pagado tiene un premio garantizado. Se paga el mayor entre el
+    // 95 % de las entradas y esa garantia. Si la garantia es mayor, la
+    // diferencia la pone la casa y queda anotada como overlay.
+    const premioTorneo = esTorneo ? Math.max(netPot, premioCasa) : 0;
+
     // ------------------------------------------------------------------
     // CUANTO SE REPARTE: NUNCA MAS DE `grossPot - rake`
     //
@@ -2669,9 +2907,26 @@ export const fieldManager = {
       ? premioCasa
       : esCentroll
         ? Math.min(swept, premioCentroll)
-        : Math.min(swept, netPot);
-    const withheld = esFreeroll || esCentroll ? 0 : swept - distributable;
-    const faltan = esFreeroll || esCentroll ? 0 : netPot - swept;
+        : esTorneo
+          ? premioTorneo
+          : Math.min(swept, netPot);
+    const withheld = esFreeroll || esCentroll
+      ? 0
+      : esTorneo
+        ? Math.max(0, swept - distributable)
+        : swept - distributable;
+    // En un torneo con garantia, que haya menos fichas que el premio no es una
+    // fuga: es exactamente el overlay que la casa ha decidido poner.
+    const faltan = esFreeroll || esCentroll || esTorneo ? 0 : netPot - swept;
+    const overlay = esTorneo ? Math.max(0, distributable - swept) : 0;
+
+    if (overlay > 0) {
+      logger.info(
+        `Campo ${field.fieldId}: overlay de ${formatUnits(overlay)} USDT. ` +
+        `Entradas ${formatUnits(grossPot)}, premio garantizado ` +
+        `${formatUnits(premioTorneo)}. Lo completa la casa.`,
+      );
+    }
 
     if (faltan > 0) {
       // ------------------------------------------------------------------
@@ -2743,10 +2998,14 @@ export const fieldManager = {
     //
     // Un freeroll reparte con SU tabla (50/30/20), no con la del cash: son productos
     // distintos y el numero de plazas pagadas no tiene por que coincidir.
-    const shares = splitPrize(
-      distributable,
-      esFreeroll || esCentroll ? FREEROLL_PAYOUT : FIELD_PAYOUT,
-    );
+    const tablaReparto = esTorneo
+      ? (field.payoutTable && field.payoutTable.length > 0
+          ? field.payoutTable
+          : FIELD_PAYOUT)
+      : esFreeroll || esCentroll
+        ? FREEROLL_PAYOUT
+        : FIELD_PAYOUT;
+    const shares = splitPrize(distributable, tablaReparto);
 
     // Las posiciones ya adjudicadas durante el campo (las de `collectEliminations`).
     // Se leen de `field`, no del documento cerrado: el cierre atomico de mas abajo
@@ -2887,11 +3146,13 @@ export const fieldManager = {
     const closed2 = await Field.findOneAndUpdate(
       { fieldId: field.fieldId, status: { $ne: 'finished' } },
       {
-        $set: { status: 'finished', finishedAt: new Date() },
+        $set: {
+          status: 'finished',
+          finishedAt: new Date(),
+          overlayUnits: overlay,
+        },
         $inc: {
-          paidPositionsLeft: -(
-            esFreeroll || esCentroll ? FREEROLL_PAYOUT.length : PAID_POSITIONS
-          ),
+          paidPositionsLeft: -shares.length,
         },
       },
       { new: true },
@@ -2993,7 +3254,9 @@ export const fieldManager = {
    * ------------------------------------------------------------------
    */
   async rehidratarColaFreeroll(field: IField): Promise<number> {
-    if (field.kind !== 'freeroll') return 0;
+    // La cola en memoria tambien se pierde en un torneo programado. La funcion
+    // conserva el nombre por compatibilidad, pero sirve a los dos productos.
+    if (field.kind !== 'freeroll' && field.kind !== 'tournament') return 0;
 
     const pendientes = (field.registrations ?? []).filter(
       (r) => r.status === 'waiting',

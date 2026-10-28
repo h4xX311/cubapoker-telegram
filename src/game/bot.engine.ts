@@ -1,5 +1,6 @@
 import { Card, Rank } from './card.utils';
 import { evaluateHand } from './hand.evaluator';
+import { decidePreflop } from './bot.ranges';
 import { BOT_CONFIG } from '../config/product';
 
 export type BotAction = 'fold' | 'check' | 'call' | 'raise' | 'all_in';
@@ -146,12 +147,24 @@ export function decideAction(params: {
   currentBet?: number;
   /** Subida mínima de la calle. Si no llega, el bot no intenta una subida ilegal. */
   minRaise?: number;
+  /** Ciega grande de la mesa. Sin ella no se puede medir el stack en BB. */
+  bigBlind?: number;
+  /** Índices reales del motor, para calcular la posición preflop. */
+  dealerIndex?: number;
+  currentPlayerIndex?: number;
+  tablePlayers?: number;
+  isSmallBlind?: boolean;
+  isBigBlind?: boolean;
+  /** Subidas preflop ya vistas; sirve para no encadenar 3-bets sin fin. */
+  preflopRaises?: number;
+  /** RNG opcional para pruebas deterministas. En producción es Math.random. */
+  rng?: () => number;
 }): BotDecision {
   const {
     hand, community, potSize, toCall, chips, profile, position, playersLeft,
   } = params;
 
-  const rng = Math.random;
+  const rng = params.rng ?? Math.random;
 
   // Fuerza de la mano en escala 0-1. Los proyectos que se juegan con proyectos
   // (color o escalera) no son manos hechas, pero tampoco son aire: se les da un
@@ -170,6 +183,30 @@ export function decideAction(params: {
 
   const currentBet = Math.max(0, params.currentBet ?? 0);
   const minRaise = Math.max(1, params.minRaise ?? Math.max(1, currentBet));
+
+  // Preflop se juega con cartas, no con la fuerza genérica de dos cartas.
+  // El rango depende de la posición, del stack en ciegas y de si hay subida.
+  if (community.length === 0 && params.bigBlind && params.bigBlind > 0) {
+    return decidePreflop({
+      hand,
+      profile,
+      playersLeft,
+      position,
+      dealerIndex: params.dealerIndex,
+      currentPlayerIndex: params.currentPlayerIndex,
+      tablePlayers: params.tablePlayers,
+      isSmallBlind: params.isSmallBlind,
+      isBigBlind: params.isBigBlind,
+      currentBet,
+      minRaise,
+      bigBlind: params.bigBlind,
+      chips,
+      toCall,
+      potSize,
+      preflopRaises: params.preflopRaises ?? 0,
+      rng,
+    });
+  }
   // Fichas que quedarían en la apuesta si el bot pusiera todo su stack.
   const stackTarget = currentBet - toCall + chips;
   const minTarget = currentBet + minRaise;

@@ -57,7 +57,7 @@ Seleccionar tu bot y pegar:
 start - Iniciar y registrarse
 play - Jugar poker
 tournaments - Ver torneos
-vip - Comprar VIP
+membresia - Planes QVA-Bet Club
 referrals - Ver referidos
 achievements - Ver logros
 deposit - Depositar fondos
@@ -187,7 +187,7 @@ Respuesta esperada:
 1. Buscar tu bot en Telegram
 2. Enviar `/start`
 3. Verificar que aparezca el menú con botones
-4. Probar `/balance`, `/vip`, `/referrals`, `/achievements`
+4. Probar `/balance`, `/membresia`, `/referrals`, `/achievements`
 
 ---
 

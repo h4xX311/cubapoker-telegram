@@ -48,6 +48,8 @@ import { User } from '../models/User';
 import { getAuthedTelegramId, requireTelegramAuth } from '../middleware/telegramAuth';
 import { unitsToUsdt } from '../config/units';
 import { monetizationService } from '../services/monetization.service';
+import { rakebackService } from '../services/rakeback.service';
+import { Table } from '../models/Table';
 import {
   avatarCatalog,
   canUseAvatar,
@@ -195,6 +197,24 @@ router.get('/me', requireTelegramAuth, async (req: Request, res: Response) => {
     const vipLevel = await monetizationService.getVIPLevel(user.telegramId);
     const stats = user.stats;
 
+    // VIP Arena no se compra: se participa. El estado se calcula por los
+    // asientos reales y por el rake de Arena de la semana cerrada. No se usa
+    // `user.vip` (eso es la membresia QVA-Bet Club) para decidir el acceso.
+    const [arena, arenaSeated] = await Promise.all([
+      rakebackService.getArenaStatus(user.telegramId),
+      Table.exists({
+        tierId: 'arena',
+        kind: 'cash',
+        seats: {
+          $elemMatch: {
+            kind: 'human',
+            playerId: String(user.telegramId),
+            status: { $ne: 'out' },
+          },
+        },
+      }),
+    ]);
+
     res.json({
       success: true,
       user: {
@@ -228,6 +248,19 @@ router.get('/me', requireTelegramAuth, async (req: Request, res: Response) => {
         // otra vez. Si los dos no coinciden, manda el asiento.
         activeTableId: user.activeTableId ?? null,
         vip: vipLevel,
+        vipArena: {
+          participating:
+            !!arenaSeated ||
+            arena.rakeUnits > 0 ||
+            arena.claimableUnits > 0 ||
+            arena.paidUnits > 0,
+          seated: !!arenaSeated,
+          profitSharePercent: arena.profitSharePercent,
+          estimatedUsdt: unitsToUsdt(arena.estimatedUnits),
+          claimableUsdt: unitsToUsdt(arena.claimableUnits),
+          paidUsdt: unitsToUsdt(arena.paidUnits),
+          nextPayoutAt: arena.nextPayoutAt,
+        },
         avatar: getAvatar(user.avatar)?.id ?? DEFAULT_AVATAR,
         avatarCatalog: avatarCatalog(!!vipLevel),
       },
@@ -259,7 +292,7 @@ router.post('/me/avatar', requireTelegramAuth, async (req: Request, res: Respons
     const vipLevel = await monetizationService.getVIPLevel(telegramId);
     if (!canUseAvatar(avatarId, !!vipLevel)) {
       res.status(403).json({
-        error: 'Ese avatar es exclusivo del 3-Bet Club. Activa tu membresía para usarlo.',
+        error: 'Ese avatar es exclusivo del QVA-Bet Club. Activa tu membresía para usarlo.',
       });
       return;
     }

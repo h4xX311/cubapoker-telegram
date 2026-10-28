@@ -6,6 +6,8 @@ import {
   SUIT_SYMBOL,
   isRedSuit,
   PHASE_LABEL,
+  type AllInReveal,
+  type AllInStreetName,
   type TableView,
 } from '../lib/types';
 
@@ -149,13 +151,204 @@ const avatarColor = (name: string): string => {
   return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length];
 };
 
+/** Carta pequeña para el resultado y el historial (`rank|suit`). */
+function CartaMini({ raw }: { raw: string }) {
+  const [rank, suit] = raw.split('|');
+  return (
+    <span
+      className="text-[10px] font-bold px-1.5 py-0.5 rounded"
+      style={{
+        background: '#0f172a',
+        color: isRedSuit(suit) ? '#ff8a94' : '#e2e8f0',
+      }}
+    >
+      {rank}
+      {SUIT_SYMBOL[suit] ?? ''}
+    </span>
+  );
+}
+
+const ALL_IN_STREETS: AllInStreetName[] = ['preflop', 'flop', 'turn', 'river'];
+const BOARD_CARDS_BY_STREET: Record<AllInStreetName, number> = {
+  preflop: 0,
+  flop: 3,
+  turn: 4,
+  river: 5,
+};
+const STREET_LABEL: Record<AllInStreetName, string> = {
+  preflop: 'Preflop',
+  flop: 'Flop',
+  turn: 'Turn',
+  river: 'River',
+};
+
+/**
+ * REPLAY DE ALL-IN
+ * ================
+ *
+ * En un all-in se enseñan las cartas y la probabilidad que tenía cada mano en
+ * cada calle. El motor ya resolvió la mano: esto es una fotografía, no una
+ * segunda tirada de cartas. En el river el ganador sale al 100 % y los demás al
+ * 0 %, marcados con la carabelita.
+ */
+function AllInReplay({
+  allIn,
+  winners,
+  pot,
+  potUsdt,
+  fmt,
+}: {
+  allIn: AllInReveal;
+  winners: Array<{ seatIndex: number }>;
+  pot: number;
+  potUsdt: number;
+  fmt: (internas: number, usdt: number) => string;
+}) {
+  const [street, setStreet] = useState<AllInStreetName>(allIn.startStreet);
+  const [playing, setPlaying] = useState(allIn.startStreet !== 'river');
+  const idx = ALL_IN_STREETS.indexOf(street);
+  const board = allIn.board.slice(0, BOARD_CARDS_BY_STREET[street]);
+  const winnerSeats = new Set(winners.map((w) => w.seatIndex));
+
+  useEffect(() => {
+    if (!playing || street === 'river') {
+      if (street === 'river') setPlaying(false);
+      return;
+    }
+    const timer = setTimeout(() => {
+      setStreet(ALL_IN_STREETS[Math.min(idx + 1, ALL_IN_STREETS.length - 1)]);
+    }, 1800);
+    return () => clearTimeout(timer);
+  }, [playing, street, idx]);
+
+  const filas = [...allIn.players]
+    .map((p) => ({
+      ...p,
+      // En el river el backend ya resolvio la mano: 100 para el ganador y 0
+      // para los demas. Si hay empate, reparte el 100 entre los ganadores y no
+      // se fuerza un 100 por cabeza (eso sumaria 200 en un bote dividido).
+      shown: Math.round(p.equity[street] ?? 0),
+    }))
+    .sort((a, b) => b.shown - a.shown);
+
+  return (
+    <div
+      className="rounded-xl p-3 mb-3"
+      style={{ background: '#0f172a', border: '1px solid #3498db' }}
+    >
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <div>
+          <p className="text-xs font-bold text-[#3498db]">Replay del all-in</p>
+          <p className="text-[9px] text-[#a0a0b0]">
+            Probabilidad de ganar con las cartas de cada calle
+          </p>
+        </div>
+        <button
+          onClick={() => {
+            setStreet(allIn.startStreet);
+            setPlaying(true);
+          }}
+          className="rounded-lg px-2.5 py-1 text-[10px] font-bold"
+          style={{ background: 'rgba(52,152,219,0.16)', color: '#8ecdf5' }}
+        >
+          ▶ Reproducir
+        </button>
+      </div>
+
+      <div className="flex gap-1 justify-center mb-2">
+        {ALL_IN_STREETS.map((s) => (
+          <button
+            key={s}
+            onClick={() => {
+              setStreet(s);
+              setPlaying(false);
+            }}
+            className="rounded-md px-2 py-1 text-[9px] font-bold"
+            style={{
+              background: s === street ? '#3498db' : 'rgba(255,255,255,0.06)',
+              color: s === street ? '#07120c' : '#a0a0b0',
+            }}
+          >
+            {STREET_LABEL[s]}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex justify-center gap-1 min-h-[28px] mb-2">
+        {board.length === 0 ? (
+          <span className="text-[10px] text-[#a0a0b0]">Sin cartas comunitarias</span>
+        ) : (
+          board.map((c, i) => <CartaMini key={`${c}-${i}`} raw={c} />)
+        )}
+      </div>
+
+      <div className="space-y-1.5">
+        {filas.map((p) => {
+          const gana = street === 'river' && winnerSeats.has(p.seatIndex);
+          return (
+            <div key={p.seatIndex}>
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="text-[10px] font-bold text-white truncate">
+                    {p.displayName}
+                  </span>
+                  <span className="flex gap-0.5 flex-shrink-0">
+                    {p.cards.map((c, i) => (
+                      <CartaMini key={`${p.seatIndex}-${i}`} raw={c} />
+                    ))}
+                  </span>
+                  {gana && (
+                    <span className="text-[9px] font-bold text-[#ffd700] flex-shrink-0">
+                      👑 carabelita
+                    </span>
+                  )}
+                </div>
+                <span
+                  className="text-[11px] font-bold flex-shrink-0"
+                  style={{ color: gana ? '#ffd700' : p.shown >= 50 ? '#00d26a' : '#ff8a94' }}
+                >
+                  {p.shown}%
+                </span>
+              </div>
+              <div className="flex items-center gap-2 mt-0.5">
+                <div className="flex-1 h-1 rounded-full overflow-hidden" style={{ background: '#1e293b' }}>
+                  <div
+                    className="h-full rounded-full transition-all duration-500"
+                    style={{
+                      width: `${p.shown}%`,
+                      background: gana ? '#ffd700' : p.shown >= 50 ? '#00d26a' : '#ff8a94',
+                    }}
+                  />
+                </div>
+                <span className="text-[8px] text-[#a0a0b0] w-[78px] text-right truncate">
+                  {p.handName[street] || '—'}
+                </span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <p className="text-[9px] text-[#a0a0b0] mt-2">
+        Bote final: {fmt(pot, potUsdt)}
+      </p>
+    </div>
+  );
+}
+
 export function Table({ tableId, onBack, onBalanceChange }: Props) {
   const [view, setView] = useState<TableView | null>(null);
   const [acting, setActing] = useState(false);
   const [error, setError] = useState('');
   const [remaining, setRemaining] = useState<number | null>(null);
+  // El jugador sigue en la página pero ya no tiene asiento (busteo cash): la
+  // vista pública permite ofrecerle volver a comprar la misma entrada.
+  const [spectator, setSpectator] = useState(false);
+  const [historialAbierto, setHistorialAbierto] = useState(false);
   // Objetivo de subida en unidades internas (las mismas que manda el motor).
   const [raiseTo, setRaiseTo] = useState(0);
+  // Reloj local para el aro de cada avatar y la pausa entre manos.
+  const [ahora, setAhora] = useState(() => Date.now());
 
   const prevPhase = useRef<string>('');
 
@@ -213,13 +406,32 @@ export function Table({ tableId, onBack, onBalanceChange }: Props) {
         const res = await api.tableView(tableId);
         if (cancelled) return;
 
+        const next = res.state as TableView | undefined;
+
         if (res.spectator) {
-          setError('No estás sentado en esta mesa.');
+          // En cash, un jugador que acaba de bustear sigue mirando su mesa:
+          // se le ofrece recomprar la misma entrada. En torneos/freerolls no
+          // hay recompra; se mantiene el aviso original.
+          if (next && next.mode === 'USDT' && next.kind === 'cash') {
+            setView(next);
+            setSpectator(true);
+            setError('');
+            prevPhase.current = next.hand.phase;
+          } else {
+            setView(null);
+            setSpectator(false);
+            setError('No estás sentado en esta mesa.');
+          }
           return;
         }
 
-        const next = res.state as TableView;
+        if (!next) {
+          setError('La mesa no devolvió su estado.');
+          return;
+        }
+
         setView(next);
+        setSpectator(false);
         setError('');
 
         // Refresca el saldo del wallet cuando la mano termina
@@ -267,15 +479,19 @@ export function Table({ tableId, onBack, onBalanceChange }: Props) {
   }, [tableId, onBalanceChange]);
 
   // --- Cuenta atras del turno ---
+  //
+  // El reloj corre para todos, no solo para el jugador propio: el aro del
+  // avatar del que esta decidiendo tambien tiene que bajar. La accion de
+  // timeout la ejecuta el servidor; aqui solo se pinta.
   useEffect(() => {
-    if (!view?.turnEndsAt || !view.isMyTurn) {
-      setRemaining(null);
-      return;
-    }
-
     const update = () => {
-      const end = new Date(view.turnEndsAt!).getTime();
-      setRemaining(Math.max(0, Math.floor((end - Date.now()) / 1000)));
+      setAhora(Date.now());
+      if (view?.turnEndsAt && view.isMyTurn) {
+        const end = new Date(view.turnEndsAt).getTime();
+        setRemaining(Math.max(0, Math.floor((end - Date.now()) / 1000)));
+      } else {
+        setRemaining(null);
+      }
     };
 
     update();
@@ -292,6 +508,54 @@ export function Table({ tableId, onBack, onBalanceChange }: Props) {
       if (res.state) setView(res.state);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Acción no válida.');
+    } finally {
+      setActing(false);
+    }
+  };
+
+  /**
+   * Vuelve a comprar la entrada en la misma mesa cash. No es un top-up: solo
+   * funciona con el asiento a cero o cuando el gestor ya lo retiró.
+   */
+  const rebuy = async () => {
+    if (acting) return;
+    setActing(true);
+    setError('');
+    try {
+      await api.rebuy(tableId);
+      await onBalanceChange?.();
+      // El siguiente sondeo trae el asiento nuevo y las cartas.
+      setSpectator(false);
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? err.message
+          : 'No se pudo volver a comprar entrada.',
+      );
+    } finally {
+      setActing(false);
+    }
+  };
+
+  const pedirTiempo = async () => {
+    if (acting) return;
+    setActing(true);
+    setError('');
+    try {
+      const res = await api.useTimeBank(tableId);
+      setView((prev) =>
+        prev
+          ? {
+              ...prev,
+              myTimeBankMs: res.timeBankMs,
+              turnEndsAt: res.turnEndsAt,
+            }
+          : prev,
+      );
+    } catch (err) {
+      setError(
+        err instanceof ApiError ? err.message : 'No se pudo usar el banco de tiempo.',
+      );
     } finally {
       setActing(false);
     }
@@ -384,6 +648,11 @@ export function Table({ tableId, onBack, onBalanceChange }: Props) {
   // ------------------------------------------------------------------
   const miAsiento = view.seats.find((s) => s.isYou);
   const sinFichas = !!miAsiento && miAsiento.chips <= 0;
+  const puedeRecomprar =
+    view.kind === 'cash' &&
+    view.mode === 'USDT' &&
+    !inHand &&
+    (sinFichas || spectator);
 
   // El asiento propio va siempre abajo. Se calcula la posición relativa al
   // índice del jugador; los huecos vacíos se quedan vacíos, no se reordenan.
@@ -408,11 +677,13 @@ export function Table({ tableId, onBack, onBalanceChange }: Props) {
             ? 'Freeroll'
             : view.kind === 'centroll'
               ? 'Centroll'
-              : view.mode === 'USDT'
-                ? 'Mesa cash'
-                : 'Mesa'
+              : view.kind === 'tournament'
+                ? 'Torneo'
+                : view.mode === 'USDT'
+                  ? 'Mesa cash'
+                  : 'Mesa'
         }
-        onBack={leave}
+        onBack={spectator ? onBack : leave}
       />
 
       {/* Estado */}
@@ -434,6 +705,11 @@ export function Table({ tableId, onBack, onBalanceChange }: Props) {
               : `${view.smallBlind} / ${view.bigBlind}`}
             <span className="text-[9px] text-[#a0a0b0] ml-1">{unidad}</span>
           </p>
+          {view.kind !== 'cash' && (
+            <p className="text-[9px] text-[#a0a0b0]">
+              Nivel {(view.blindLevel ?? 0) + 1}
+            </p>
+          )}
         </div>
         <div className="text-right">
           <p className="text-[10px] text-[#a0a0b0] uppercase tracking-wide">Pote</p>
@@ -528,29 +804,152 @@ export function Table({ tableId, onBack, onBalanceChange }: Props) {
         </div>
       )}
 
+      {mostrarResultado && resultado?.allIn && (
+        <AllInReplay
+          key={resultado.handNumber}
+          allIn={resultado.allIn}
+          winners={resultado.winners}
+          pot={resultado.pot}
+          potUsdt={resultado.potUsdt}
+          fmt={fmt}
+        />
+      )}
+
+      {/* Historial de manos. El backend ya recorta las cartas ajenas: aquí solo
+          mostramos tus cartas y las que llegaron al showdown. Sirve como replay
+          de la sesión sin pedir otra petición. */}
+      {(view.history?.length ?? 0) > 0 && (
+        <div
+          className="rounded-xl mb-3 overflow-hidden"
+          style={{ background: '#16213e', border: '1px solid #2a2a4a' }}
+        >
+          <button
+            onClick={() => setHistorialAbierto((v) => !v)}
+            className="w-full flex items-center justify-between px-3 py-2.5 text-left"
+          >
+            <span className="text-xs font-bold text-white">
+              Historial de manos
+              <span className="ml-1.5 text-[10px] font-normal text-[#a0a0b0]">
+                ({view.history!.length})
+              </span>
+            </span>
+            <span className="text-[10px] font-bold text-[#ffd700]">
+              {historialAbierto ? 'Ocultar' : 'Ver replay'}
+            </span>
+          </button>
+
+          {historialAbierto && (
+            <div className="px-3 pb-3 space-y-2 max-h-80 overflow-y-auto">
+              {view.history!.slice(0, 15).map((h) => (
+                <div
+                  key={`${h.handNumber}-${h.endedAt}`}
+                  className="rounded-lg p-2"
+                  style={{ background: '#0f172a', border: '1px solid #24324f' }}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-[11px] font-bold text-[#ffd700]">
+                      Mano #{h.handNumber}
+                    </p>
+                    <p className="text-[9px] text-[#a0a0b0]">
+                      {h.endedByFold ? 'Sin showdown' : 'Showdown'} · Pote{' '}
+                      {fmt(h.pot, h.potUsdt)}
+                    </p>
+                  </div>
+
+                  {h.board.length > 0 && (
+                    <div className="flex gap-1 mt-1.5 flex-wrap">
+                      {h.board.map((c, i) => (
+                        <CartaMini key={`${h.handNumber}-b-${i}`} raw={c} />
+                      ))}
+                    </div>
+                  )}
+
+                  {h.myCards.length > 0 && (
+                    <div className="flex items-center gap-1.5 mt-1.5">
+                      <span className="text-[9px] text-[#a0a0b0]">Tus cartas</span>
+                      {h.myCards.map((c, i) => (
+                        <CartaMini key={`${h.handNumber}-m-${i}`} raw={c} />
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="mt-1.5 space-y-0.5">
+                    {h.winners.map((w) => (
+                      <div
+                        key={`${h.handNumber}-w-${w.seatIndex}`}
+                        className="flex items-center justify-between gap-2"
+                      >
+                        <span className="text-[10px] text-white truncate">
+                          {w.displayName}
+                          <span className="text-[#a0a0b0] ml-1">{w.handName}</span>
+                        </span>
+                        <span className="text-[10px] font-bold text-[#00d26a] flex-shrink-0">
+                          +{fmt(w.amount, w.amountUsdt)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+
+                  {h.showdown.length > 1 && (
+                    <div className="mt-1.5 pt-1.5 border-t border-white/10 space-y-0.5">
+                      {h.showdown.map((s) => (
+                        <div
+                          key={`${h.handNumber}-s-${s.seatIndex}`}
+                          className="flex items-center justify-between gap-2"
+                        >
+                          <span className="text-[9px] text-[#a0a0b0] truncate">
+                            {s.displayName} · {s.handName}
+                          </span>
+                          <span className="flex gap-1 flex-shrink-0">
+                            {s.cards.map((c, i) => (
+                              <CartaMini key={`${h.handNumber}-s-${s.seatIndex}-${i}`} raw={c} />
+                            ))}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Sin saldo en la mesa: la mesa está quieta porque no hay nadie que pueda jugar. */}
-      {sinFichas && (
+      {(sinFichas || spectator) && (
         <div className="bg-[#ffd700]/10 border border-[#ffd700] rounded-xl p-4 mb-3 text-center">
           <p className="text-sm font-bold text-[#ffd700] mb-1">
-            Te has quedado sin {view.mode === 'USDT' ? 'saldo en la mesa' : 'puntos'}
+            {spectator
+              ? 'No estás sentado en esta mesa'
+              : `Te has quedado sin ${view.mode === 'USDT' ? 'saldo en la mesa' : 'puntos'}`}
           </p>
           <p className="text-xs text-[#a0a0b0] mb-3 leading-relaxed">
-            Por eso la mesa no reparte cartas: hace falta al menos un jugador con
-            {view.mode === 'USDT' ? ' USDT en la mesa' : ' puntos'} para jugar.
-            {view.mode === 'USDT'
-              ? ' Sal y vuelve a comprar entrada para seguir.'
-              : ' Sal y vuelve a entrar en el próximo freeroll.'}
+            {puedeRecomprar
+              ? `Puedes volver a comprar la misma entrada por ${view.buyInUsdt.toFixed(2)} USDT y seguir en la mesa.`
+              : spectator
+                ? 'La mano está en curso. Espera a que termine para volver a entrar.'
+                : view.mode === 'USDT'
+                  ? 'La mesa no reparte cartas porque hace falta al menos un jugador con USDT en la mesa. Vuelve a comprar entrada o sal.'
+                  : 'Ya no te quedan puntos. Sal y vuelve a entrar en el próximo freeroll.'}
           </p>
+          {puedeRecomprar && (
+            <button
+              onClick={rebuy}
+              disabled={acting}
+              className="btn btn-primary py-2 px-6 text-sm w-full mb-2"
+            >
+              {acting
+                ? 'Comprando…'
+                : `Volver a comprar entrada · ${view.buyInUsdt.toFixed(2)} USDT`}
+            </button>
+          )}
           <button
-            onClick={leave}
+            onClick={spectator ? onBack : leave}
             disabled={acting}
-            className="btn btn-primary py-2 px-6 text-sm w-full"
+            className="btn btn-outline py-2 px-6 text-sm w-full"
           >
-            {acting
-              ? 'Saliendo…'
-              : view.mode === 'USDT'
-                ? 'Salir y volver a comprar entrada'
-                : 'Salir de la mesa'}
+            {spectator ? 'Volver al lobby' : 'Salir de la mesa'}
           </button>
         </div>
       )}
@@ -658,7 +1057,14 @@ export function Table({ tableId, onBack, onBalanceChange }: Props) {
               <p className="text-[9px] text-[#9fe3c5]/70 mt-2">
                 {view.status === 'waiting'
                   ? 'Esperando jugadores'
-                  : 'Esperando la próxima mano'}
+                  : view.nextHandAt
+                    ? `Próxima mano en ${Math.max(
+                        0,
+                        Math.ceil(
+                          (new Date(view.nextHandAt).getTime() - ahora) / 1000,
+                        ),
+                      )} s`
+                    : 'Esperando la próxima mano'}
               </p>
             )}
           </div>
@@ -670,6 +1076,26 @@ export function Table({ tableId, onBack, onBalanceChange }: Props) {
           const enMano =
             inHand && (seat.status === 'active' || seat.status === 'all_in');
           const esSuTurno = inHand && view.hand.actingSeat === seat.index;
+          const finTurno =
+            esSuTurno && view.turnEndsAt
+              ? new Date(view.turnEndsAt).getTime()
+              : null;
+          const inicioTurno =
+            view.turnStartedAt != null
+              ? new Date(view.turnStartedAt).getTime()
+              : null;
+          const segundosTurno =
+            finTurno !== null
+              ? Math.max(0, Math.ceil((finTurno - ahora) / 1000))
+              : null;
+          const totalTurno =
+            finTurno !== null && inicioTurno !== null
+              ? Math.max(1, (finTurno - inicioTurno) / 1000)
+              : 30;
+          const progresoTurno =
+            segundosTurno !== null
+              ? Math.max(0, Math.min(1, segundosTurno / totalTurno))
+              : 0;
 
           return (
             <div
@@ -724,25 +1150,50 @@ export function Table({ tableId, onBack, onBalanceChange }: Props) {
                 }}
               >
                 <div
-                  className="relative mx-auto w-8 h-8 rounded-full flex items-center justify-center text-lg"
-                  style={{ background: avatarColor(seat.displayName) }}
+                  className="relative mx-auto w-10 h-10 rounded-full"
+                  style={{
+                    padding: 2,
+                    background:
+                      esSuTurno && segundosTurno !== null
+                        ? `conic-gradient(${
+                            segundosTurno <= 10 ? '#ff4757' : '#ffd700'
+                          } ${progresoTurno * 360}deg, rgba(255,255,255,0.12) 0)`
+                        : 'transparent',
+                  }}
                 >
-                  <span className="leading-none">
-                    {seat.avatarEmoji ?? '🃏'}
-                  </span>
-                  {seat.isDealer && (
-                    <span className="absolute -right-2 -bottom-1 w-4 h-4 rounded-full bg-[#ffd700] text-black text-[8px] font-bold flex items-center justify-center border border-black/40">
-                      D
+                  <div
+                    className="w-full h-full rounded-full flex items-center justify-center text-lg relative"
+                    style={{ background: avatarColor(seat.displayName) }}
+                  >
+                    <span className="leading-none">
+                      {seat.avatarEmoji ?? '🃏'}
                     </span>
-                  )}
-                  {seat.isSmallBlind && !seat.isDealer && (
-                    <span className="absolute -left-1 -bottom-1 rounded-full bg-[#3498db] text-white text-[7px] font-bold px-1">
-                      SB
-                    </span>
-                  )}
-                  {seat.isBigBlind && (
-                    <span className="absolute -left-1 -bottom-1 rounded-full bg-[#e74c3c] text-white text-[7px] font-bold px-1">
-                      BB
+                    {seat.isDealer && (
+                      <span className="absolute -right-2 -bottom-1 w-4 h-4 rounded-full bg-[#ffd700] text-black text-[8px] font-bold flex items-center justify-center border border-black/40">
+                        D
+                      </span>
+                    )}
+                    {seat.isSmallBlind && !seat.isDealer && (
+                      <span className="absolute -left-1 -bottom-1 rounded-full bg-[#3498db] text-white text-[7px] font-bold px-1">
+                        SB
+                      </span>
+                    )}
+                    {seat.isBigBlind && (
+                      <span className="absolute -left-1 -bottom-1 rounded-full bg-[#e74c3c] text-white text-[7px] font-bold px-1">
+                        BB
+                      </span>
+                    )}
+                  </div>
+                  {esSuTurno && segundosTurno !== null && (
+                    <span
+                      className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full text-[9px] font-bold flex items-center justify-center border border-black/50"
+                      style={{
+                        background: segundosTurno <= 10 ? '#ff4757' : '#ffd700',
+                        color: '#07120c',
+                      }}
+                      title="Tiempo de decisión"
+                    >
+                      {segundosTurno}
                     </span>
                   )}
                 </div>
@@ -858,6 +1309,16 @@ export function Table({ tableId, onBack, onBalanceChange }: Props) {
             Es tu turno
             {remaining !== null && ` · ${remaining}s`}
           </p>
+          {(view.myTimeBankMs ?? 0) > 0 && (
+            <button
+              onClick={pedirTiempo}
+              disabled={acting}
+              className="mt-2 rounded-lg px-3 py-1.5 text-[11px] font-bold"
+              style={{ background: '#2a3b5a', color: '#ffd700' }}
+            >
+              Pedir tiempo · +{Math.round((view.myTimeBankMs ?? 0) / 1000)}s
+            </button>
+          )}
         </div>
       )}
 

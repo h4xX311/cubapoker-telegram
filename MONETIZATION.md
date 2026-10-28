@@ -132,10 +132,17 @@ src/
 
 ## API Endpoints
 
-### VIP
-- `GET /api/monetization/vip/:telegramId` - Obtener nivel VIP
-- `POST /api/monetization/vip/purchase` - Comprar VIP
-- `GET /api/monetization/vip/config` - Configuración VIP
+### Membresía QVA-Bet Club y VIP Arena
+
+La ruta interna conserva el nombre `vip` por compatibilidad, pero son dos
+productos distintos: la membresía se activa con un plan; VIP Arena es una sala
+de cash y no se compra.
+
+- `GET /api/monetization/vip` - Membresía y estado del profit share de Arena
+- `POST /api/monetization/vip/purchase` - Activar un plan (`basic` o `premium`)
+- `POST /api/monetization/vip/rakeback/claim` - Cobrar rakeback de la membresía
+- `POST /api/monetization/vip/arena/claim` - Cobrar profit share de VIP Arena
+- `GET /api/monetization/vip/config` - Planes y beneficios de QVA-Bet Club
 
 ### Referidos
 - `GET /api/monetization/referrals/:telegramId` - Estadísticas
@@ -157,7 +164,7 @@ src/
 
 | Comando | Descripción |
 |---------|-------------|
-| `/vip` | Ver y comprar VIP |
+| `/membresia` | Ver y activar planes de QVA-Bet Club |
 | `/referrals` | Ver estadísticas de referidos |
 | `/achievements` | Ver logros y rachas |
 
@@ -170,7 +177,7 @@ src/
 | Rake | 75,000 | ~214 |
 | Torneos | 8,000 | ~23 |
 | Comisiones | 7,500 | ~21 |
-| VIP | 5,000 | ~14 |
+| Membresías | 5,000 | ~14 |
 | Referidos | 3,000 | ~9 |
 | Logros | 2,000 | ~6 |
 | Publicidad | 1,000 | ~3 |
@@ -188,13 +195,13 @@ src/
 - [x] Logros básicos
 
 ### Fase 2: Crecimiento (Mes 3-6)
-- [x] VIP Basic
+- [x] QVA Member
 - [x] Torneos semanales
 - [x] Comisiones por depósitos
 - [x] Rachas
 
 ### Fase 3: Expansión (Mes 7-12)
-- [x] VIP Premium y Elite
+- [x] QVA Premium y profit share de VIP Arena
 - [x] Torneos especiales
 - [ ] Publicidad
 - [ ] Cosméticos

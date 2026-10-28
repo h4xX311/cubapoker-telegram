@@ -76,18 +76,18 @@ router.get('/vip', async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('Get VIP error:', error);
-    res.status(500).json({ error: 'Error al obtener VIP' });
+    res.status(500).json({ error: 'Error al obtener QVA-Bet Club' });
   }
 });
 
-// Comprar VIP
+// Activar un plan de QVA-Bet Club (la ruta conserva el nombre por compatibilidad).
 router.post('/vip/purchase', async (req: Request, res: Response) => {
   try {
     const telegramId = getAuthedTelegramId(req);
     const { level } = req.body;
 
     if (!['basic', 'premium'].includes(level)) {
-      return res.status(400).json({ error: 'Nivel VIP inválido' });
+      return res.status(400).json({ error: 'Plan QVA-Bet Club inválido' });
     }
 
     const success = await monetizationService.purchaseVIP(telegramId, level as VIPLevel);
@@ -95,16 +95,18 @@ router.post('/vip/purchase', async (req: Request, res: Response) => {
     if (success) {
       res.json({
         success: true,
-        message: `VIP ${level} comprado exitosamente`,
+        message: `${
+          level === 'premium' ? 'QVA Premium' : 'QVA Member'
+        } activado exitosamente`,
       });
     } else {
-      res.status(400).json({ error: 'No se pudo comprar VIP' });
+      res.status(400).json({ error: 'No se pudo activar QVA-Bet Club' });
     }
   } catch (error: any) {
     console.error('Purchase VIP error:', error);
     const esSaldo = /saldo insuficiente/i.test(error?.message ?? '');
     res.status(esSaldo ? 400 : 500).json({
-      error: error?.message || 'Error al comprar VIP',
+      error: error?.message || 'Error al activar QVA-Bet Club',
     });
   }
 });

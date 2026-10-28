@@ -480,23 +480,24 @@ export function Home({ user, onNavigate, onPlay }: HomeProps) {
             <span className="text-[#a0a0b0]">→</span>
           </button>
 
-          <div className="card flex items-center gap-4 opacity-60">
+          <button
+            onClick={() => onNavigate('tournaments')}
+            className="card w-full flex items-center gap-4 text-left hover:border-[#ffd700] transition-all"
+          >
             <div
               className="w-12 h-12 rounded-xl flex items-center justify-center shrink-0 text-xl"
-              style={{ background: '#2a2a4a' }}
+              style={{ background: 'linear-gradient(135deg, #ffd700 0%, #b8860b 100%)' }}
             >
               🏆
             </div>
             <div className="flex-1">
-              <p className="text-sm font-semibold text-white">
-                Torneos programados
-              </p>
+              <p className="text-sm font-semibold text-white">Torneos y Spin & Go</p>
               <p className="text-[11px] text-[#a0a0b0]">
-                Buy-in y garantizado · próximamente
+                Buy-in desde 1 USDT · premios garantizados
               </p>
             </div>
-            <span className="badge badge-warning">Pronto</span>
-          </div>
+            <span className="text-[#a0a0b0]">→</span>
+          </button>
         </div>
       )}
 
@@ -505,7 +506,7 @@ export function Home({ user, onNavigate, onPlay }: HomeProps) {
         {(
           [
             ['profile', '👤', 'Perfil'],
-            ['vip', '👑', 'VIP'],
+            ['membership', '👑', 'Membresía'],
             ['referrals', '👥', 'Invitar'],
             ['achievements', '🎖️', 'Logros'],
           ] as [Page, string, string][]

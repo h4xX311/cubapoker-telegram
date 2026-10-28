@@ -92,7 +92,7 @@ export interface IUser extends Document {
    * `$inc` y `$push` es atómico: o se aplican los dos, o ninguno.
    *
    * La clave incluye el programa y la semana (`vip_rakeback:2026-10-12`). Así
-   * el 3-Bet Club y VIP Arena pueden pagar la misma semana sin pisarse.
+   * el QVA-Bet Club y VIP Arena pueden pagar la misma semana sin pisarse.
    */
   payoutCredits: Array<{
     key: string;

@@ -25,7 +25,13 @@ const SUITES = [
   { name: 'Motor de poker', file: 'test-engine.js' },
   { name: 'Núcleo: evaluador, all-in y rake', file: 'test-engine-core.js' },
   { name: 'Conservación de fichas', file: 'test-chip-conservation.js' },
+  { name: 'Rangos preflop y push/fold', file: 'test-bot-ranges.js' },
+  { name: 'Niveles de ciegas', file: 'test-blind-levels.js' },
   { name: 'Ritmo y decisiones de bots', file: 'test-bot-pace.js' },
+  { name: 'Visibilidad pública y bots', file: 'test-visibilidad-bots.js' },
+  { name: 'Turnos, timeout e historial', file: 'test-turn-timers.js' },
+  { name: 'Equidad y replay de all-in', file: 'test-allin-equity.js' },
+  { name: 'Torneos y Spin & Go', file: 'test-tournaments.js' },
 ];
 
 const results = [];

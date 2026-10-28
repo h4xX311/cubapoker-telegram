@@ -42,7 +42,15 @@ import { Schema, Document, model, Types } from 'mongoose';
  *     kind=cash      -> creado
  *     kind=centroll  -> FALLA: `centroll` is not a valid enum value for path `kind`
  */
-export type FieldKind = 'cash' | 'freeroll' | 'centroll';
+export type FieldKind = 'cash' | 'freeroll' | 'centroll' | 'tournament';
+
+/**
+ * Formato de un campo pagado.
+ *
+ * `standard` es un torneo programado con reparto por posiciones.
+ * `spingo` es un 3-max que arranca al llenarse y paga solo al ganador.
+ */
+export type FieldFormat = 'standard' | 'spingo';
 
 export type FieldStatus =
   /** Aceptando inscripciones. No se juega todavia. */
@@ -73,6 +81,11 @@ export interface IField extends Document {
   tierId?: string;
   /** Premio garantizado del escalon (freerolls). */
   prizeTier?: number;
+
+  /** Evento del catalogo de torneos, si aplica. */
+  eventId?: string;
+  /** `standard` o `spingo`. Ausente en cash/freeroll/centroll. */
+  format?: FieldFormat;
 
   status: FieldStatus;
 
@@ -115,6 +128,23 @@ export interface IField extends Document {
    * ------------------------------------------------------------------
    */
   prizePoolUnits?: number;
+
+  /**
+   * Reparto por posiciones de un torneo pagado.
+   *
+   * En un torneo programado suma 100 y se reparte entre las cinco primeras
+   * plazas. En un Spin & Go es `[100]`: el ganador se lo lleva todo. No se
+   * reutiliza `FREEROLL_PAYOUT` porque el freeroll no cobra entrada y su
+   * reparto (50/30/20) no tiene por que ser el mismo.
+   */
+  payoutTable?: number[];
+
+  /**
+   * Diferencia que pone la casa cuando el premio garantizado supera el bote
+   * de las entradas. Se guarda para poder auditarlo; no es dinero de ningun
+   * jugador.
+   */
+  overlayUnits?: number;
 
   /**
    * Hora a la que se cierra la inscripcion y arranca el campo.
@@ -363,9 +393,15 @@ const fieldSchema = new Schema<IField>(
   {
     fieldId: { type: String, required: true, unique: true, index: true },
 
-    kind: { type: String, enum: ['cash', 'freeroll', 'centroll'], default: 'cash' },
+    kind: {
+      type: String,
+      enum: ['cash', 'freeroll', 'centroll', 'tournament'],
+      default: 'cash',
+    },
     tierId: String,
     prizeTier: Number,
+    eventId: String,
+    format: { type: String, enum: ['standard', 'spingo'] },
 
     status: {
       type: String,
@@ -376,8 +412,11 @@ const fieldSchema = new Schema<IField>(
 
     buyInUnits: { type: Number, required: true },
 
-    // Premio del freeroll. Es dinero de la casa, no una suma de entradas.
+    // Premio del freeroll o garantizado de un torneo. En el segundo caso la
+    // casa solo lo completa si las entradas no llegan.
     prizePoolUnits: { type: Number, default: 0 },
+    payoutTable: { type: [Number], default: undefined },
+    overlayUnits: { type: Number, default: 0 },
     // Hora de arranque y fin del registro tardio. Los dos, para no repetir la regla.
     scheduledStartAt: Date,
     lateRegUntil: Date,
@@ -457,8 +496,17 @@ export const toPublicField = (field: IField) => ({
   kind: field.kind,
   tierId: field.tierId,
   prizeTier: field.prizeTier,
+  eventId: field.eventId,
+  format: field.format,
   status: field.status,
   buyIn: field.buyInUnits,
+  prizePoolUnits: field.prizePoolUnits ?? 0,
+  payoutTable: field.payoutTable ?? [],
+  scheduledStartAt: field.scheduledStartAt,
+  lateRegUntil: field.lateRegUntil,
+  startChips: field.startChips,
+  smallBlind: field.smallBlind,
+  bigBlind: field.bigBlind,
   targetField: field.targetField,
   waiting: field.waiting,
   seated: field.seated,
