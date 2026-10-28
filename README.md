@@ -1,17 +1,19 @@
 # CubaPoker — Telegram Mini App
 
-Mini App de póker para Telegram con salas cash, VIP Arena, torneos, freerolls y
-centrolls. La unidad interna es la milésima de USDT: **1 USDT = 1000 unidades**.
+Mini App de póker para Telegram con salas cash, VIP Arena, torneos y freerolls.
+La unidad interna es la milésima de USDT: **1 USDT = 1000 unidades**.
 
 ## Características
 
 - Integración con Telegram Web App, sin registro separado.
-- Salas cash con bots, VIP Arena y mesas de campo multimesa.
-- Torneos, freerolls y centrolls con arranque por reloj.
+- Lobby cash por modalidad, nivel de ciegas y formato (6-max, Heads-Up y 7-max).
+- Entrada rápida y multimesa con las cartas privadas de cada mesa.
+- VIP Arena independiente, con sus niveles y su profit share.
+- Torneos multimesa con garantía, Spin & Go y freerolls por franjas UTC.
 - Pagos con EnZona, QvaPay y USDT; simulación mientras no haya pasarelas reales.
 - Mesa ovalada con asientos, avatares, cartas, bote, dealer y acciones.
 - Historial de resultados, fuerza de mano y avisos de turno.
-- Interfaz móvil oscura, pensada para Telegram.
+- Interfaz adaptativa para Telegram móvil y escritorio.
 
 ## Inicio rápido
 

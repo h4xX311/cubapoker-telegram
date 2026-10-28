@@ -14,7 +14,6 @@ export const PAGES = [
   'game',
   'tables',
   'freeroll',
-  'centroll',
   'tournaments',
   'membership',
   'vip',
@@ -35,7 +34,7 @@ export interface Balance {
   real: number;
   /**
    * Promotional Dollars, en USDT. NO es retirable: se desbloquea 1 de cada 10
-   * al usarlo. Origen: premios de freeroll, centrolls, logros y referidos.
+   * al usarlo. Origen: premios de freeroll, logros y referidos.
    */
   play: number;
   /** Suma de ambos: lo que puede gastar en jugar. */
@@ -179,20 +178,13 @@ export interface ProductConfig {
   freerollTiers: readonly number[];
   freerollTargetField: number;
   freerollMaxField: number;
-  centroll: {
-    buyIn: number;
-    prizeMultiplier: number;
-    targetField: number;
-    maxField: number;
-    maxRebuys: number;
-  };
   unlock: UnlockInfo;
   withdrawals: WithdrawalLimits;
 }
 
 export interface TableSummary {
   tableId: string;
-  kind: 'cash' | 'freeroll' | 'centroll' | 'tournament';
+  kind: 'cash' | 'freeroll' | 'tournament';
   tierId?: string;
   /** Formato cash: 7max, 6max o hu. */
   formatId?: string;
@@ -341,12 +333,12 @@ export interface TableHistoryEntry {
 
 export interface TableView {
   tableId: string;
-  kind: 'cash' | 'freeroll' | 'centroll' | 'tournament';
+  kind: 'cash' | 'freeroll' | 'tournament';
   tierId?: string;
   formatId?: string;
   prizeTier?: number;
   status: string;
-  /** USDT en cash ring; PTS en torneos, freerolls y centrolls. */
+  /** USDT en cash ring; PTS en torneos y freerolls. */
   mode: 'USDT' | 'PTS';
   /** Ciegas en unidades internas. Para pintar, usar `smallBlindUsdt`. */
   smallBlind: number;
@@ -396,7 +388,7 @@ export interface TableView {
 /** Resumen de una mesa abierta, para el selector multi-mesa. */
 export interface MyTable {
   tableId: string;
-  kind: 'cash' | 'freeroll' | 'centroll' | 'tournament';
+  kind: 'cash' | 'freeroll' | 'tournament';
   tierId?: string;
   formatId?: string;
   label: string;
@@ -423,6 +415,8 @@ export interface MyTable {
   turnEndsAt: string | null;
   turnStartedAt: string | null;
   nextHandAt: string | null;
+  /** Cartas privadas del jugador en esta mesa (solo si hay mano activa). */
+  myCards?: { rank: string; suit: string }[];
 }
 
 // --- Torneos y Spin & Go ---
@@ -450,6 +444,11 @@ export interface TournamentLobbyEntry {
   lateRegUntil: string | null;
   inscrito: boolean;
   maxPorMesa: number;
+  createdAt?: string | null;
+  /** Momento en que el Spin & Go puede completarse automáticamente. */
+  spinFillAt?: string | null;
+  /** Momento máximo de espera: si no se llena, se reembolsa la entrada. */
+  spinRefundAt?: string | null;
 }
 
 /** Resuelve la ruta de la URL a una pagina de la app. */

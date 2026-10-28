@@ -150,7 +150,7 @@ export interface HandHistoryEntry {
 
 export interface ITable extends Document {
   tableId: string;
-  kind: 'cash' | 'freeroll' | 'centroll' | 'tournament';
+  kind: 'cash' | 'freeroll' | 'tournament';
   /** Solo en mesas cash */
   tierId?: string;
   /**
@@ -334,11 +334,11 @@ const seatSchema = new Schema<ISeat>(
 
 const tableSchema = new Schema<ITable>({
   tableId: { type: String, required: true, unique: true, index: true },
-  // `centroll` faltaba, y no fallaba el campo: fallaba LA MESA, al sentar al primer
-  // jugador. Se veia como "Table validation failed", no como un problema de enum.
+  // Tipos de mesa activos. Un valor fuera del enum falla al sentar al primer
+  // jugador y se ve como "Table validation failed".
   kind: {
     type: String,
-    enum: ['cash', 'freeroll', 'centroll', 'tournament'],
+    enum: ['cash', 'freeroll', 'tournament'],
     required: true,
     index: true,
   },

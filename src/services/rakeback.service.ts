@@ -1,6 +1,6 @@
 import { RakeEvent, RakebackPayout, ArenaPayout } from '../models/Rakeback';
 import { VIP, VIP_CONFIG, type VIPLevel } from '../models/VIP';
-import { VIP_ARENA } from '../config/product';
+import { VIP_ARENA, getTier } from '../config/product';
 import { User } from '../models/User';
 import { Transaction } from '../models/Transaction';
 import type { ITable } from '../models/Table';
@@ -204,7 +204,7 @@ class RakebackService {
   async recordTableRake(table: ITable, rakeUnits: number): Promise<void> {
     if (rakeUnits <= 0) return;
 
-    // Solo ring tables. Las mesas de un campo (torneo, freeroll, centroll) no
+    // Solo ring tables. Las mesas de un campo (torneo, freeroll) no
     // reparten rakeback: su economia ya esta definida por el campo.
     if (table.kind !== 'cash' || table.field?.fieldId) return;
 
@@ -225,7 +225,7 @@ class RakebackService {
         tableId: table.tableId,
         handNumber,
         amount: Math.floor((rakeUnits * seat.totalBet) / totalAportado),
-        arena: table.tierId === VIP_ARENA.id,
+        arena: getTier(table.tierId)?.vipArena === true,
         at,
       }))
       .filter((e) => Number.isFinite(e.telegramId) && e.amount > 0);

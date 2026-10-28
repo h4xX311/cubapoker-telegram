@@ -4,6 +4,7 @@ import type {
   CashTier,
   FreerollCampo,
   FreerollSlot,
+  MyTable,
   Page,
   Session,
 } from '../lib/types';
@@ -32,7 +33,7 @@ type Pestana = 'cash' | 'freeroll' | 'torneos';
  * ------------------------------------------------------------------
  * POR QUE PESTANAS Y NO UNA REJILLA DE TARJETAS
  *
- * La version anterior eran siete tarjetas iguales ("Campos cash", "Freeroll", "Centroll",
+ * La version anterior eran siete tarjetas iguales ("Campos cash", "Freeroll", "Torneos",
  * "Torneos", "VIP", "Logros", "Referidos"). Todas del mismo tamano y del mismo color, sin
  * decir en ninguna el buy-in, el premio ni cuanto se tarda. El jugador que entra por primera
  * vez tiene que abrir cuatro pantallas para saber que puede jugar con 1 USDT.
@@ -59,7 +60,7 @@ export function Home({ user, onNavigate, onPlay }: HomeProps) {
   const [abierto, setAbierto] = useState<FreerollCampo | null>(null);
   const [enJuego, setEnJuego] = useState<FreerollCampo[]>([]);
   const [proximos, setProximos] = useState<FreerollSlot[]>([]);
-  const [miMesa, setMiMesa] = useState<string | null>(null);
+  const [misMesas, setMisMesas] = useState<MyTable[]>([]);
   const [ocupado, setOcupado] = useState(false);
   const [aviso, setAviso] = useState('');
   const [ahora, setAhora] = useState(() => Date.now());
@@ -67,13 +68,15 @@ export function Home({ user, onNavigate, onPlay }: HomeProps) {
   useEffect(() => {
     // `allSettled`: si el freeroll falla, la pestana de cash tiene que seguir funcionando.
     Promise.allSettled([
-      api.gameConfig().then((c) => setTiers(c?.cashTiers ?? [])),
+      api.gameConfig().then((c) =>
+        setTiers((c?.cashTiers ?? []).filter((t: CashTier) => !t.vipArena)),
+      ),
       api.freerolls().then((f) => {
         setAbierto(f?.abierto ?? null);
         setEnJuego(f?.enJuego ?? []);
         setProximos(f?.proximos ?? []);
       }),
-      api.myTable().then((r) => setMiMesa(r?.tableId ?? null)),
+      api.myTables().then((r) => setMisMesas(r?.tables ?? [])),
     ]);
   }, []);
 
@@ -117,19 +120,26 @@ export function Home({ user, onNavigate, onPlay }: HomeProps) {
   };
 
   const volverAMiMesa = async () => {
-    if (miMesa) {
-      onPlay(miMesa);
+    if (misMesas.length > 0) {
+      onPlay(misMesas[0].tableId);
       return;
     }
 
     try {
-      const r = await api.myTable();
-      if (r?.tableId) onPlay(r.tableId);
-      else setAviso('No tienes ninguna mesa abierta.');
+      const r = await api.myTables();
+      const primera = r?.tables?.[0];
+      if (primera?.tableId) {
+        setMisMesas(r.tables);
+        onPlay(primera.tableId);
+      } else {
+        setAviso('No tienes ninguna mesa abierta.');
+      }
     } catch {
       setAviso('No se pudo abrir tu mesa.');
     }
   };
+
+  const avatarActual = user?.avatarCatalog?.find((a) => a.id === user.avatar);
 
   // El freeroll que exige accion AHORA: el que esta en juego con registro tardio. Si no hay
   // ninguno, el proximo que se puede jugar.
@@ -154,8 +164,13 @@ export function Home({ user, onNavigate, onPlay }: HomeProps) {
               background: 'linear-gradient(135deg, #ffd700 0%, #e6a800 100%)',
             }}
             aria-label="Mi perfil"
+            title={avatarActual?.label ?? 'Mi perfil'}
           >
-            {(user?.firstName || 'J').charAt(0).toUpperCase()}
+            {avatarActual ? (
+              <span className="text-xl leading-none">{avatarActual.emoji}</span>
+            ) : (
+              (user?.firstName || 'J').charAt(0).toUpperCase()
+            )}
           </button>
         </div>
       </header>
@@ -221,7 +236,7 @@ export function Home({ user, onNavigate, onPlay }: HomeProps) {
           "continuar jugando" que muchas veces no lleva a ninguna parte es peor
           que no tenerlo: el jugador pulsa, no pasa nada, y deja de confiar en
           los accesos rapidos del lobby. */}
-      {miMesa && (
+      {misMesas.length > 0 && (
         <button
           onClick={volverAMiMesa}
           className="card w-full flex items-center gap-3 mb-3 text-left hover:border-[#00d26a] transition-all"
@@ -235,7 +250,9 @@ export function Home({ user, onNavigate, onPlay }: HomeProps) {
               Continuar jugando
             </span>
             <span className="block text-[11px] text-[#a0a0b0]">
-              Tienes una mesa abierta
+              {misMesas.length === 1
+                ? 'Tienes una mesa abierta'
+                : `Tienes ${misMesas.length} mesas abiertas`}
             </span>
           </span>
           <span className="text-[#a0a0b0]">→</span>
@@ -338,9 +355,9 @@ export function Home({ user, onNavigate, onPlay }: HomeProps) {
 
       {/* ---------------- Contenido de la pestana ---------------- */}
       {pestana === 'cash' && (
-        <div className="space-y-2.5 mb-6 animate-fadeIn">
+        <div className="grid gap-2.5 mb-6 animate-fadeIn lg:grid-cols-2">
           {tiers.length === 0 && (
-            <div className="card text-center py-6">
+            <div className="card text-center py-6 lg:col-span-2">
               <div className="spinner mx-auto" />
             </div>
           )}
@@ -384,17 +401,50 @@ export function Home({ user, onNavigate, onPlay }: HomeProps) {
           ))}
 
           {tiers.length > 0 && (
-            <p className="text-[10px] text-[#6c6c80] text-center pt-1">
+            <p className="text-[10px] text-[#6c6c80] text-center pt-1 lg:col-span-2">
               Ring table: juegas con tu saldo y te lo llevas al salir. Sin esperas.
             </p>
           )}
+
+          {/* Arena vive separada del cash normal. Esta tarjeta es solo una
+              puerta de entrada a su propio lobby. */}
+          <button
+            onClick={() => onNavigate('vip')}
+            className="card w-full flex items-center gap-4 text-left transition-all lg:col-span-2"
+            style={{
+              borderColor: 'rgba(255,215,0,0.45)',
+              background:
+                'linear-gradient(135deg, rgba(28,23,48,0.95) 0%, rgba(22,19,31,0.95) 100%)',
+            }}
+          >
+            <div
+              className="w-12 h-12 rounded-xl flex items-center justify-center shrink-0 text-xl"
+              style={{
+                background: 'linear-gradient(135deg, #ffd700 0%, #b8860b 100%)',
+              }}
+            >
+              ♛
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold text-white">
+                VIP Arena · sala independiente
+              </p>
+              <p className="text-[11px] text-[#a0a0b0]">
+                Mesas propias desde 200 USDT · profit share del 15 % del rake
+              </p>
+            </div>
+            <span className="text-[#ffd700]">→</span>
+          </button>
         </div>
       )}
 
       {pestana === 'freeroll' && (
-        <div className="space-y-2.5 mb-6 animate-fadeIn">
+        <div className="grid gap-2.5 mb-6 animate-fadeIn lg:grid-cols-2">
           {abierto && (
-            <div className="card" style={{ borderColor: 'rgba(255,215,0,0.4)' }}>
+            <div
+              className="card lg:col-span-2"
+              style={{ borderColor: 'rgba(255,215,0,0.4)' }}
+            >
               <div className="flex items-start justify-between mb-3">
                 <div>
                   <span className="badge badge-warning">Abierto</span>
@@ -450,7 +500,7 @@ export function Home({ user, onNavigate, onPlay }: HomeProps) {
 
           <button
             onClick={() => onNavigate('freeroll')}
-            className="w-full btn btn-gold py-2.5 text-sm"
+            className="w-full btn btn-gold py-2.5 text-sm lg:col-span-2"
           >
             Ver todos los freerolls
           </button>
@@ -458,28 +508,7 @@ export function Home({ user, onNavigate, onPlay }: HomeProps) {
       )}
 
       {pestana === 'torneos' && (
-        <div className="space-y-2.5 mb-6 animate-fadeIn">
-          <button
-            onClick={() => onNavigate('centroll')}
-            className="card w-full flex items-center gap-4 text-left hover:border-[#e67e22] transition-all"
-          >
-            <div
-              className="w-12 h-12 rounded-xl flex items-center justify-center shrink-0 text-xl"
-              style={{
-                background: 'linear-gradient(135deg, #e67e22 0%, #d35400 100%)',
-              }}
-            >
-              ⚡
-            </div>
-            <div className="flex-1">
-              <p className="text-sm font-semibold text-white">Centroll</p>
-              <p className="text-[11px] text-[#a0a0b0]">
-                Entrada de 0,01 USDT · torneo multi-mesa
-              </p>
-            </div>
-            <span className="text-[#a0a0b0]">→</span>
-          </button>
-
+        <div className="grid gap-2.5 mb-6 animate-fadeIn lg:grid-cols-2">
           <button
             onClick={() => onNavigate('tournaments')}
             className="card w-full flex items-center gap-4 text-left hover:border-[#ffd700] transition-all"
@@ -491,9 +520,51 @@ export function Home({ user, onNavigate, onPlay }: HomeProps) {
               🏆
             </div>
             <div className="flex-1">
-              <p className="text-sm font-semibold text-white">Torneos y Spin & Go</p>
+              <p className="text-sm font-semibold text-white">
+                Torneos programados
+              </p>
               <p className="text-[11px] text-[#a0a0b0]">
-                Buy-in desde 1 USDT · premios garantizados
+                Main 500 · High 300 · Medio 200 · Low 100 · Micro desde 0,05 USDT
+              </p>
+            </div>
+            <span className="text-[#a0a0b0]">→</span>
+          </button>
+
+          <button
+            onClick={() => onNavigate('tournaments')}
+            className="card w-full flex items-center gap-4 text-left hover:border-[#3498db] transition-all"
+          >
+            <div
+              className="w-12 h-12 rounded-xl flex items-center justify-center shrink-0 text-xl"
+              style={{ background: 'linear-gradient(135deg, #3498db 0%, #1f618d 100%)' }}
+            >
+              ⚡
+            </div>
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-white">Spin & Go 3-max</p>
+              <p className="text-[11px] text-[#a0a0b0]">
+                Arranca al llenarse · 1, 5 y 25 USDT · pago al ganador
+              </p>
+            </div>
+            <span className="text-[#a0a0b0]">→</span>
+          </button>
+
+          <button
+            onClick={() => onNavigate('freeroll')}
+            className="card w-full flex items-center gap-4 text-left hover:border-[#00d26a] transition-all lg:col-span-2"
+          >
+            <div
+              className="w-12 h-12 rounded-xl flex items-center justify-center shrink-0 text-xl"
+              style={{ background: 'linear-gradient(135deg, #00d26a 0%, #00b894 100%)' }}
+            >
+              🎁
+            </div>
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-white">
+                Freerolls multimesa
+              </p>
+              <p className="text-[11px] text-[#a0a0b0]">
+                Cuatro ediciones al día · premios de 5, 10, 20 y 50 USDT
               </p>
             </div>
             <span className="text-[#a0a0b0]">→</span>

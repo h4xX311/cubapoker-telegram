@@ -28,7 +28,6 @@
     "test:pote": "npm run build && node scripts/test-conservacion-pote.js",
     "test:indices": "npm run build && node scripts/asegurar-indices.js",
     "test:cancelar": "npm run build && node scripts/test-cancelar-campo.js",
-    "test:centroll": "npm run build && node scripts/test-centroll.js",
     "test:cash": "npm run build && node scripts/test-cash-integration.js"
   },
   "dependencies": {

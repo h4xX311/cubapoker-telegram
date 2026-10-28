@@ -4,7 +4,7 @@
  * Aqui se comprueban las tres cosas que sostienen el producto:
  *  - la escalera de campos escala en buy-in, y en USDT
  *  - el saldo de promocion se desbloquea jugando, no se retira de golpe
- *  - los freerolls y centrolls no permiten drenar la plataforma
+ *  - los freerolls y torneos no permiten drenar la plataforma
  *
  * Ejecutar: node scripts/test-business-rules.js
  */
@@ -18,13 +18,18 @@ const {
   FREEROLL_MAX_FIELD,
   FIELD_PAYOUT,
   SEATS_PER_TABLE,
-  CENTROLL,
+  TOURNAMENT_EVENTS,
+  VIP_ARENA_TIER_IDS,
   UNLOCK_RATES,
   BOT_CONFIG,
   RAKE,
   ECONOMY,
   botsForTable,
 } = require('../dist/config/product');
+const {
+  HORAS_FREEROLL_UTC,
+  premioDelSlot,
+} = require('../dist/config/freeroll');
 const {
   WITHDRAWALS,
   DEPOSITS,
@@ -57,11 +62,29 @@ section('1. Niveles de cash: escalan en buy-in; VIP Arena es una sala');
   if (SEATS_PER_TABLE === 7) ok('mesa fisica 7-max');
   else bad(`SEATS_PER_TABLE=${SEATS_PER_TABLE}; el producto define 7-max`);
 
-  if (TABLE_TIER_LIST.length === 5) ok('hay 4 niveles de cash + VIP Arena');
-  else bad(`esperaba 5 niveles, hay ${TABLE_TIER_LIST.length}`);
+  if (TABLE_TIER_LIST.length === 8) ok('hay 4 niveles cash + 4 niveles VIP Arena');
+  else bad(`esperaba 8 niveles, hay ${TABLE_TIER_LIST.length}`);
 
-  const expectedBuys = [1, 5, 25, 100, 10_000];
-  const expectedIds = ['t1', 't5', 't25', 't100', 'arena'];
+  const expectedBuys = [1, 5, 25, 100, 200, 1_000, 5_000, 10_000];
+  const expectedIds = [
+    't1',
+    't5',
+    't25',
+    't100',
+    'arena200',
+    'arena1000',
+    'arena5000',
+    'arena',
+  ];
+  const arena = TABLE_TIER_LIST.filter((tier) => tier.vipArena);
+  if (
+    arena.length === VIP_ARENA_TIER_IDS.length &&
+    arena.every((tier) => tier.arenaProfitSharePercent === 15)
+  ) {
+    ok('VIP Arena tiene 4 niveles propios, todos con 15 % de profit share');
+  } else {
+    bad('VIP Arena debe tener sus 4 niveles con profit share del 15 %');
+  }
 
   for (let i = 0; i < expectedBuys.length; i++) {
     const tier = TABLE_TIER_LIST[i];
@@ -244,8 +267,29 @@ section('3. Promotional Dollars: ratio de desbloqueo 1:10');
 section('4. Freerolls: entrada gratis, premio en play');
 
 {
-  if (FREEROLL_PRIZES.length === 6) ok(`6 escalones: ${FREEROLL_PRIZES.join(', ')} USDT`);
-  else bad(`esperaba 6 escalones, hay ${FREEROLL_PRIZES.length}`);
+  if (FREEROLL_PRIZES.length === 4) ok(`4 escalones: ${FREEROLL_PRIZES.join(', ')} USDT`);
+  else bad(`esperaba 4 escalones, hay ${FREEROLL_PRIZES.length}`);
+
+  if (FREEROLL_PRIZES.join(',') === '5,10,20,50') {
+    ok('los premios de freeroll son 5, 10, 20 y 50 USDT');
+  } else {
+    bad(`premios inesperados: ${FREEROLL_PRIZES.join(', ')}`);
+  }
+
+  if (HORAS_FREEROLL_UTC.join(',') === '0,6,12,18') {
+    ok('4 ediciones diarias a las 00, 06, 12 y 18 UTC');
+  } else {
+    bad(`horas inesperadas: ${HORAS_FREEROLL_UTC.join(', ')}`);
+  }
+
+  const premiosHora = HORAS_FREEROLL_UTC.map((hora) =>
+    premioDelSlot(new Date(Date.UTC(2026, 0, 1, hora, 0, 0))),
+  );
+  if (premiosHora.join(',') === '50000,20000,10000,5000') {
+    ok('cada franja reparte el premio acordado: 50, 20, 10 y 5 USDT');
+  } else {
+    bad(`premios por franja inesperados: ${premiosHora.join(', ')}`);
+  }
 
   // La suma del reparto tiene que ser 100: el freeroll no rakea, todo el bote
   // se reparte.
@@ -296,62 +340,58 @@ section('4. Freerolls: entrada gratis, premio en play');
 }
 
 // =========================================================================
-section('5. Centrolls: la via de ingresos del freeroll');
+section('5. Torneos: calendario y premios');
 
 {
-  // CoinPoker: "CoinPoker Centrolls: $0.01 Buy-Ins. These events require you
-  // to have a real money balance of at least $0.01."
-  if (CENTROLL.buyInUsdt > 0) {
-    ok(`centroll: buy-in de ${CENTROLL.buyInUsdt} USDT`);
-  } else {
-    bad('el centroll no puede ser gratis: es la via de ingresos');
+  const porId = new Map(TOURNAMENT_EVENTS.map((e) => [e.id, e]));
+  const esperados = [
+    ['daily-main', 1, 500],
+    ['high-300', 4, 300],
+    ['medium-200', 4, 200],
+    ['daily-micro', 8, 100],
+    ['micro-50', 6, 50],
+    ['micro-20', 6, 20],
+    ['micro-10', 6, 10],
+    ['micro-5', 6, 5],
+  ];
+
+  for (const [id, porDia, premio] of esperados) {
+    const evento = porId.get(id);
+    if (!evento) {
+      bad(`falta el evento ${id}`);
+      continue;
+    }
+    const ocurrencias = evento.schedule?.hoursUtc?.length ?? 1;
+    if (ocurrencias === porDia) {
+      ok(`${evento.label}: ${porDia} edicion(es) al día`);
+    } else {
+      bad(`${id}: ${ocurrencias} ediciones, esperaba ${porDia}`);
+    }
+    if (evento.guaranteedPrizeUsdt === premio) {
+      ok(`${evento.label}: ${premio} USDT garantizados`);
+    } else {
+      bad(`${id}: garantiza ${evento.guaranteedPrizeUsdt}, esperaba ${premio}`);
+    }
   }
 
-  // El buy-in tiene que ser alcanzable con el deposito minimo real en USDT.
-  const minDepositUsdt = DEPOSITS.usdt.minUsdt;
-  if (minDepositUsdt >= CENTROLL.buyInUsdt) {
-    ok(
-      `un deposito minimo de ${minDepositUsdt} USDT alcanza para ` +
-      `${Math.floor(minDepositUsdt / CENTROLL.buyInUsdt)} centrolls`,
-    );
+  const torneosPagados = TOURNAMENT_EVENTS.filter((e) => !e.spin);
+  if (torneosPagados.every((e) => e.buyInUsdt > 0)) {
+    ok('todos los torneos programados tienen buy-in en USDT');
   } else {
-    bad(
-      `el centroll cuesta ${CENTROLL.buyInUsdt} USDT y el deposito minimo son ` +
-      `${minDepositUsdt}: nadie podria jugar`,
-    );
+    bad('hay un torneo programado sin buy-in');
   }
 
-  // El premio de un centroll va a `play` (tickets), no a dinero. Es la regla de
-  // CoinPoker: "Do centrolls have cash prizes? No, all prizes in your centrolls
-  // are paid in the form of tickets".
-  if (CENTROLL.prizeToBalance === 'play') {
-    ok('el premio del centroll va a balance.play (equivalente a tickets)');
+  if (!TOURNAMENT_EVENTS.some((e) => e.id.includes('centroll'))) {
+    ok('el catálogo no vende centrolls');
   } else {
-    bad(`el premio va a "${CENTROLL.prizeToBalance}", deberia ser "play"`);
+    bad('el catálogo todavía incluye un centroll');
   }
 
-  // El porcentaje del bote tiene que ser mayor que cero para que haya premio.
-  if (CENTROLL.prizeMultiplier > 1) {
-    ok(
-      `el premio es ${CENTROLL.prizeMultiplier}% del bote ` +
-      '(30x el buy-in en un campo lleno de 100)',
-    );
+  const micros = TOURNAMENT_EVENTS.filter((e) => e.id.startsWith('micro-'));
+  if (micros.length === 4 && micros.reduce((n, e) => n + (e.schedule?.hoursUtc?.length ?? 1), 0) === 24) {
+    ok('24 microtorneos al día, uno por hora, con premios de 50/20/10/5');
   } else {
-    bad(`porcentaje ${CENTROLL.prizeMultiplier}%: no hay premio`);
-  }
-
-  // El campo del centroll tiene que ser mas pequeno que el del freeroll: es un
-  // bucle rapido.
-  if (CENTROLL.targetField < FREEROLL_TARGET_FIELD) {
-    ok(`campo del centroll (${CENTROLL.targetField}) < campo del freeroll (${FREEROLL_TARGET_FIELD})`);
-  } else {
-    bad('el centroll deberia resolverse antes que el freeroll');
-  }
-
-  if (CENTROLL.maxRebuys > 0 && CENTROLL.maxRebuys <= 10) {
-    ok(`${CENTROLL.maxRebuys} reentradas permitidas (como CoinPoker)`);
-  } else {
-    bad(`reentradas: ${CENTROLL.maxRebuys}, deberia estar entre 1 y 10`);
+    bad('los microtorneos deben cubrir 24 horas con los cuatro premios');
   }
 }
 

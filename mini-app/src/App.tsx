@@ -9,7 +9,6 @@ import { Referrals } from './pages/Referrals';
 import { Achievements } from './pages/Achievements';
 import { Tables } from './pages/Tables';
 import { Table } from './pages/Table';
-import { Centroll } from './pages/Centroll';
 import { Freeroll } from './pages/Freeroll';
 import { Profile } from './pages/Profile';
 import { SimulatePay } from './pages/SimulatePay';
@@ -262,7 +261,7 @@ export default function App() {
   if (page === 'source' && status !== 'ready') {
     return (
       <div className="min-h-screen bg-[#0f0f1a] text-white">
-        <main className="max-w-md mx-auto">
+        <main className="max-w-md lg:max-w-6xl mx-auto">
           <Source onBack={() => window.location.assign('/')} />
         </main>
       </div>
@@ -365,7 +364,10 @@ export default function App() {
             user={user}
             onBack={back}
             onBalanceChange={refreshUser}
-            onPlay={setActiveTable}
+            onPlay={(tableId) => {
+              setActiveTable(tableId);
+              navigate('game');
+            }}
             onOpenArena={() => navigate('vip')}
           />
         );
@@ -374,16 +376,10 @@ export default function App() {
           <Freeroll
             onBack={back}
             onBalanceChange={refreshUser}
-            onPlay={setActiveTable}
-          />
-        );
-      case 'centroll':
-        return (
-          <Centroll
-            user={user}
-            onBack={back}
-            onBalanceChange={refreshUser}
-            onPlay={setActiveTable}
+            onPlay={(tableId) => {
+              setActiveTable(tableId);
+              navigate('game');
+            }}
           />
         );
       case 'game':
@@ -425,6 +421,10 @@ export default function App() {
             user={user}
             onBack={back}
             onBalanceChange={refreshUser}
+            onPlay={(tableId) => {
+              setActiveTable(tableId);
+              navigate('game');
+            }}
             onGoTables={() => navigate('tables')}
             onGoMembership={() => navigate('membership')}
           />
@@ -453,7 +453,7 @@ export default function App() {
     <div className="min-h-screen bg-[#0f0f1a] text-white">
       {/* Barra superior con saldo sincronizado */}
       <header className="sticky top-0 z-40 bg-[#0f0f1a]/95 backdrop-blur border-b border-[#2a2a4a]">
-        <div className="max-w-md mx-auto px-4 h-14 flex items-center justify-between">
+        <div className="max-w-md lg:max-w-6xl mx-auto px-4 h-14 flex items-center justify-between">
           <button
             onClick={() => navigate('home')}
             className="flex items-center gap-2 font-bold"
@@ -506,7 +506,7 @@ export default function App() {
         }}
       />
 
-      <main className="max-w-md mx-auto">{renderPage()}</main>
+      <main className="max-w-md lg:max-w-6xl mx-auto">{renderPage()}</main>
     </div>
   );
 }

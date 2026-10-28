@@ -374,7 +374,7 @@ async function main() {
 
   // --- 4.7: el premio de un campo de CASH va a `balance.real` ------------
   // El dinero salio de los buy-ins de los demas: es del jugador y se puede
-  // retirar. Solo freerolls y centrolls pagan a `balance.play` (promocion).
+  // retirar. Solo los freerolls pagan a `balance.play` (promocion).
   const ganadorDoc = await User.findOne({ telegramId: IDS[0] });
   const enReal = ganadorDoc.balance.real;
   const enPlay = ganadorDoc.balance.play;

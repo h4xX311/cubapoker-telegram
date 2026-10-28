@@ -21,15 +21,13 @@ import { tableManager, shutdownEngine } from './game/table.manager';
 import { fieldManager } from './game/field.manager';
 import { freerollManager } from './game/freeroll.service';
 import { tournamentManager } from './game/tournament.service';
-import { centrollService } from './game/centroll.service';
 import { rakebackService } from './services/rakeback.service';
 import { SUIT_SYMBOL } from './game/card.utils';
 import { seatingService } from './game/seating.service';
 import { logger } from './utils/logger';
 import { formatUnits } from './config/units';
-import { TABLE_TIER_LIST } from './config/product';
+import { TABLE_TIER_LIST, FREEROLL_PRIZES } from './config/product';
 import { monetizationConfig } from './config/monetization';
-import { premioHorarioUnits } from './config/freeroll';
 
 // ------------------------------------------------------------------
 // QUE HACE ESTA LINEA, Y POR QUE IMPORTA MAS DE LO QUE PARECE
@@ -98,7 +96,7 @@ if (SIN_TOKEN) {
   }
 
   logger.warn(
-    'SIN TELEGRAM_BOT_TOKEN: el juego, la API y los bots funcionan, pero el bot no ' +
+    'SIN TELEGRAM_BOT_TOKEN: el juego y la API funcionan, pero el bot no ' +
       'habla con Telegram (nada de comandos, nada de teclado de respuesta). ' +
       'Para probar eso hace falta un token de @BotFather en el .env.',
   );
@@ -117,6 +115,7 @@ if (!SIN_TOKEN) {
     .setMyCommands([
       { command: 'play', description: 'Abrir el lobby' },
       { command: 'tournaments', description: 'Torneos y Spin & Go' },
+      { command: 'freeroll', description: 'Freerolls multimesa' },
       { command: 'membresia', description: 'Membresía QVA-Bet Club' },
       { command: 'balance', description: 'Ver saldo' },
       { command: 'deposit', description: 'Depositar USDT' },
@@ -412,7 +411,8 @@ Poker online en USDT. Sin bancos y sin intermediarios.
 
 🎮 *Todo lo que puedes hacer:*
 /play - Abrir el lobby
-/tournaments - Torneos y freerolls (uno cada hora)
+/tournaments - Torneos y Spin & Go
+/freeroll - Freerolls multimesa
 /membresia - Membresía QVA-Bet Club
 /referrals - Invita y gana
 /achievements - Logros
@@ -508,7 +508,8 @@ bot.onText(/\/freeroll/, async (msg) => {
   bot.sendMessage(
     chatId,
     '🎁 *Freerolls gratuitos*\n\n' +
-      `Premio de ${formatUnits(premioHorarioUnits())} USDT sin buy-in, cada hora.\n\n` +
+      `Cuatro ediciones al día, cada seis horas, con premios de ` +
+      `${[...FREEROLL_PRIZES].reverse().join(', ')} USDT.\n\n` +
       '⚠️ *Importante:* el saldo que ganas aqui es solo para jugar dentro de ' +
       'CubaPoker en cualquier mesa cash. No se puede retirar.',
     { parse_mode: 'Markdown', reply_markup: keyboard },
@@ -852,14 +853,6 @@ const start = async () => {
     void tournamentManager.procesar();
   }, 30_000);
   tournamentTimer.unref();
-
-  // Red de seguridad del centroll: si un jugador quedo sentado y el proceso se
-  // reinicio antes de arrancar, esta vuelta completa la mesa con bots y la
-  // arranca. Es idempotente: con el campo ya en running no hace nada.
-  const centrollTimer = setInterval(() => {
-    void centrollService.ensureRunning();
-  }, 5_000);
-  centrollTimer.unref();
 
   // Rakeback del QVA-Bet Club y profit share de VIP Arena. Se paga la semana
   // cerrada y los índices únicos de `RakebackPayout` y `ArenaPayout` impiden

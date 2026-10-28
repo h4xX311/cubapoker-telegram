@@ -259,6 +259,68 @@ async function main() {
         ok('rechaza el banco de tiempo fuera de turno');
       }
     }
+
+    // ------------------------------------------------------------------
+    // El lobby pide una mesa por nivel Y formato. Sin separación, la entrada
+    // rápida podía sentar a alguien en una Heads-Up cuando pedía 6-max (o al
+    // revés) porque las dos comparten tier. Aquí se comprueba de punta a punta
+    // que el formato viaja a la mesa y que el multimesa conserva las dos.
+    // ------------------------------------------------------------------
+    section('4. Lobby cash: 6-max y Heads-Up son mesas distintas');
+    {
+      const telegramId = 900100004;
+      await crearUsuario(telegramId, 10_000);
+
+      const seis = await seatingService.sitDown({
+        telegramId,
+        tierId: 'micro',
+        formatId: '6max',
+      });
+      const headsUp = await seatingService.sitDown({
+        telegramId,
+        tierId: 'micro',
+        formatId: 'hu',
+      });
+
+      const mesaSeis = await Table.findOne({ tableId: seis.tableId });
+      const mesaHu = await Table.findOne({ tableId: headsUp.tableId });
+
+      if (mesaSeis?.maxSeats === 6 && mesaSeis?.formatId === '6max') {
+        ok('la entrada 6-max abre una mesa de seis asientos');
+      } else {
+        bad(
+          'la mesa 6-max no tiene el formato esperado',
+          `formatId=${mesaSeis?.formatId}, maxSeats=${mesaSeis?.maxSeats}`,
+        );
+      }
+
+      if (mesaHu?.maxSeats === 2 && mesaHu?.formatId === 'hu') {
+        ok('la entrada Heads-Up abre una mesa de dos asientos');
+      } else {
+        bad(
+          'la mesa Heads-Up no tiene el formato esperado',
+          `formatId=${mesaHu?.formatId}, maxSeats=${mesaHu?.maxSeats}`,
+        );
+      }
+
+      if (seis.tableId !== headsUp.tableId) {
+        ok('pedir otro formato no reutiliza la mesa anterior');
+      } else {
+        bad('6-max y Heads-Up compartieron la misma mesa');
+      }
+
+      const { tableManager } = require('../dist/game/table.manager');
+      const mias = await tableManager.listMyTables(telegramId);
+      const formatos = new Set(mias.map((m) => m.formatId));
+      if (mias.length === 2 && formatos.has('6max') && formatos.has('hu')) {
+        ok('el multimesa conserva las dos mesas y su formato');
+      } else {
+        bad(
+          'el multimesa no conserva las dos mesas',
+          JSON.stringify(mias.map((m) => ({ tableId: m.tableId, formatId: m.formatId }))),
+        );
+      }
+    }
   } finally {
     BOT_CONFIG.minThinkMs = min;
     BOT_CONFIG.maxThinkMs = max;

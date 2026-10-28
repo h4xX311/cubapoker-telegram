@@ -14,14 +14,16 @@ interface Props {
  * TORNEOS Y SPIN & GO
  * ===================
  *
- * El buy-in y el premio van emparejados. Un torneo de 1 USDT garantiza 100,
- * uno de 5 garantiza 500 y el major semanal de 25 garantiza 2.500. Si el campo
- * no se llena, la casa completa la garantia; el jugador no tiene que esperar a
- * que se llene para saber cuanto hay en juego.
+ * El buy-in y el premio van emparejados. El calendario profesional tiene un
+ * Main diario de 500 USDT, cuatro High de 300, cuatro Medios de 200, ocho Low
+ * de 100 y microtorneos cada hora con garantizados de 50, 20, 10 y 5 USDT.
+ * Si el campo no se llena, la casa completa la garantía; el jugador no tiene
+ * que esperar a que se llene para saber cuánto hay en juego.
  *
- * Los torneos pagados no se rellenan con bots. Arrancan con dos humanos o se
- * cancelan con devolucion del buy-in. Un Spin & Go es un 3-max que arranca al
- * llenarse y paga solo al ganador.
+ * Los torneos programados arrancan con dos jugadores o se cancelan con
+ * devolución del buy-in. Un Spin & Go es un 3-max que arranca al llenarse; si
+ * no se llena, se completa automáticamente a los 6 minutos en algunos campos y
+ * se reembolsa como máximo a los 9.
  */
 export function Tournaments({ onBack, onPlay }: Props) {
   const [torneos, setTorneos] = useState<TournamentLobbyEntry[]>([]);
@@ -30,6 +32,7 @@ export function Tournaments({ onBack, onPlay }: Props) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [now, setNow] = useState(Date.now());
+  const [filtro, setFiltro] = useState('todos');
 
   const cargar = async () => {
     try {
@@ -82,6 +85,20 @@ export function Tournaments({ onBack, onPlay }: Props) {
     }
   };
 
+  const categoria = (entry: TournamentLobbyEntry): string => {
+    if (entry.id === 'daily-main') return 'main';
+    if (entry.id === 'high-300') return 'high';
+    if (entry.id === 'medium-200') return 'medio';
+    if (entry.id === 'daily-micro') return 'low';
+    if (entry.id.startsWith('micro-')) return 'micro';
+    return 'especial';
+  };
+
+  const visibles =
+    filtro === 'todos'
+      ? torneos
+      : torneos.filter((entry) => categoria(entry) === filtro);
+
   const Tarjeta = ({ entry }: { entry: TournamentLobbyEntry }) => {
     const inicio = entry.startsAt ? segundosHasta(entry.startsAt, now) : 0;
     const registroAbierto = entry.status === 'running'
@@ -92,9 +109,15 @@ export function Tournaments({ onBack, onPlay }: Props) {
       entry.premioGarantizadoUsdt,
       entry.premioActualUsdt,
     );
+    const esperandoSpin =
+      entry.kind === 'spingo' && entry.status === 'filling';
+    const reembolsoEn =
+      esperandoSpin && entry.spinRefundAt
+        ? Math.max(0, segundosHasta(entry.spinRefundAt, now))
+        : 0;
 
     return (
-      <div className="card p-4 mb-3" style={{ background: '#16213e' }}>
+      <div className="card p-4" style={{ background: '#16213e' }}>
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
@@ -151,7 +174,13 @@ export function Tournaments({ onBack, onPlay }: Props) {
           <span>{entry.payout.map((p) => `${p}%`).join(' / ')}</span>
         </div>
 
-
+        {esperandoSpin && (
+          <p className="text-[10px] text-[#ffd700] mt-2 leading-relaxed">
+            {entry.jugadores > 0
+              ? `Esperando jugadores (${entry.jugadores}/3). Si no se completa, la entrada se devuelve en ${fmtCuenta(reembolsoEn)}.`
+              : 'Mesa abierta: arranca en cuanto se ocupen las tres plazas.'}
+          </p>
+        )}
 
         <div className="flex gap-2 mt-3">
           {entry.inscrito ? (
@@ -199,15 +228,15 @@ export function Tournaments({ onBack, onPlay }: Props) {
   };
 
   return (
-    <div className="p-4 pb-24 animate-fadeIn">
+    <div className="p-4 pb-24 animate-fadeIn lg:px-0">
       <PageHeader title="Torneos" onBack={onBack} />
 
       <div className="rounded-xl p-3 mb-5"
         style={{ background: 'rgba(0,210,106,0.08)', border: '1px solid rgba(0,210,106,0.25)' }}>
         <p className="text-[11px] text-[#a0a0b0] leading-relaxed">
-          El buy-in depende del premio: cuanto mayor es la garantia, mayor es la entrada.
-          Los premios se pagan en USDT retirable. El stack de la mesa son puntos del
-          torneo, no dinero de tu monedero.
+          El buy-in depende del premio: cuanto mayor es la garantía, mayor es la
+          entrada. Los premios se pagan en USDT retirable. El stack de la mesa
+          son puntos del torneo, no dinero de tu monedero.
         </p>
       </div>
 
@@ -218,22 +247,50 @@ export function Tournaments({ onBack, onPlay }: Props) {
         </div>
       )}
 
-      <SectionLabel>Spin & Go · 3-max</SectionLabel>
-      {spin.map((entry) => <Tarjeta key={entry.id} entry={entry} />)}
+      <div className="flex gap-1.5 overflow-x-auto pb-2 mb-3">
+        {[
+          ['todos', 'Todos'],
+          ['main', 'Main'],
+          ['high', 'High'],
+          ['medio', 'Medio'],
+          ['low', 'Low'],
+          ['micro', 'Micro'],
+          ['especial', 'Especial'],
+        ].map(([id, label]) => (
+          <button
+            key={id}
+            onClick={() => setFiltro(id)}
+            className="shrink-0 px-3 py-1.5 rounded-full text-[11px] font-semibold transition-colors"
+            style={
+              filtro === id
+                ? { background: '#00d26a', color: '#07120c' }
+                : { background: '#151525', color: '#a0a0b0' }
+            }
+          >
+            {label}
+          </button>
+        ))}
+      </div>
 
-      <div className="h-2" />
+      <SectionLabel>Spin & Go · 3-max</SectionLabel>
+      <div className="grid gap-3 mb-6 lg:grid-cols-2 xl:grid-cols-3">
+        {spin.map((entry) => <Tarjeta key={entry.id} entry={entry} />)}
+      </div>
+
       <SectionLabel>Torneos programados</SectionLabel>
       {cargando ? (
         <p className="text-[#a0a0b0] text-sm">Cargando torneos…</p>
-      ) : torneos.length === 0 ? (
-        <p className="text-[#a0a0b0] text-sm">No hay torneos programados ahora mismo.</p>
+      ) : visibles.length === 0 ? (
+        <p className="text-[#a0a0b0] text-sm">No hay torneos de esta categoría ahora mismo.</p>
       ) : (
-        torneos.map((entry) => <Tarjeta key={entry.id} entry={entry} />)
+        <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
+          {visibles.map((entry) => <Tarjeta key={entry.id} entry={entry} />)}
+        </div>
       )}
 
       <p className="text-[10px] text-[#a0a0b0] mt-6 leading-relaxed">
-        Los torneos pagados no se rellenan con bots: arrancan con dos jugadores como minimo.
-        Si no se llenan, se cancela y se devuelve el buy-in. La garantia se completa con
+        Los torneos programados arrancan con dos jugadores como mínimo. Si no se
+        llenan, se cancelan y se devuelve el buy-in. La garantía se completa con
         overlay de la casa; no se paga con el saldo de otros jugadores.
       </p>
     </div>

@@ -32,10 +32,27 @@
  */
 
 import { FREEROLL_PAYOUT, FREEROLL_PRIZES, FREEROLL_TARGET_FIELD } from './product';
-import { usdtToUnits } from './units';
+import { unitsToUsdt, usdtToUnits } from './units';
 
-/** Cada cuantas horas hay un freeroll. */
-export const HORAS_ENTRE_FREEROLLS = 1;
+/**
+ * Horas UTC de los freerolls diarios.
+ *
+ * Cuatro ediciones al día, cada seis horas. La hora con más tráfico (00 UTC,
+ * 20:00 en Cuba) lleva el premio mayor. Así hay un freeroll asequible en cada
+ * franja y el jugador no depende de una única hora.
+ */
+export const HORAS_FREEROLL_UTC = [0, 6, 12, 18] as const;
+
+/** Premio de cada franja, en USDT. */
+export const PREMIO_FREEROLL_POR_HORA: Record<number, number> = {
+  0: 50,
+  6: 20,
+  12: 10,
+  18: 5,
+};
+
+/** Separación entre ediciones. Se conserva para textos y pruebas. */
+export const HORAS_ENTRE_FREEROLLS = 6;
 
 /**
  * Minutos de registro tardio DESPUES de la hora de inicio.
@@ -49,8 +66,9 @@ export const MINUTOS_REGISTRO_TARDIO = 12;
 /**
  * Jugadores minimos para que el torneo no se cancele.
  *
- * Si hay al menos uno, se rellena con bots hasta dos y se juega. La decision fue explicita:
- * es preferible un torneo con un humano y un bot que un torneo cancelado.
+ * Si hay al menos uno, se completa la mesa y se juega. La decision fue explicita:
+ * es preferible un torneo con un jugador y asientos automaticos que un torneo
+ * cancelado.
  */
 export const MIN_JUGADORES_PARA_ARRANCAR = 2;
 
@@ -62,20 +80,24 @@ export const CIEGA_PEQUENA_FREEROLL = 5;
 export const CIEGA_GRANDE_FREEROLL = 10;
 
 /**
- * Premio del freeroll horario, en unidades internas.
+ * Premio del siguiente slot, en unidades internas.
  *
- * Es dinero de la CASA, no una suma de entradas. Se puede subir con
- * `FREEROLL_HOURLY_PRIZE_USDT` sin tocar codigo.
- *
- * Por defecto se usa el escalon mas bajo de `FREEROLL_PRIZES` (1 USDT). Un freeroll cada
- * hora con un premio mayor seria un gasto de adquisicion que hay que decidir con numeros de
- * usuarios, no antes de tenerlos.
+ * Es dinero de la CASA, no una suma de entradas. El valor se decide por la
+ * hora UTC del slot y se puede fijar para todos con
+ * `FREEROLL_HOURLY_PRIZE_USDT` (solo operaciones y pruebas).
  */
-export function premioHorarioUnits(): number {
+export function premioDelSlot(inicio: Date): number {
   const crudo = Number(process.env.FREEROLL_HOURLY_PRIZE_USDT ?? '');
-  const usdt =
-    Number.isFinite(crudo) && crudo > 0 ? crudo : FREEROLL_PRIZES[0];
+  if (Number.isFinite(crudo) && crudo > 0) return usdtToUnits(crudo);
+
+  const hora = inicio.getUTCHours();
+  const usdt = PREMIO_FREEROLL_POR_HORA[hora] ?? FREEROLL_PRIZES[0];
   return usdtToUnits(usdt);
+}
+
+/** Premio del proximo freeroll, en unidades internas. */
+export function premioHorarioUnits(ahora: Date = new Date()): number {
+  return premioDelSlot(proximoInicio(ahora));
 }
 
 /** Cuantas plazas paga el freeroll. Sale del reparto ya decidido (50/30/20). */
@@ -85,20 +107,35 @@ export const PLAZAS_PAGADAS_FREEROLL = FREEROLL_PAYOUT.length;
 export const TAMANO_FREEROLL = FREEROLL_TARGET_FIELD;
 
 /**
- * Proximo inicio en punto.
+ * Siguiente cuarto de dia con freeroll.
  *
- * Si ahora son las 19:59:30, devuelve las 20:00. Si son las 20:00:00, devuelve las 21:00:
- * el de las 20:00 ya deberia existir y estar arrancando, no abrirse.
+ * Si ahora son las 05:59:30, devuelve las 06:00. Si son las 06:00:00, devuelve
+ * las 12:00: el de las 06:00 ya deberia existir y estar arrancando.
  */
 export function proximoInicio(ahora: Date = new Date()): Date {
-  const inicio = new Date(ahora);
-  inicio.setUTCMinutes(0, 0, 0);
+  const base = new Date(ahora);
+  base.setUTCSeconds(0, 0);
 
-  if (inicio.getTime() <= ahora.getTime()) {
-    inicio.setUTCHours(inicio.getUTCHours() + HORAS_ENTRE_FREEROLLS);
+  // Se prueban hoy y mañana para cubrir el salto de medianoche.
+  for (let dia = 0; dia <= 1; dia++) {
+    for (const hora of HORAS_FREEROLL_UTC) {
+      const candidato = new Date(
+        Date.UTC(
+          base.getUTCFullYear(),
+          base.getUTCMonth(),
+          base.getUTCDate() + dia,
+          hora,
+          0,
+          0,
+          0,
+        ),
+      );
+      if (candidato.getTime() > ahora.getTime()) return candidato;
+    }
   }
 
-  return inicio;
+  // Inalcanzable con una lista no vacia, pero deja un valor seguro.
+  return new Date(ahora.getTime() + HORAS_ENTRE_FREEROLLS * 60 * 60 * 1000);
 }
 
 /**
@@ -122,6 +159,10 @@ export interface SlotFreeroll {
   clave: string;
   inicio: Date;
   finRegistro: Date;
+  /** Premio del slot, en unidades internas. */
+  premioUnits: number;
+  /** Premio del slot, en USDT, listo para la interfaz. */
+  premioUsdt: number;
 }
 
 /**
@@ -131,21 +172,22 @@ export interface SlotFreeroll {
  * tiene campo creado todavia, la UI lo muestra igual como "proximo".
  */
 export function slotsProximos(
-  cantidad = 6,
+  cantidad = 8,
   ahora: Date = new Date(),
 ): SlotFreeroll[] {
   const slots: SlotFreeroll[] = [];
   let inicio = proximoInicio(ahora);
 
   for (let i = 0; i < cantidad; i++) {
+    const premioUnits = premioDelSlot(inicio);
     slots.push({
       clave: claveSlot(inicio),
       inicio: new Date(inicio),
       finRegistro: finRegistroTardio(inicio),
+      premioUnits,
+      premioUsdt: unitsToUsdt(premioUnits),
     });
-    inicio = new Date(
-      inicio.getTime() + HORAS_ENTRE_FREEROLLS * 60 * 60 * 1000,
-    );
+    inicio = proximoInicio(new Date(inicio.getTime() + 1000));
   }
 
   return slots;

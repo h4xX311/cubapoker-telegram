@@ -1,8 +1,8 @@
 /**
  * Niveles de ciegas de los torneos.
  *
- * Una mesa cash mantiene sus ciegas fijas. Un campo (torneo, freeroll,
- * centroll) tiene que subirlas con el reloj o la partida puede durar dias: con
+ * Una mesa cash mantiene sus ciegas fijas. Un campo (torneo o freeroll) tiene
+ * que subirlas con el reloj o la partida puede durar dias: con
  * 100 ciegas grandes y sin subidas, un campo de 300 jugadores no termina.
  *
  * La escalera es deliberadamente simple y entera. Las ciegas del motor son

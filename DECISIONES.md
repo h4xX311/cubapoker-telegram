@@ -117,108 +117,66 @@ devuelve con las fichas? No se ha tocado.
 
 ---
 
-## 4 · El freeroll horario
+## 4 · Freerolls
 
-**Decisión:** un freeroll cada hora, multi-mesa (hasta 300 jugadores en mesas de 7), gratis,
-con registro tardío de 12 minutos. El premio va entero a **saldo de promoción**.
+**Decisión:** cuatro freerolls diarios, multi-mesa y gratuitos, con premios de
+**5, 10, 20 y 50 USDT** según la franja UTC. El premio se reparte 50/30/20 entre
+las tres primeras posiciones y va entero a **saldo de promoción**.
 
 ### Reglas
 
 | | |
 |---|---|
-| Horario | Un slot por hora en punto (UTC). `claveSlot` = `YYYY-MM-DDTHH` |
+| Horario | 00:00, 06:00, 12:00 y 18:00 UTC |
 | Entrada | Gratis. No cobra buy-in ni rake |
 | Fichas | 1.000, ciegas 5/10 |
-| Mínimo para arrancar | 2. Con 1 humano se rellena con bots hasta 2 |
+| Aforo | Hasta 900 jugadores en mesas multi-mesa |
+| Mínimo para arrancar | 2. Con un humano se rellena la mesa hasta 2 |
 | Sin nadie | Se cancela: no se paga un torneo de bots con dinero de la casa |
-| Registro tardío | Hasta 12 minutos después del inicio, con las mismas 1.000 fichas |
-| Premio | `FREEROLL_HOURLY_PRIZE_USDT` (1 USDT por defecto), reparto 50/30/20 |
-| Destino | `balance.play` (promoción). No retirable directamente |
+| Registro tardío | Hasta 12 minutos después del inicio |
+| Premio | `premioDelSlot()`: 5, 10, 20 o 50 USDT |
+| Reparto | 50 % / 30 % / 20 % (`FREEROLL_PAYOUT`) |
+| Destino | `balance.play` (promoción), no retirable directamente |
 
 El campo lleva `tierId = freeroll-<clave>`. El índice único parcial
-`un_campo_vivo_por_nivel` impide que dos peticiones simultáneas abran dos campos del mismo
-slot.
+`un_campo_vivo_por_nivel` impide que dos peticiones simultáneas abran dos campos
+del mismo slot.
 
 ### Por qué el premio va a promoción
 
-Es dinero de la casa, no de otros jugadores. Si fuera retirable, cada hora habría una
-extracción directa de 1 USDT sin que nadie hubiera puesto dinero. En promoción se juega y se
-desbloquea con el mecanismo que ya existe (1 de cada 10). Queda registrado en
-`stats.totalFreerollWon` para que el jugador lo vea.
+Es dinero de la casa, no de otros jugadores. Si fuera retirable, cada franja
+sería una extracción directa sin que nadie hubiera puesto dinero. En promoción
+se juega y se desbloquea con el mecanismo existente (1 de cada 10). Queda
+registrado en `stats.totalFreerollWon` para que el jugador lo vea.
 
 ### Por qué se cancela cuando no hay nadie
 
-Rellenar con bots un torneo vacío y pagar el premio al bot ganador es pagar por nada. El
-relleno con bots existe para que **un humano** no se quede esperando solo: con cero humanos
-no hay a quién entretener.
+Rellenar con bots un torneo vacío y pagar el premio al ganador es pagar por
+nada. El relleno con bots existe para que **un humano** no se quede esperando
+solo: con cero humanos no hay a quién entretener.
 
-### Lo que falta decidir
+### Presupuesto
 
-**El premio de 1 USDT por hora.** Son 24 USDT al día de la casa si se juegan todos los slots.
-Es una decisión de producto y de presupuesto, no técnica: se cambia con
-`FREEROLL_HOURLY_PRIZE_USDT` sin tocar código.
+Las cuatro franjas suman **85 USDT diarios** en premios. Es un gasto de la casa
+y se controla desde `FREEROLL_PRIZES`; si cambia el presupuesto, cambia el
+catálogo, no la lógica de pago.
 
 ---
 
-## 5 · Los centrolls
+## 5 · Centrolls (retirados)
 
-**Decisión:** un centroll de 0,01 USDT que consume saldo real y paga el premio entero a
-**saldo de promoción**. Es la vía de ingresos que hace sostenible el freeroll: el jugador
-compra con dinero real lo que en el freeroll ganaba gratis.
+**Decisión:** el producto ya no ofrece centrolls. El catálogo visible solo abre
+**torneos y freerolls**, y no queda ninguna ruta pública para crear un campo de
+centroll, cobrar su buy-in ni liquidarlo.
 
-### Reglas
+Los centrolls fueron útiles para validar el bucle de entrada y el pago a saldo
+de promoción, pero competían con los freerolls, añadían una tercera economía y
+hacían más difícil explicar el producto. Su código, sus pruebas y sus comandos
+se retiraron en la iteración del 28 de octubre de 2026.
 
-| | |
-|---|---|
-| Entrada | 0,01 USDT de `balance.real` (10 unidades internas). Solo saldo retirable |
-| Fichas | 1.000 por jugador, ciegas 5/10 (100 ciegas grandes) |
-| Campo objetivo | 100 jugadores; techo duro 300 |
-| Reentradas | Hasta 5 por jugador, cada una a 0,01 USDT |
-| Premio | 30 % del bote, reparto 50/30/20 |
-| Destino | `balance.play` (promoción). No retirable directamente |
-| Rake aparte | No: el margen de la casa es el 70 % del bote que no se reparte |
-
-### Por qué 0,01 USDT
-
-El buy-in de CoinPoker es de un centavo. Con `1 USDT = 1000` unidades internas, 0,01 USDT
-son **10 unidades**, un entero: el motor no redondea a cero. El valor anterior de 1 USDT
-venía de una conversión a CUP mal planteada y dejaba el centroll 100 veces más caro que el
-modelo de referencia.
-
-### Por qué las fichas no salen del buy-in
-
-El buy-in es dinero; las fichas son de torneo. Si el stack saliera del buy-in (10 unidades),
-las ciegas derivadas del stack serían 1/2 y cada jugador entraría con **5 ciegas grandes**:
-todo el mundo all-in preflop. Con 1.000 fichas fijas y ciegas 5/10 el centroll es un torneo
-de 100 BB. Las fichas no tocan el bote: el premio se calcula sobre `buyInsCollected`.
-
-### Por qué el premio se muestra como porcentaje del bote
-
-`prizeMultiplier = 30` es un **porcentaje**, no un multiplicador del buy-in: en un campo
-lleno de 100 jugadores coincide con 30 veces la entrada, pero con el campo a medio llenar el
-multiplicador real es menor. La UI muestra "30 % del bote" para que el número sea cierto en
-cualquier momento del registro.
-
-### La liquidación también es del centroll
-
-`fieldManager.tick()` liquida todos los campos, y `settleField` solo distinguía `freeroll`
-de todo lo demás. Un centroll caía en la rama de cash: rake del 5 %, reparto 45/25/15/9/6 y
-pago a `balance.real`. Medido con `test-centroll-liquidacion.js`: un bote de 100 unidades
-repartía 95 retirables y la casa se quedaba 5, cuando la regla es 30 a promoción y 70 de
-margen. Ahora `settleField` tiene una rama `centroll` y el premio sale de la misma función
-que muestra `centrollService.status()` (`centrollPrizeUnits`), para que la UI y el pago no
-puedan divergir.
-
-### Lo que falta decidir
-
-**El arranque (resuelto el 24 de octubre).** El centroll ya no espera a 100 humanos. Cada
-mesa se rellena con bots hasta `minPlayersPerTable: 2` y el campo arranca en cuanto hay un
-humano. Los bots no pagan buy-in; si ganan, su parte del premio va a la casa, no a un jugador
-que no existe. Los humanos que cobran reciben `balance.play` con el reparto 50/30/20.
-
-Esto es lo mismo que ya hacía el freeroll: el relleno existe para que un humano no se quede
-mirando una mesa vacía. La diferencia es que en el centroll el buy-in es dinero real y el
-margen de la casa sale del 70 % del bote.
+Los torneos usan buy-in en USDT y premios garantizados; los freerolls son
+gratuitos y reparten 5, 10, 20 o 50 USDT según la franja UTC. El cash y la VIP
+Arena conservan su propia economía y su propio rake.
 
 ---
 
@@ -252,7 +210,7 @@ mesas sin rake: un bote de 20.000 USDT pagaba 0,10 USDT. Los topes ahora son:
 | Alto | 0,50 / 1,00 | 1,25 | 3,00 | 5,00 |
 | VIP Arena | 50 / 100 | 50 | 60 | 60 |
 
-Las mesas de un campo (torneo, freeroll, centroll) no son cash ring y no usan esta regla: su
+Las mesas de un campo (torneo o freeroll) no son cash ring y no usan esta regla: su
 economía ya está definida por el campo.
 
 ### 6.3 · Retiro: 5 USDT fijos
@@ -281,8 +239,7 @@ generó:
 
 Reglas de dinero:
 
-- Solo cuenta el rake de **mesas cash ring**. Torneos, freerolls y centrolls no generan
-  rakeback.
+- Solo cuenta el rake de **mesas cash ring**. Torneos y freerolls no generan rakeback.
 - El rake de cada mano se atribuye a los humanos en proporción a lo que aportaron al bote
   (`seat.totalBet`). Los bots no generan rakeback.
 - Se paga la **semana anterior**, los lunes UTC, a `balance.real` (retirable).
@@ -411,9 +368,9 @@ Los timers de bots releen la mesa dentro del cerrojo y comprueban que la mano
 no haya cambiado. Sin eso, un `setTimeout` guardaba una copia vieja y producía
 `VersionError` justo cuando el jugador se levantaba o el tick avanzaba.
 
-### 7.4 · Freerolls y centrolls también se procesan
+### 7.4 · Freerolls y torneos también se procesan
 
-`tableManager.tick()` consulta `cash`, `freeroll` y `centroll`. Antes solo
+`tableManager.tick()` consulta `cash`, `freeroll` y `tournament`. Antes solo
 buscaba `cash`, así que un freeroll se llenaba de jugadores y se quedaba en
 `idle` para siempre, sin repartir una sola carta. El relleno automático de bots
 sigue limitado a ring cash; en los campos los pone el gestor del campo al

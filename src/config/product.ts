@@ -8,7 +8,7 @@
 
 import { usdtToUnits, blindsFor } from './units';
 
-export type TableKind = 'cash' | 'freeroll' | 'centroll';
+export type TableKind = 'cash' | 'freeroll';
 
 /**
  * Los cuatro niveles de campo.
@@ -21,7 +21,15 @@ export type TableKind = 'cash' | 'freeroll' | 'centroll';
  * de los campos que ya esten guardados. Si hay datos en produccion hay que
  * hacer una migracion de ids, no solo cambiar la constante.
  */
-export type TableTierId = 't1' | 't5' | 't25' | 't100' | 'arena';
+export type TableTierId =
+  | 't1'
+  | 't5'
+  | 't25'
+  | 't100'
+  | 'arena200'
+  | 'arena1000'
+  | 'arena5000'
+  | 'arena';
 
 /**
  * Asientos por mesa fisica.
@@ -201,8 +209,8 @@ export const PAID_POSITIONS = FIELD_PAYOUT.length;
  *   alto      100 USDT       0,50 / 1,00       100 BB
  *   VIP Arena 10.000 USDT   50 / 100          100 BB
  *
- * `fieldSize` se conserva para los campos multi-mesa de torneo (freeroll,
- * centroll), que no son cash. El lobby de cash ya no lo muestra.
+ * `fieldSize` se conserva para los campos multi-mesa de torneo y freeroll,
+ * que no son cash. El lobby de cash ya no lo muestra.
  *
  * Los 100 USDT del nivel alto son un stack de poker serio. El rake de una mesa
  * de ese nivel es lo que paga la infraestructura.
@@ -276,9 +284,9 @@ export interface TableTier {
  * compra. Los jugadores reciben un profit share semanal por el rake que
  * generan. Se puede sumar al QVA-Bet Club: no son el mismo producto.
  *
- * Ciegas 50/100 USDT y buy-in de 10.000 USDT = 100 BB. Es el escalón de
- * entrada de la sala real. Para un jugador nuevo es inalcanzable, y está bien:
- * la sala se muestra como objetivo, no se le vende una membresía falsa.
+ * VIP Arena tiene VARIOS NIVELES. No es una sola mesa inalcanzable ni una
+ * membresía: es una sala de cash independiente del lobby normal, con sus
+ * propias mesas y buy-ins. El jugador puede entrar directamente con el buy-in.
  */
 export const VIP_ARENA = {
   id: 'arena' as const,
@@ -287,9 +295,25 @@ export const VIP_ARENA = {
   blinds: { small: 50, big: 100 },
   profitSharePercent: 15,
   description:
-    'Mesa premium de high stakes. Los jugadores reciben un 15 % del rake ' +
-    'que generan, pagado cada lunes. No es una membresía: se entra con el buy-in.',
+    'Sala de cash premium con mesas propias. Los jugadores reciben un 15 % del ' +
+    'rake que generan, pagado cada lunes. No es una membresía: se entra con el buy-in.',
 } as const;
+
+/**
+ * Niveles de la sala Arena, de menor a mayor buy-in.
+ *
+ * `arena` se conserva como id del nivel alto original para no romper mesas
+ * guardadas en producción. El jugador ve la sala completa, pero cada mesa tiene
+ * su propio buy-in y ciegas: no se mezclan niveles en una misma mesa.
+ */
+export const VIP_ARENA_TIER_IDS = [
+  'arena200',
+  'arena1000',
+  'arena5000',
+  'arena',
+] as const;
+
+export type VipArenaTierId = (typeof VIP_ARENA_TIER_IDS)[number];
 
 // ==========================================================================
 // TORNEOS PROGRAMADOS Y SPIN & GO
@@ -308,7 +332,13 @@ export const TOURNAMENT_PAYOUT = [45, 25, 15, 9, 6] as const;
 export interface TournamentSchedule {
   /** null = se juega en cualquier día; el torneo arranca al llenarse. */
   weekdayUtc: number | null;
+  /** Hora base. Se conserva para los eventos semanales y como fallback. */
   hourUtc: number;
+  /**
+   * Varias horas del día para eventos recurrentes. Si existe, sustituye a
+   * `hourUtc` y el evento se repite a cada hora de la lista.
+   */
+  hoursUtc?: number[];
   minuteUtc: number;
 }
 
@@ -377,27 +407,131 @@ const torneo = (
  * Los horarios son UTC. La interfaz los convierte a la hora del jugador.
  */
 export const TOURNAMENT_EVENTS: TournamentEvent[] = [
-  torneo(
-    'daily-micro',
-    'Micro Diario',
-    'Torneo diario de buy-in bajo. 120 plazas, ciegas de 8 minutos y premio garantizado.',
-    1,
-    100,
-    120,
-    3_000,
-    { small: 25, big: 50 },
-    { weekdayUtc: null, hourUtc: 18, minuteUtc: 0 },
-  ),
+  // ------------------------------------------------------------------
+  // Calendario profesional en UTC
+  //
+  //   Main 500        1 al día
+  //   High 300        4 al día, cada 6 horas
+  //   Medio 200       4 al día, cada 6 horas
+  //   Low 100         8 al día, cada 3 horas
+  //   Micro 50/20/10/5 24 al día, una cada hora
+  //
+  // Los micros rotan el garantizado cada hora para que el lobby no repita
+  // siempre el mismo premio. Cada evento conserva su propio buy-in, aforo y
+  // estructura; nunca se mezclan niveles en una mesa.
+  // ------------------------------------------------------------------
   torneo(
     'daily-main',
-    'Main Diario',
-    'El torneo de la noche. 150 plazas, stack de 5.000 puntos y 500 USDT garantizados.',
+    'Main Diario 500',
+    'El torneo principal del día. 150 plazas, stack de 10.000 puntos y 500 USDT garantizados.',
     5,
     500,
     150,
-    5_000,
+    10_000,
     { small: 50, big: 100 },
     { weekdayUtc: null, hourUtc: 20, minuteUtc: 0 },
+  ),
+  torneo(
+    'high-300',
+    'High 300',
+    'Cuatro ediciones al día. 120 plazas, stack de 8.000 puntos y 300 USDT garantizados.',
+    5,
+    300,
+    120,
+    8_000,
+    { small: 40, big: 80 },
+    { weekdayUtc: null, hourUtc: 0, minuteUtc: 0, hoursUtc: [0, 6, 12, 18] },
+  ),
+  torneo(
+    'medium-200',
+    'Medio 200',
+    'Cuatro ediciones al día. 120 plazas, stack de 6.000 puntos y 200 USDT garantizados.',
+    2,
+    200,
+    120,
+    6_000,
+    { small: 30, big: 60 },
+    { weekdayUtc: null, hourUtc: 3, minuteUtc: 0, hoursUtc: [3, 9, 15, 21] },
+  ),
+  torneo(
+    'daily-micro',
+    'Low 100',
+    'Ocho ediciones al día, cada 3 horas. 120 plazas y 100 USDT garantizados.',
+    1,
+    100,
+    120,
+    5_000,
+    { small: 25, big: 50 },
+    {
+      weekdayUtc: null,
+      hourUtc: 1,
+      minuteUtc: 0,
+      hoursUtc: [1, 4, 7, 10, 13, 16, 19, 22],
+    },
+  ),
+  torneo(
+    'micro-50',
+    'Micro 50',
+    'Torneo micro de 50 USDT garantizados. 90 plazas y 4.000 puntos de stack.',
+    0.5,
+    50,
+    90,
+    4_000,
+    { small: 20, big: 40 },
+    {
+      weekdayUtc: null,
+      hourUtc: 0,
+      minuteUtc: 0,
+      hoursUtc: [0, 4, 8, 12, 16, 20],
+    },
+  ),
+  torneo(
+    'micro-20',
+    'Micro 20',
+    'Torneo micro de 20 USDT garantizados. 90 plazas y 3.000 puntos de stack.',
+    0.25,
+    20,
+    90,
+    3_000,
+    { small: 15, big: 30 },
+    {
+      weekdayUtc: null,
+      hourUtc: 1,
+      minuteUtc: 0,
+      hoursUtc: [1, 5, 9, 13, 17, 21],
+    },
+  ),
+  torneo(
+    'micro-10',
+    'Micro 10',
+    'Torneo micro de 10 USDT garantizados. 75 plazas y 2.500 puntos de stack.',
+    0.1,
+    10,
+    75,
+    2_500,
+    { small: 10, big: 20 },
+    {
+      weekdayUtc: null,
+      hourUtc: 2,
+      minuteUtc: 0,
+      hoursUtc: [2, 6, 10, 14, 18, 22],
+    },
+  ),
+  torneo(
+    'micro-5',
+    'Micro 5',
+    'Torneo micro de 5 USDT garantizados. 60 plazas y 2.000 puntos de stack.',
+    0.05,
+    5,
+    60,
+    2_000,
+    { small: 10, big: 20 },
+    {
+      weekdayUtc: null,
+      hourUtc: 3,
+      minuteUtc: 0,
+      hoursUtc: [3, 7, 11, 15, 19, 23],
+    },
   ),
   torneo(
     'weekly-major',
@@ -530,11 +664,32 @@ export const TABLE_TIERS: Record<TableTierId, TableTier> = {
     rakeCaps: capsUsdt(1.25, 3.00, 5.00),
   },
 
-  // VIP Arena: ciegas 50/100 USDT, buy-in 10.000 USDT (100 BB). No se compra
-  // una membresía para entrar; se entra con el buy-in y se cobra profit share
-  // por el rake generado.
+  // VIP Arena: sala de cash independiente. Los cuatro niveles comparten el
+  // profit share, pero cada uno tiene buy-in, ciegas y tope de rake propios.
+  // No se compra una membresía para entrar; se entra con el buy-in.
+  arena200: {
+    ...tier('arena200', 'Arena Bronze', 200),
+    vipArena: true,
+    arenaProfitSharePercent: VIP_ARENA.profitSharePercent,
+    rakeCaps: capsUsdt(1.25, 2.50, 4.00),
+    description: 'VIP Arena · 1/2 USDT · buy-in 200 USDT · profit share 15 %',
+  },
+  arena1000: {
+    ...tier('arena1000', 'Arena Plata', 1_000),
+    vipArena: true,
+    arenaProfitSharePercent: VIP_ARENA.profitSharePercent,
+    rakeCaps: capsUsdt(5, 10, 15),
+    description: 'VIP Arena · 5/10 USDT · buy-in 1.000 USDT · profit share 15 %',
+  },
+  arena5000: {
+    ...tier('arena5000', 'Arena Oro', 5_000),
+    vipArena: true,
+    arenaProfitSharePercent: VIP_ARENA.profitSharePercent,
+    rakeCaps: capsUsdt(25, 40, 50),
+    description: 'VIP Arena · 25/50 USDT · buy-in 5.000 USDT · profit share 15 %',
+  },
   arena: {
-    ...tier('arena', 'VIP Arena', VIP_ARENA.buyInUsdt),
+    ...tier('arena', 'Arena High Roller', VIP_ARENA.buyInUsdt),
     vipArena: true,
     arenaProfitSharePercent: VIP_ARENA.profitSharePercent,
     // Escalón 50/100+ de CoinPoker: 0,50 / 0,60 / 0,60 BB.
@@ -548,6 +703,9 @@ export const TABLE_TIER_LIST: TableTier[] = [
   TABLE_TIERS.t5,
   TABLE_TIERS.t25,
   TABLE_TIERS.t100,
+  TABLE_TIERS.arena200,
+  TABLE_TIERS.arena1000,
+  TABLE_TIERS.arena5000,
   TABLE_TIERS.arena,
 ];
 
@@ -561,15 +719,13 @@ export const TABLE_TIER_LIST: TableTier[] = [
  * -------------------------
  * Los numeros anteriores (5, 10, 20, 30, 40, 50 CUP) estaban calibrados a una
  * moneda que ya no es la de la cuenta. Con la cuenta en USDT, un premio de 50
- * CUP son 0,42 USDT: menos que una ronda de un centroll. Es un premio que no
- * justifica entrar.
+ * CUP son 0,42 USDT: un premio que no justifica entrar.
  *
- * La escala de aqui da algo con lo que se puede seguir jugando: ganar el
- * escalon de 50 USDT da 50 USDT de promocion, con lo que se pueden comprar
- * cinco entradas de campo micro o cincuenta centrolls. El freeroll tiene que
- * ser una via de entrada, no un premio symbolic.
+ * Cuatro niveles de premio, alineados con el calendario solicitado:
+ * 5, 10, 20 y 50 USDT. Se reparten según la hora UTC del slot; no son
+ * acumulativos ni se suman con otros productos.
  */
-export const FREEROLL_PRIZES = [1, 3, 10, 25, 50, 200] as const;
+export const FREEROLL_PRIZES = [5, 10, 20, 50] as const;
 
 /**
  * Campo objetivo para que arranque un freeroll.
@@ -600,99 +756,6 @@ export const FREEROLL_MAX_FIELD = 900;
  */
 export const FREEROLL_PAYOUT = [50, 30, 20] as const;
 
-// ==========================================================================
-// CENTROLLS
-// ==========================================================================
-
-/**
- * Centroll: buy-in de 0,01 USDT que consume saldo REAL.
- *
- * ------------------------------------------------------------------
- * QUE RESUELVE
- *
- * El freeroll de CubaPoker era gratis de verdad, sin ninguna via de ingresos:
- * el operador pagaba el premio y no cobraba nada a cambio. CoinPoker tiene
- * esta pieza y es la que hace su freeroll rentable:
- *
- *   "CoinPoker Centrolls: $0.01 Buy-Ins"
- *   "These events require you to have a real money balance of at least $0.01"
- *
- * El bucle es: deposito -> centroll -> saldo de promocion -> centroll o
- * freeroll. El centroll es el punto por el que entra el dinero real, y el
- * freeroll es el que lo devuelve como saldo de promocion.
- *
- * Con el cambio a USDT, 0,01 USDT = 10 unidades internas (1 USDT = 1000).
- * Cabe en el ledger sin redondear y es accesible para un usuario cubano.
- */
-export const CENTROLL = {
-  /** Buy-in en USDT. 0,01 = 10 unidades internas. */
-  buyInUsdt: 0.01,
-
-  /**
-   * Fichas iniciales de cada jugador del centroll.
-   *
-   * NO salen del buy-in: el buy-in es dinero de la casa (0,01 USDT) y las
-   * fichas son de torneo. Con 1.000 fichas y las ciegas derivadas del stack
-   * (5/10) el centroll es un torneo de 100 ciegas grandes; si el stack saliera
-   * del buy-in serian 10 fichas y ciegas 1/2, o sea all-in preflop. Las fichas
-   * no tocan el bote: el premio se calcula sobre `buyInsCollected`.
-   */
-  startingChips: 1000,
-
-  /**
-   * TICKETS, no fichas.
-   *
- * En CoinPoker el premio de un centroll es una entrada a un satelite, nunca
-   * dinero: "Do centrolls have cash prizes? No, all prizes in your centrolls are
-   * paid in the form of tickets".
-   *
-   * Aqui el equivalente al ticket es `balance.play`: acceso a mas centrolls y
-   * freerolls, que es exactamente la misma funcion sin la contabilidad extra de
-   * un inventario de tickets. El premio NO se convierte en saldo retirable mas
-   * que por la via normal de juego (1:10).
-   */
-  prizeToBalance: 'play' as const,
-
-  /**
-   * Porcentaje del bote que se reparte como premio. 30 = 30%.
-   *
-   * En un campo lleno de 100 jugadores, 30% del bote equivale a 30 veces el
-   * buy-in; por eso el nombre historico `prizeMultiplier`. La UI lo muestra
-   * como porcentaje para que siga siendo correcto con campos a medio llenar.
-   */
-  prizeMultiplier: 30,
-
-  /** Campo objetivo del centroll. Mas pequeno que el freeroll: es un bucle rapido. */
-  targetField: 100,
-
-  /** Techo duro. Mas bajo que el del freeroll: son mucho mas frecuentes. */
-  maxField: 300,
-
-  /**
-   * Jugadores minimos por mesa para arrancar.
-   *
-   * Un centroll no puede esperar a juntar 100 humanos: con un solo jugador se
-   * queda abierto para siempre. Cada mesa que tenga al menos un humano se
-   * completa con bots hasta este minimo y arranca. Los bots no pagan buy-in;
-   * si ganan una posicion, su premio se queda en la casa (ver `settleField`).
-   */
-  minPlayersPerTable: 2,
-
-  /** Cuantas veces se puede reentrar por 0,01 USDT, como CoinPoker. */
-  maxRebuys: 5,
-} as const;
-
-/**
- * Premio del centroll a partir del bote recaudado, en unidades enteras.
- *
- * Es la UNICA formula del premio. La usan `centrollService.status()` (lo que
- * ve el jugador) y `fieldManager.settleField()` (lo que se paga de verdad).
- * Estaban separadas y no lo estaban: la liquidacion trataba el centroll como
- * un campo de cash y repartia el 95 % del bote a `balance.real`.
- */
-export const centrollPrizeUnits = (potUnits: number): number =>
-  Math.max(0, Math.floor((potUnits * CENTROLL.prizeMultiplier) / 100));
-
 /**
  * Rates de desbloqueo de `balance.play` a saldo retirable.
  *
@@ -720,8 +783,6 @@ export const UNLOCK_RATES = {
   cash: 0.1,
   /** Freerolls: tambien 1:10, por el argumento del drenaje. */
   freeroll: 0.1,
-  /** Centrolls: 1:10 tambien, porque dan entrada de pago pero el premio es P$. */
-  centroll: 0.1,
 } as const;
 
 /** Contextos en los que se puede desbloquear `balance.play`. */

@@ -28,6 +28,9 @@ const { VIP } = require('../dist/models/VIP');
 const {
   tournamentManager,
   proximoInicio,
+  spinSeCompleta,
+  SPIN_COMPLETAR_MS,
+  SPIN_REEMBOLSO_MS,
 } = require('../dist/game/tournament.service');
 const { fieldManager } = require('../dist/game/field.manager');
 const {
@@ -581,6 +584,177 @@ const cerrarCampo = async (field, minutosTarde) => {
     'el bote del campo queda en cero tras la salida',
     campoSalida.buyInsCollected === 0,
     `bote=${campoSalida.buyInsCollected}`,
+  );
+
+  // ==================================================================
+  console.log('\n=== 9. Spin & Go: relleno a los 6 minutos y reembolso a los 9 ===\n');
+
+  const J = ids[9];
+  const K = ids[10];
+
+  comprobar(
+    'las ventanas son 6 y 9 minutos',
+    SPIN_COMPLETAR_MS === 6 * 60_000 && SPIN_REEMBOLSO_MS === 9 * 60_000,
+    `${SPIN_COMPLETAR_MS}/${SPIN_REEMBOLSO_MS}`,
+  );
+
+  // La decision de completar es estable por fieldId, no aleatoria en cada
+  // vuelta. Sobre 1.000 identificadores debe rondar el 55 %.
+  const completados = Array.from({ length: 1_000 }, (_, i) =>
+    spinSeCompleta(`spingo-estable-${i}`),
+  ).filter(Boolean).length;
+  comprobar(
+    'el relleno es determinista y parcial (45-65 %)',
+    completados >= 450 && completados <= 650,
+    `${completados}/1000`,
+  );
+  comprobar(
+    'el mismo campo siempre decide lo mismo',
+    spinSeCompleta('spingo-estable-7') === spinSeCompleta('spingo-estable-7'),
+  );
+
+  // --- Reembolso automatico al cumplir 9 minutos ---
+  const antesRefund = await saldoDe(J);
+  const regRefund = await tournamentManager.registrar(J, 'spingo-1', 'Jota');
+  const campoRefund = await Field.findOne({ fieldId: regRefund.fieldId });
+  comprobar(
+    'el Spin de reembolso queda en inscripcion',
+    campoRefund?.status === 'filling',
+    `estado=${campoRefund?.status}`,
+  );
+
+  const viejo = new Date(Date.now() - SPIN_REEMBOLSO_MS - 60_000);
+  await Field.collection.updateOne(
+    { fieldId: regRefund.fieldId },
+    { $set: { createdAt: viejo } },
+  );
+  await tournamentManager.procesar();
+  const campoReembolsado = await Field.findOne({ fieldId: regRefund.fieldId });
+  const registroReembolsado = campoReembolsado.registrations.find(
+    (r) => r.telegramId === J,
+  );
+  comprobar(
+    'a los 9 minutos sin llenarse, el Spin se cancela',
+    campoReembolsado.status === 'cancelled',
+    `estado=${campoReembolsado.status}`,
+  );
+  comprobar(
+    'el jugador recupera exactamente su buy-in',
+    (await saldoDe(J)) === antesRefund,
+    `${antesRefund} -> ${await saldoDe(J)}`,
+  );
+  comprobar(
+    'la inscripcion queda reembolsada',
+    registroReembolsado?.status === 'refunded',
+    `estado=${registroReembolsado?.status}`,
+  );
+
+  // --- Relleno automatico a los 6 minutos ---
+  // Se usa un campo con un identificador que el hash decide completar. Asi la
+  // prueba no depende de la hora ni del azar entre ejecuciones.
+  const autoId = Array.from({ length: 500 }, (_, i) => `spingo-auto-${i}`).find(
+    spinSeCompleta,
+  );
+  if (!autoId) throw new Error('No se encontro un fieldId completable');
+
+  const campoAuto = await Field.create({
+    fieldId: autoId,
+    kind: 'tournament',
+    eventId: 'spingo-25',
+    format: 'spingo',
+    tierId: autoId,
+    status: 'filling',
+    buyInUnits: getTournamentEvent('spingo-25').buyInUnits,
+    buyInsCollected: getTournamentEvent('spingo-25').buyInUnits,
+    prizePoolUnits: getTournamentEvent('spingo-25').guaranteedPrizeUnits,
+    payoutTable: [100],
+    targetField: 3,
+    waiting: 0,
+    seated: 1,
+    eliminated: 0,
+    playersRemaining: 1,
+    paidPositionsLeft: 1,
+    rakeCollected: 0,
+    deadChips: 0,
+    tables: [],
+    plannedTables: 1,
+    registrations: [
+      {
+        telegramId: K,
+        buyIn: getTournamentEvent('spingo-25').buyInUnits,
+        status: 'seated',
+        at: new Date(),
+      },
+    ],
+  });
+
+  const mesaAuto = await Table.create({
+    tableId: `${autoId}-t1`,
+    kind: 'tournament',
+    tierId: autoId,
+    status: 'waiting',
+    smallBlind: 25,
+    bigBlind: 50,
+    buyInUnits: getTournamentEvent('spingo-25').buyInUnits,
+    startChips: getTournamentEvent('spingo-25').startingChips,
+    maxSeats: 7,
+    field: {
+      fieldId: autoId,
+      tableNumber: 1,
+      targetField: 3,
+      seated: 1,
+      paidPositions: 0,
+      fieldStatus: 'filling',
+    },
+    hand: {
+      handNumber: 0,
+      phase: 'idle',
+      communityCards: [],
+      pot: 0,
+      currentBet: 0,
+      actingSeat: -1,
+      dealerSeat: 0,
+    },
+    stats: { handsPlayed: 0, rakeCollected: 0, prizePaid: 0 },
+    seats: [
+      {
+        index: 0,
+        kind: 'human',
+        playerId: String(K),
+        displayName: 'Ka',
+        chips: getTournamentEvent('spingo-25').startingChips,
+        bet: 0,
+        totalBet: 0,
+        status: 'active',
+        isDealer: true,
+        joinedAt: new Date(),
+      },
+    ],
+  });
+
+  const arrancadoAuto = await tournamentManager.completarSpin(campoAuto);
+  const campoAutoFinal = await Field.findOne({ fieldId: autoId });
+  const mesaAutoFinal = await Table.findOne({ tableId: mesaAuto.tableId });
+  const asientosAuto = mesaAutoFinal.seats;
+  comprobar(
+    'a los 6 minutos, un Spin elegible se completa y arranca',
+    arrancadoAuto === true && campoAutoFinal.status === 'running',
+    `arrancado=${arrancadoAuto}, estado=${campoAutoFinal?.status}`,
+  );
+  comprobar(
+    'el campo completa la mesa hasta tres asientos',
+    asientosAuto.filter((s) => s.status === 'active').length === 3,
+    `activos=${asientosAuto.filter((s) => s.status === 'active').length}`,
+  );
+  comprobar(
+    'el humano conserva su asiento y se añaden dos rivales',
+    asientosAuto.filter((s) => s.kind === 'human').length === 1 &&
+      asientosAuto.filter((s) => s.kind === 'bot').length === 2,
+  );
+  comprobar(
+    'el ultimo asiento de la mesa sigue libre',
+    asientosAuto.length < mesaAutoFinal.maxSeats,
+    `${asientosAuto.length}/${mesaAutoFinal.maxSeats}`,
   );
 
   console.log(`\n${ok} correctas, ${mal} fallidas`);

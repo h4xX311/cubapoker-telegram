@@ -5,8 +5,8 @@
  * LA PREGUNTA
  *
  * Nadie ha podido jugar ni una mano. La interfaz no tiene ninguna via para ello: todo lo
- * que ofrece pasa por un campo, un freeroll o un centroll, y los tres arrancan cuando se
- * LLENAN. Con `fieldSize` a 300, eso significa 300 registros.
+ * que ofrece pasa por un campo o un freeroll, y ambos arrancan cuando se LLENAN. Con
+ * `fieldSize` a 300, eso significa 300 registros.
  *
  * Pero hay una cuarta via que SI existe y que la interfaz no usa: `POST /game/sit`, que
  * sienta al jugador en una mesa cash suelta. Ahi los bots rellenan los huecos mientras la

@@ -2,7 +2,6 @@ import { Router, Request, Response } from 'express';
 import { tableManager } from '../game/table.manager';
 import { seatingService, TableError } from '../game/seating.service';
 import { fieldManager, FieldError } from '../game/field.manager';
-import { centrollService, CentrollError } from '../game/centroll.service';
 import { freerollManager, FreerollError } from '../game/freeroll.service';
 import { tournamentManager, TournamentError } from '../game/tournament.service';
 import { Field, toPublicField } from '../models/Field';
@@ -16,7 +15,6 @@ import {
   SEATS_PER_TABLE,
   FREEROLL_TARGET_FIELD,
   FREEROLL_MAX_FIELD,
-  CENTROLL,
   UNLOCK_RATES,
   CASH_FORMAT_LIST,
 } from '../config/product';
@@ -71,16 +69,6 @@ router.get('/config', (_req: Request, res: Response) => {
     freerollTiers: FREEROLL_PRIZES,
     freerollTargetField: FREEROLL_TARGET_FIELD,
     freerollMaxField: FREEROLL_MAX_FIELD,
-
-    // Centroll: buy-in de 1 centavo que consume saldo REAL y da fichas. Es la
-    // via por la que el dinero real entra al ciclo del freeroll.
-    centroll: {
-      buyIn: CENTROLL.buyInUsdt,
-      prizeMultiplier: CENTROLL.prizeMultiplier,
-      targetField: CENTROLL.targetField,
-      maxField: CENTROLL.maxField,
-      maxRebuys: CENTROLL.maxRebuys,
-    },
 
     // Mecanismo de Promotional Dollars: como se desbloquea `balance.play`.
     unlock: {
@@ -401,7 +389,7 @@ router.get('/fields', requireTelegramAuth, async (req: Request, res: Response) =
     const telegramId = getAuthedTelegramId(req);
 
     const fields = await Field.find({
-      // Solo cash. Los freerolls y el centroll tienen su propia pantalla y su propio
+      // Solo cash. Los freerolls tienen su propia pantalla y su propio
       // ciclo de vida: si se colaran aqui, un jugador apuntado al freeroll veria "estas
       // en un campo" en la pantalla de mesas cash y un boton para salirse del torneo.
       //
@@ -447,36 +435,6 @@ router.get('/fields', requireTelegramAuth, async (req: Request, res: Response) =
   } catch (error) {
     logger.error('GET /game/fields:', error);
     res.status(500).json({ error: 'Error obteniendo los campos' });
-  }
-});
-
-/** Estado del centroll: buy-in, premio, cuantos inscritos. */
-router.get('/centroll', async (_req: Request, res: Response) => {
-  try {
-    res.json({ success: true, ...(await centrollService.status()) });
-  } catch (error) {
-    logger.error('GET /game/centroll:', error);
-    res.status(500).json({ error: 'Error obteniendo el centroll' });
-  }
-});
-
-/**
- * Entrada a un centroll.
- *
- * Consume saldo REAL (no el de promoción), que es el requisito explícito de
- * CoinPoker. El premio va a fichas de promoción.
- */
-router.post('/centroll/join', async (req: Request, res: Response) => {
-  try {
-    const telegramId = getAuthedTelegramId(req);
-    const user = await User.findOne({ telegramId });
-    const result = await centrollService.register(telegramId, user?.username);
-    res.json({ success: true, ...result });
-  } catch (error) {
-    const status = error instanceof CentrollError ? 400 : 500;
-    res.status(status).json({
-      error: error instanceof Error ? error.message : 'No se pudo entrar al centroll',
-    });
   }
 });
 

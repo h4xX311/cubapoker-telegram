@@ -47,6 +47,7 @@ import { Router, Request, Response } from 'express';
 import { User } from '../models/User';
 import { getAuthedTelegramId, requireTelegramAuth } from '../middleware/telegramAuth';
 import { unitsToUsdt } from '../config/units';
+import { VIP_ARENA, VIP_ARENA_TIER_IDS } from '../config/product';
 import { monetizationService } from '../services/monetization.service';
 import { rakebackService } from '../services/rakeback.service';
 import { Table } from '../models/Table';
@@ -203,7 +204,7 @@ router.get('/me', requireTelegramAuth, async (req: Request, res: Response) => {
     const [arena, arenaSeated] = await Promise.all([
       rakebackService.getArenaStatus(user.telegramId),
       Table.exists({
-        tierId: 'arena',
+        tierId: { $in: [...VIP_ARENA_TIER_IDS] },
         kind: 'cash',
         seats: {
           $elemMatch: {

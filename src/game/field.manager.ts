@@ -12,7 +12,6 @@ import {
   PAID_POSITIONS,
   FREEROLL_TARGET_FIELD,
   getTier,
-  centrollPrizeUnits,
   type TableTierId,
 } from '../config/product';
 import {
@@ -439,14 +438,9 @@ export const fieldManager = {
       );
     }
 
-    // Un jugador no puede estar en dos sitios a la vez: ni en otro campo ni en una mesa
-    // suelta. En un torneo eso seria jugar dos mesas con el mismo reloj.
-    if (await this.isSeated(telegramId)) {
-      throw new FieldError(
-        'Ya estas jugando en otra mesa. Termina o sal de ella antes de entrar.',
-        'ALREADY_IN_FIELD',
-      );
-    }
+    // Multimesa: estar sentado en una mesa cash o en otro campo no impide
+    // inscribirse. El control real es `isSeated(id, fieldId)`, que se aplica
+    // dentro de este mismo campo y evita duplicar asiento en la misma mesa.
 
     const { startChips } = this.blindsDeCampo(field);
     const perfil = await User.findOne({ telegramId }).select('avatar').lean();
@@ -558,12 +552,9 @@ export const fieldManager = {
       throw new FieldError('Ya estas apuntado a este torneo.', 'ALREADY_IN');
     }
 
-    if (await this.isSeated(telegramId)) {
-      throw new FieldError(
-        'Ya estas jugando en otra mesa. Termina o sal de ella antes de entrar.',
-        'ALREADY_IN_FIELD',
-      );
-    }
+    // Multimesa: se puede jugar un torneo además de una mesa cash u otro
+    // campo. El asiento duplicado dentro de ESTE campo lo impide `trySeat`
+    // con `isSeated(id, field.fieldId)`.
 
     // QVA Premium anuncia un 5 % de descuento en torneos. Se aplica al cobrar
     // la entrada, no al premio: el garantizado no cambia y el overlay de la
@@ -2099,7 +2090,7 @@ export const fieldManager = {
     for (const table of tables) {
       // Los bots tambien se eliminan y ocupan posiciones del torneo. Antes
       // solo se recogian humanos: el contador `playersRemaining` incluia a
-      // los bots pero nunca bajaba por ellos, y un centroll de un humano
+      // los bots pero nunca bajaba por ellos, y un campo con un solo humano
       // contra un bot no podia terminar nunca.
       const busted = table.seats.filter(s => s.status === 'eliminated');
 
@@ -2243,8 +2234,7 @@ export const fieldManager = {
         seatsLiquidados++;
 
         logger.info(
-          `Campo ${field.fieldId}: ${esBot ? 'bot' : 'jugador'} ` +
-          `${seat.playerId} eliminado en la posicion ${position} ` +
+          `Campo ${field.fieldId}: asiento ${seat.playerId} eliminado en la posicion ${position} ` +
           `(mesa ${table.tableId})`,
         );
       }
@@ -2416,16 +2406,23 @@ export const fieldManager = {
       active: t.seats.filter(s => s.status === 'active' && s.chips > 0).length,
     }));
 
+    const enPausa = (t: ITable): boolean =>
+      !t.hand || t.hand.phase === 'idle' || t.hand.phase === 'idle-awaiting';
+
     for (const source of activeCounts) {
       if (source.active === 0) {
         await this.closeEmptyTable(field, source.table);
         continue;
       }
 
+      // No se mueve a nadie con una mano en curso. La rotación se hace entre
+      // manos para no cambiar el orden de acción ni las ciegas a mitad de mano.
+      if (!enPausa(source.table)) continue;
+
       if (!shouldMergeTables(source.active, 1, MERGE_BELOW)) continue;
 
       const targets = live
-        .filter(t => t.tableId !== source.table.tableId)
+        .filter(t => t.tableId !== source.table.tableId && enPausa(t))
         .map(t => ({
           tableId: t.tableId,
           seatsFree: t.maxSeats - t.seats.length,
@@ -2435,7 +2432,7 @@ export const fieldManager = {
       if (targets.length === 0) continue;
 
       const movers = source.table.seats.filter(
-        s => s.kind === 'human' && s.status === 'active' && s.chips > 0,
+        s => s.status === 'active' && s.chips > 0,
       );
       if (movers.length === 0) continue;
 
@@ -2659,13 +2656,26 @@ export const fieldManager = {
    * acabar sin ganador: nadie se sienta con nadie.
    */
   async forceMergeIntoOne(field: IField, tables: ITable[]): Promise<void> {
+    // Si alguna mesa está jugando una mano, se espera a la pausa. Mover
+    // asientos a mitad de mano rompería el orden de acción y las ciegas.
+    if (
+      tables.some(
+        (t) =>
+          t.hand &&
+          t.hand.phase !== 'idle' &&
+          t.hand.phase !== 'idle-awaiting',
+      )
+    ) {
+      return;
+    }
+
     const keeper = tables[0];
     const fieldStatus = field.status;
     field.status = 'running'; // para que el merge no se tome por mesa final
 
     for (const donor of tables.slice(1)) {
       for (const seat of donor.seats) {
-        if (seat.kind !== 'human' || seat.status === 'out') continue;
+        if (seat.status === 'out' || seat.chips <= 0) continue;
         // `toObject()` por el mismo motivo que en `checkMerges`: el spread de un
         // subdocumento pierde los campos del esquema y la validacion revienta al
         // guardar. Ver el comentario de ahi.
@@ -2854,34 +2864,15 @@ export const fieldManager = {
     // calcular el premio.
     // ------------------------------------------------------------------
     const esFreeroll = field.kind === 'freeroll';
-    const esCentroll = field.kind === 'centroll';
     const esTorneo = field.kind === 'tournament';
     const premioCasa = Math.max(0, field.prizePoolUnits ?? 0);
 
-    // ------------------------------------------------------------------
-    // EL CENTROLL NO ES UN CAMPO DE CASH
-    //
-    // Antes esta funcion solo distinguia `freeroll` de todo lo demas, asi que
-    // un centroll caia en la rama de cash: rake del 5 %, reparto 45/25/15/9/6
-    // y pago a `balance.real`. Medido con `test-centroll-liquidacion.js`:
-    // bote de 100 unidades repartia 95 retirables y la casa se quedaba 5.
-    //
-    // La regla del producto es otra: premio del 30 % del bote, reparto
-    // 50/30/20 y pago a `balance.play` (no retirable). El margen de la casa es
-    // el 70 % que no se reparte, no un rake por mano.
-    // ------------------------------------------------------------------
-    const premioCentroll = esCentroll
-      ? centrollPrizeUnits(field.buyInsCollected)
-      : 0;
-
+    // Los freerolls no cobran entrada: su bote es el premio que pone la casa.
+    // Los torneos y el cash usan las entradas recaudadas.
     const grossPot = esFreeroll ? premioCasa : field.buyInsCollected;
-    const rakeObjetivo = esFreeroll || esCentroll ? 0 : rakeOfField(grossPot);
-    let rake = esFreeroll || esCentroll ? 0 : Math.max(field.rakeCollected, rakeObjetivo);
-    const netPot = esFreeroll
-      ? premioCasa
-      : esCentroll
-        ? premioCentroll
-        : Math.max(0, grossPot - rake);
+    const rakeObjetivo = esFreeroll ? 0 : rakeOfField(grossPot);
+    let rake = esFreeroll ? 0 : Math.max(field.rakeCollected, rakeObjetivo);
+    const netPot = esFreeroll ? premioCasa : Math.max(0, grossPot - rake);
 
     // Un torneo pagado tiene un premio garantizado. Se paga el mayor entre el
     // 95 % de las entradas y esa garantia. Si la garantia es mayor, la
@@ -2905,19 +2896,17 @@ export const fieldManager = {
     // regalarla.
     const distributable = esFreeroll
       ? premioCasa
-      : esCentroll
-        ? Math.min(swept, premioCentroll)
-        : esTorneo
-          ? premioTorneo
-          : Math.min(swept, netPot);
-    const withheld = esFreeroll || esCentroll
+      : esTorneo
+        ? premioTorneo
+        : Math.min(swept, netPot);
+    const withheld = esFreeroll
       ? 0
       : esTorneo
         ? Math.max(0, swept - distributable)
         : swept - distributable;
     // En un torneo con garantia, que haya menos fichas que el premio no es una
     // fuga: es exactamente el overlay que la casa ha decidido poner.
-    const faltan = esFreeroll || esCentroll || esTorneo ? 0 : netPot - swept;
+    const faltan = esFreeroll || esTorneo ? 0 : netPot - swept;
     const overlay = esTorneo ? Math.max(0, distributable - swept) : 0;
 
     if (overlay > 0) {
@@ -2983,15 +2972,9 @@ export const fieldManager = {
     // retencion seria ficticia y `rakeCollected` dejaria de ser lo que salio de los
     // jugadores. En ese caso el rake es el 5 % y la fuga queda a la vista.
     //
-    // En el centroll el importe real que se queda la casa depende de quien gane:
-    // si una posicion la ocupa un bot, ese tramo no se paga y tambien es margen.
-    // Por eso el centroll se ajusta DESPUES del reparto, con lo que de verdad
-    // salio hacia humanos. Para cash y freeroll la formula no cambia.
-    let rakeReal = esCentroll
-      ? 0
-      : faltan > 0
-        ? rakeObjetivo
-        : Math.max(0, grossPot - distributable);
+    let rakeReal = faltan > 0
+      ? rakeObjetivo
+      : Math.max(0, grossPot - distributable);
 
     // El reparto por posicion. `FIELD_PAYOUT` suma 100, asi que las partes cubren
     // todo el bote; lo que sobre por posiciones sin adjudicado va al ganador.
@@ -3002,7 +2985,7 @@ export const fieldManager = {
       ? (field.payoutTable && field.payoutTable.length > 0
           ? field.payoutTable
           : FIELD_PAYOUT)
-      : esFreeroll || esCentroll
+      : esFreeroll
         ? FREEROLL_PAYOUT
         : FIELD_PAYOUT;
     const shares = splitPrize(distributable, tablaReparto);
@@ -3019,8 +3002,8 @@ export const fieldManager = {
     let remainder = 0;
     /**
      * Dinero que se queda la casa porque la posicion la ocupa un bot o porque
-     * no hay ningun humano a quien pagarla. En el centroll es margen; en el
-     * freeroll es premio que no se llega a desembolsar.
+     * no hay ningun humano a quien pagarla. En el freeroll es premio que no se
+     * llega a desembolsar.
      */
     let houseFromBots = 0;
 
@@ -3064,7 +3047,7 @@ export const fieldManager = {
         if (result.isBot) {
           houseFromBots += amount;
           logger.info(
-            `Campo ${field.fieldId}: posicion ${position} ocupada por un bot ` +
+            `Campo ${field.fieldId}: posicion ${position} sin destinatario ` +
             `(${result.username ?? result.playerId}); ${formatUnits(amount)} USDT ` +
             'se quedan en la casa.',
           );
@@ -3077,10 +3060,10 @@ export const fieldManager = {
       }
 
       if (telegramId === null || !Number.isFinite(telegramId) || telegramId <= 0) {
-        // Nadie ocupa esta posicion. En un centroll o freeroll no hay un humano
-        // a quien darsela: se queda en la casa. En cash, al ganador, que es
-        // como funciona un Sit'n'Go.
-        if (esFreeroll || esCentroll) {
+        // Nadie ocupa esta posicion. En un freeroll no hay un humano a quien
+        // darsela: se queda en la casa. En cash, al ganador, que es como
+        // funciona un Sit'n'Go.
+        if (esFreeroll) {
           houseFromBots += amount;
         } else {
           remainder += amount;
@@ -3092,7 +3075,7 @@ export const fieldManager = {
         telegramId,
         amount,
         position,
-        esFreeroll || esCentroll ? 'play' : 'real',
+        esFreeroll ? 'play' : 'real',
       );
       paid.push({ position, telegramId, username, amount, tableId });
     }
@@ -3106,7 +3089,7 @@ export const fieldManager = {
           winnerId,
           remainder,
           1,
-          esFreeroll || esCentroll ? 'play' : 'real',
+          esFreeroll ? 'play' : 'real',
         );
         logger.info(
           `Campo ${field.fieldId}: ${formatUnits(remainder)} USDT de posiciones sin ` +
@@ -3122,13 +3105,6 @@ export const fieldManager = {
       }
     }
 
-    // El margen real del centroll es todo lo recaudado que no salio hacia un
-    // humano. Incluye el 70 % que no es premio y los tramos que ganaron bots.
-    if (esCentroll) {
-      const pagadoAHumanos = paid.reduce((s, p) => s + p.amount, 0);
-      rakeReal = Math.max(0, grossPot - pagadoAHumanos);
-    }
-
     rake = rakeReal;
     await Field.updateOne(
       { _id: field._id },
@@ -3137,8 +3113,8 @@ export const fieldManager = {
 
     if (houseFromBots > 0) {
       logger.info(
-        `Campo ${field.fieldId}: ${formatUnits(houseFromBots)} USDT de premios de ` +
-        'bots o posiciones sin humano se quedan en la casa.',
+        `Campo ${field.fieldId}: ${formatUnits(houseFromBots)} USDT de premios ` +
+        'sin destinatario humano se quedan en la casa.',
       );
     }
 
@@ -3188,17 +3164,17 @@ export const fieldManager = {
       await t.save();
     }
 
-    // En centroll/freeroll `remainder` siempre vale 0: los tramos sin humano
-    // pasaron a `houseFromBots`. En cash sigue yendo al ganador.
+    // En freeroll `remainder` siempre vale 0: los tramos sin humano pasaron a
+    // `houseFromBots`. En cash sigue yendo al ganador.
     const totalPaid =
       paid.reduce((s, p) => s + p.amount, 0) +
-      (esFreeroll || esCentroll ? 0 : remainder);
+      (esFreeroll ? 0 : remainder);
 
     logger.info(
       `Campo ${field.fieldId} liquidado: bote ${formatUnits(grossPot)} USDT, ` +
       `rake ${formatUnits(rake)} USDT, repartido a humanos ` +
       `${formatUnits(totalPaid)} USDT ` +
-      `(${esFreeroll || esCentroll ? 'promocion' : 'retirable'}), ` +
+      `(${esFreeroll ? 'promocion' : 'retirable'}), ` +
       `reembolsos ${formatUnits(refunded)} USDT`,
     );
 

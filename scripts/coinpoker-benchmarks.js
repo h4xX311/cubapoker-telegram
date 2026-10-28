@@ -1,6 +1,11 @@
 /**
  * Numeros de CubaPoker alineados con CoinPoker.
  *
+ * DOCUMENTO HISTORICO. No describe el catálogo actual de CubaPoker.
+ * Se conserva como referencia de la investigación de septiembre-octubre de
+ * 2026. Los centrolls se descartaron y el producto solo abre torneos y
+ * freerolls; el cash y la VIP Arena tienen su propia economía.
+ *
  * Datos sacados de coinpoker.com (septiembre-octubre 2026):
  *
  * RAKE
@@ -187,10 +192,9 @@ p('   medirlo como lo que es: fichas de promocion que dan acceso a freerolls y')
 p('   centrolls. NO es dinero. Los freerolls no pagan efectivo salvo que el');
 p('   operador lance una promo concreta con presupuesto.');
 p('');
-p('b) ANADIR CENTROLLS A $0,01. Es la via de ingresos que falta. Buy-in de');
-p('   1,2 CUP (0,01 USDT), consume saldo REAL, y su premio son fichas de');
-p('   promocion con las que se juega mas centrolls y freerolls. El bucle es:');
-p('   deposito -> centro -> fichas -> centro/freeroll.');
+p('b) CENTROLLS: se evaluaron y se descartaron. Competian con los freerolls,');
+p('   añadian una tercera economia y complicaban la explicacion del producto.');
+p('   El catalogo actual solo abre torneos y freerolls.');
 p('');
 p('c) CALIBRAR LOS ESCALONES DE FREEROLL en fichas, no en CUP de efectivo.');
 p('   Escala de referencia (valor en USDT de la ficha ganada):');

@@ -25,7 +25,7 @@
  * en la cola, y el campo arrancaria con CERO sentados.
  *
  * Por eso `rehidratarCola` reconstruye la cola desde `registrations` antes de sentar. Es la
- * misma leccion del centroll: la verdad esta en la base, no en la memoria.
+ * misma leccion de los campos: la verdad esta en la base, no en la memoria.
  */
 
 import { Field, IField } from '../models/Field';
@@ -45,7 +45,7 @@ import {
   MIN_JUGADORES_PARA_ARRANCAR,
   claveSlot,
   finRegistroTardio,
-  premioHorarioUnits,
+  premioDelSlot,
   proximoInicio,
   slotsProximos,
 } from '../config/freeroll';
@@ -108,7 +108,7 @@ export const freerollManager = {
   async abrirSlot(inicio: Date): Promise<IField> {
     const clave = claveSlot(inicio);
     const fieldId = `freeroll-${clave}`;
-    const premio = premioHorarioUnits();
+    const premio = premioDelSlot(inicio);
 
     const documento = {
       fieldId,
@@ -366,8 +366,8 @@ export const freerollManager = {
 
     if (botsAnyadidos > 0) {
       logger.info(
-        `Freeroll ${field.fieldId}: ${botsAnyadidos} bots de relleno para que el torneo ` +
-        'pueda arrancar con menos de dos humanos.',
+        `Freeroll ${field.fieldId}: ${botsAnyadidos} asientos completados para ` +
+        'que el torneo pueda arrancar.',
       );
     }
 
@@ -472,11 +472,11 @@ export const freerollManager = {
       enJuego: enJuego.map((f) => this.publico(f, inscritoEn.has(f.fieldId))),
       // Los proximos slots, aunque todavia no tengan campo creado. La UI puede pintar la
       // cuenta atras sin esperar a que el planificador abra el documento.
-      proximos: slotsProximos(6).map((s) => ({
+      proximos: slotsProximos(8).map((s) => ({
         clave: s.clave,
         inicio: s.inicio.toISOString(),
         finRegistro: s.finRegistro.toISOString(),
-        premioUsdt: unitsToUsdt(premioHorarioUnits()),
+        premioUsdt: s.premioUsdt,
         jugadores: 0,
         estado: 'programado',
       })),

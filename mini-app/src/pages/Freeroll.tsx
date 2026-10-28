@@ -14,11 +14,11 @@ interface Props {
 const POSICIONES = ['1.º', '2.º', '3.º', '4.º', '5.º'];
 
 /**
- * FREEROLLS HORARIOS
- * ==================
+ * FREEROLLS MULTIMESA
+ * ===================
  *
- * Un torneo cada hora, gratis, con premio en saldo de promocion. La pagina hace tres cosas
- * y ninguna es decorativa:
+ * Cuatro ediciones al día, gratis, con premio en saldo de promoción. Cada una
+ * reparte un premio distinto: 50, 20, 10 y 5 USDT. La página hace tres cosas:
  *
  *   1. Cuenta atras real hasta el inicio. Sin ella, el jugador no sabe si le da tiempo.
  *   2. Inscribe y desinscribe. El boton cambia de estado segun si ya esta dentro.
@@ -111,12 +111,15 @@ export function Freeroll({ onBack, onBalanceChange, onPlay }: Props) {
     }
   };
 
-  const entrarAMesa = async () => {
+  const entrarAMesa = async (fieldId: string) => {
     setError('');
     try {
-      const donde = await api.myTable();
-      if (donde?.tableId) {
-        onPlay(donde.tableId);
+      const r = await api.myTables();
+      const mesa = (r?.tables ?? []).find(
+        (t) => t.field?.fieldId === fieldId,
+      );
+      if (mesa?.tableId) {
+        onPlay(mesa.tableId);
       } else {
         setError(
           'Tu mesa se esta preparando. Espera unos segundos y vuelve a intentarlo.',
@@ -128,7 +131,7 @@ export function Freeroll({ onBack, onBalanceChange, onPlay }: Props) {
   };
 
   return (
-    <div className="p-4 pb-10 animate-fadeIn">
+    <div className="p-4 pb-10 animate-fadeIn lg:px-0">
       <PageHeader title="Freerolls" onBack={onBack} />
 
       {/* Explicacion del producto, en una linea. */}
@@ -144,12 +147,12 @@ export function Freeroll({ onBack, onBalanceChange, onPlay }: Props) {
           <span className="text-2xl">🎁</span>
           <div>
             <p className="text-sm font-bold text-[#ffd700] mb-1">
-              Un torneo gratis cada hora
+              Cuatro torneos gratis al día
             </p>
             <p className="text-xs text-[#a0a0b0] leading-relaxed">
-              Mesas de 7 hasta completar el campo. El premio es saldo de
-              promoción: se juega y se desbloquea 1 USDT por cada 10 USDT
-              jugados a saldo retirable.
+              Ediciones multimesa con premios de 50, 20, 10 y 5 USDT. El premio
+              es saldo de promoción: se juega y se desbloquea 1 USDT por cada 10
+              USDT jugados a saldo retirable.
             </p>
           </div>
         </div>
@@ -166,16 +169,18 @@ export function Freeroll({ onBack, onBalanceChange, onPlay }: Props) {
           <div className="spinner mx-auto" />
         </div>
       ) : (
-        <div className="space-y-4">
+        <div className="grid gap-4 lg:grid-cols-2 lg:items-start">
           {/* ---------------- Proximo torneo ---------------- */}
           {datos?.abierto && (
-            <TarjetaProximo
-              campo={datos.abierto}
-              segundos={segundosAlInicio}
-              ocupado={ocupado === datos.abierto.fieldId}
-              onInscribir={() => inscribir(datos.abierto!.fieldId)}
-              onSalir={() => salir(datos.abierto!.fieldId)}
-            />
+            <div className="lg:col-span-2">
+              <TarjetaProximo
+                campo={datos.abierto}
+                segundos={segundosAlInicio}
+                ocupado={ocupado === datos.abierto.fieldId}
+                onInscribir={() => inscribir(datos.abierto!.fieldId)}
+                onSalir={() => salir(datos.abierto!.fieldId)}
+              />
+            </div>
           )}
 
           {/* ---------------- En juego, registro tardio ---------------- */}
@@ -212,7 +217,7 @@ export function Freeroll({ onBack, onBalanceChange, onPlay }: Props) {
 
                 {campo.inscrito ? (
                   <button
-                    onClick={entrarAMesa}
+                    onClick={() => entrarAMesa(campo.fieldId)}
                     className="w-full btn btn-primary py-2.5 text-sm"
                   >
                     Entrar a mi mesa
@@ -232,13 +237,13 @@ export function Freeroll({ onBack, onBalanceChange, onPlay }: Props) {
             );
           })}
 
-          {/* ---------------- Proximas horas ---------------- */}
+          {/* ---------------- Proximas ediciones ---------------- */}
           {datos?.proximos && datos.proximos.length > 0 && (
-            <section>
+            <section className="lg:col-span-2">
               <h2 className="text-[#a0a0b0] text-xs uppercase tracking-wide mb-3">
-                Próximas horas
+                Próximas ediciones
               </h2>
-              <div className="space-y-2">
+              <div className="grid gap-2 lg:grid-cols-2">
                 {datos.proximos.map((slot) => (
                   <div
                     key={slot.clave}
@@ -269,13 +274,13 @@ export function Freeroll({ onBack, onBalanceChange, onPlay }: Props) {
           )}
 
           {!datos?.abierto && !datos?.enJuego?.length && (
-            <div className="card text-center py-8">
+            <div className="card text-center py-8 lg:col-span-2">
               <p className="text-3xl mb-2">🕐</p>
               <p className="text-sm text-white font-semibold">
                 El próximo freeroll se abre en un momento
               </p>
               <p className="text-xs text-[#a0a0b0] mt-1">
-                Uno cada hora, en punto.
+                Cuatro ediciones al día, cada seis horas.
               </p>
             </div>
           )}

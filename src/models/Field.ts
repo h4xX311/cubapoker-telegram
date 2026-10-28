@@ -33,16 +33,12 @@ import { Schema, Document, model, Types } from 'mongoose';
  */
 
 /**
- * `centroll` faltaba aqui y en el enum del esquema, y el resultado no era un error visible:
- * `centroll.service.ts` hacia `Field.create({ kind: 'centroll' })`, mongoose lo rechazaba con
- * `ValidationError`, y el jugador solo veia "no se pudo". La funcion entera estaba muerta.
+ * Tipos de campo activos.
  *
- * Comprobado ejecutandolo (`scripts/test-centroll-creable.js`):
- *
- *     kind=cash      -> creado
- *     kind=centroll  -> FALLA: `centroll` is not a valid enum value for path `kind`
+ * `cash` se conserva por compatibilidad con documentos antiguos; el producto
+ * actual solo abre freerolls y torneos.
  */
-export type FieldKind = 'cash' | 'freeroll' | 'centroll' | 'tournament';
+export type FieldKind = 'cash' | 'freeroll' | 'tournament';
 
 /**
  * Formato de un campo pagado.
@@ -84,7 +80,7 @@ export interface IField extends Document {
 
   /** Evento del catalogo de torneos, si aplica. */
   eventId?: string;
-  /** `standard` o `spingo`. Ausente en cash/freeroll/centroll. */
+  /** `standard` o `spingo`. Ausente en cash y freeroll. */
   format?: FieldFormat;
 
   status: FieldStatus;
@@ -395,7 +391,7 @@ const fieldSchema = new Schema<IField>(
 
     kind: {
       type: String,
-      enum: ['cash', 'freeroll', 'centroll', 'tournament'],
+      enum: ['cash', 'freeroll', 'tournament'],
       default: 'cash',
     },
     tierId: String,

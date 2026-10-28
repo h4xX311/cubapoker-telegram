@@ -523,15 +523,15 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
   }
 
   private async tick(): Promise<void> {
-    // Antes esta consulta filtraba `kind: 'cash'`. Los freerolls y centrolls
-    // viven en mesas `kind: 'freeroll'` / `'centroll'`, asi que el gestor
+    // Antes esta consulta filtraba `kind: 'cash'`. Las mesas de torneo y
+    // freeroll viven en `kind: 'freeroll'` / `'tournament'`, asi que el gestor
     // NUNCA las procesaba: se sentaban los jugadores, se repartia el campo y
     // la mesa se quedaba en `idle` para siempre. El jugador veia su asiento y
     // su stack, pero no llegaba ni una carta. Aqui entran las tres clases de
     // mesa; `processTable` decide despues que corresponde a cada una.
     const tables = await Table.find({
       status: { $in: ['waiting', 'running'] },
-      kind: { $in: ['cash', 'freeroll', 'centroll', 'tournament'] },
+      kind: { $in: ['cash', 'freeroll', 'tournament'] },
     }).limit(80);
 
     for (const table of tables) {
@@ -613,8 +613,8 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
     // de 2 asientos esto es la diferencia entre una sala accesible y una sala
     // que el lobby muestra llena de bots y en la que nadie puede sentarse.
     //
-    // Solo las ring tables cash se rellenan solas. En un campo (cash, freeroll
-    // o centroll) los bots los pone el gestor del campo al arrancar, en el
+    // Solo las ring tables cash se rellenan solas. En un campo (freeroll o
+    // torneo) los asientos los pone el gestor del campo al arrancar, en el
     // numero justo para poder jugar. Si este ciclo los añadiera antes, un
     // jugador que se inscribiera temprano veria la mesa llena de bots horas
     // antes de la hora, y el campo arrancaria con una plantilla que nadie
@@ -1368,7 +1368,7 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
           if (!actual) return;
           if (actual.hand.handNumber !== manoDelTimer) return;
           await this.playBotTurn(actual);
-        }).catch((e) => logger.error('Error bot turn:', e));
+        }).catch((e) => logger.error('Error al resolver el turno:', e));
       }, delay);
       timer.unref?.();
       this.turnTimers.set(table.tableId, timer);
@@ -1541,7 +1541,7 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
       for (const [accion, importe] of alternativas) {
         if (engine.performAction(seat.index.toString(), accion, importe)) {
           logger.warn(
-            `Mesa ${table.tableId}: el bot del asiento ${seat.index} decidio ` +
+            `Mesa ${table.tableId}: el asiento ${seat.index} decidio ` +
             `${decision.action}${decision.amount ? ' de ' + decision.amount : ''} y el ` +
             `motor la rechazo. Ha jugado ${accion} en su lugar.`,
           );
@@ -1555,7 +1555,7 @@ async withTableLock<T>(tableId: string, fn: () => Promise<T>): Promise<T> {
         // bot dentro, asi que se cierra la mano: el bote lo reparte el motor y el
         // asiento vuelve a la reserva en el siguiente ciclo.
         logger.error(
-          `Mesa ${table.tableId}: el bot del asiento ${seat.index} no puede jugar de ` +
+          `Mesa ${table.tableId}: el asiento ${seat.index} no puede jugar de ` +
           'ninguna manera (fichas ' + botPlayer.chips + ', deber ' +
           `${state.currentBet}, pot ${state.pot}). Se cierra la mano para no dejar la ` +
           'mesa colgada con un turno que no avanza.',
@@ -2252,8 +2252,8 @@ if (this.isFieldTable(table)) {
    *
    * Un jugador puede estar sentado en varias mesas cash a la vez. La app
    * necesita una lista pequena con lo justo para pintar una pestana: cuanto
-   * tiene en esa mesa, si le toca y cuanto le queda. No se envia ninguna carta
-   * ni ningun dato de los rivales.
+   * tiene en esa mesa, si le toca y cuanto le queda. Solo viajan las cartas
+   * privadas del propio jugador; las de los rivales nunca salen de aqui.
    */
   async listMyTables(telegramId: number): Promise<any[]> {
     const tables = await Table.find({
@@ -2281,6 +2281,7 @@ if (this.isFieldTable(table)) {
       const inicioTurno = table.hand.lastActionAt
         ? new Date(table.hand.lastActionAt).getTime()
         : 0;
+      const vista = toPublicTable(table, seat.index) as any;
 
       return {
         tableId: table.tableId,
@@ -2294,7 +2295,7 @@ if (this.isFieldTable(table)) {
             ? 'Freeroll'
             : table.kind === 'tournament'
             ? 'Torneo'
-            : 'Centroll',
+            : 'Mesa',
         field: table.field
           ? {
               fieldId: table.field.fieldId,
@@ -2329,6 +2330,8 @@ if (this.isFieldTable(table)) {
         nextHandAt: table.hand.nextHandAt
           ? new Date(table.hand.nextHandAt).toISOString()
           : null,
+        /** Cartas privadas del jugador en esta mesa, si la mano está activa. */
+        myCards: enMano && Array.isArray(vista?.myCards) ? vista.myCards : [],
       };
     }).filter(Boolean);
   }

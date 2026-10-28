@@ -28,6 +28,7 @@
  */
 
 import { Field, IField } from '../models/Field';
+import { Table } from '../models/Table';
 import {
   TOURNAMENT_EVENTS,
   TournamentEvent,
@@ -37,10 +38,35 @@ import {
 import { unitsToUsdt } from '../config/units';
 import { logger } from '../utils/logger';
 import { fieldManager, FieldError, withFieldLock } from './field.manager';
+import { tableManager } from './table.manager';
 
 const MINUTOS_REGISTRO_TARDIO = 12;
 const HORIZONTE_APERTURA_MS = 24 * 60 * 60 * 1000;
-const SPIN_ABANDONADO_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Spin & Go: completa la mesa a los 6 minutos y devuelve la entrada a los 9.
+ *
+ * El relleno es probabilístico por campo, no todos los Spin se completan. La
+ * decisión es determinista a partir del `fieldId` para que un reinicio no
+ * convierta un "no" en un "sí" ni duplique asientos.
+ */
+export const SPIN_COMPLETAR_MS = 6 * 60 * 1000;
+export const SPIN_REEMBOLSO_MS = 9 * 60 * 1000;
+const SPIN_PROBABILIDAD_COMPLETAR = 0.55;
+
+/** Hash FNV-1a simple, sin dependencias externas. */
+const hashCampo = (fieldId: string): number => {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < fieldId.length; i++) {
+    hash ^= fieldId.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+};
+
+/** Si ese Spin & Go concreto se completa a los 6 minutos. */
+export const spinSeCompleta = (fieldId: string): boolean =>
+  hashCampo(fieldId) / 0xffffffff < SPIN_PROBABILIDAD_COMPLETAR;
 
 export class TournamentError extends Error {
   code: string;
@@ -58,7 +84,30 @@ export const proximoInicio = (event: TournamentEvent, now = new Date()): Date =>
     throw new TournamentError('Ese evento no tiene hora fija.', 'NO_SCHEDULE');
   }
 
-  const { weekdayUtc, hourUtc, minuteUtc } = event.schedule;
+  const { weekdayUtc, hourUtc, minuteUtc, hoursUtc } = event.schedule;
+
+  // Eventos recurrentes con varias horas al día (cada 3, 6 o 1 hora). Se
+  // prueban hoy y mañana y gana la primera ocurrencia futura.
+  if (weekdayUtc === null && hoursUtc && hoursUtc.length > 0) {
+    const horas = Array.from(new Set(hoursUtc)).sort((a, b) => a - b);
+    for (let dia = 0; dia <= 1; dia++) {
+      for (const hora of horas) {
+        const candidato = new Date(
+          Date.UTC(
+            now.getUTCFullYear(),
+            now.getUTCMonth(),
+            now.getUTCDate() + dia,
+            hora,
+            minuteUtc,
+            0,
+            0,
+          ),
+        );
+        if (candidato.getTime() > now.getTime()) return candidato;
+      }
+    }
+  }
+
   const inicio = new Date(
     Date.UTC(
       now.getUTCFullYear(),
@@ -132,6 +181,17 @@ const publico = (event: TournamentEvent, field: IField | null, telegramId?: numb
       )
     ),
     maxPorMesa: 7,
+    createdAt: field?.createdAt?.toISOString?.() ?? null,
+    // Ventanas visibles del Spin & Go. No se expone ninguna decisión interna:
+    // el jugador solo necesita saber cuándo puede completarse o reembolsarse.
+    spinFillAt:
+      event.spin && field?.createdAt
+        ? new Date(new Date(field.createdAt).getTime() + SPIN_COMPLETAR_MS).toISOString()
+        : null,
+    spinRefundAt:
+      event.spin && field?.createdAt
+        ? new Date(new Date(field.createdAt).getTime() + SPIN_REEMBOLSO_MS).toISOString()
+        : null,
   };
 };
 
@@ -299,8 +359,64 @@ export const tournamentManager = {
     const ok = await fieldManager.startField(fresco);
     if (ok) {
       logger.info(
-        `Torneo ${fresco.fieldId} arrancado con ${humanos} humanos ` +
-        `(sin bots de relleno).`,
+        `Torneo ${fresco.fieldId} arrancado con ${humanos} jugadores.`,
+      );
+    }
+    return ok;
+  },
+
+  /**
+   * Completa un Spin & Go que lleva seis minutos esperando y lo arranca.
+   *
+   * Solo se completa si hay al menos un humano. Los asientos que faltan los
+   * pone la casa hasta el aforo de tres; sus premios, si ganan, quedan en la
+   * casa. El jugador que esperó no paga una mesa vacía.
+   */
+  async completarSpin(field: IField): Promise<boolean> {
+    await fieldManager.rehidratarColaFreeroll(field);
+    await fieldManager.trySeat(field);
+
+    const fresco = await Field.findOne({ fieldId: field.fieldId });
+    if (!fresco || fresco.status !== 'filling') return false;
+    if (inscritos(fresco) === 0) return false;
+
+    const mesas = await Table.find({
+      'field.fieldId': fresco.fieldId,
+      status: { $in: ['waiting', 'running'] },
+    });
+
+    let agregados = 0;
+    let mesaElegida: typeof mesas[number] | null = null;
+
+    for (const mesa of mesas) {
+      const humanos = mesa.seats.filter(
+        (s) => s.kind === 'human' && s.status !== 'out',
+      ).length;
+      if (humanos === 0) continue;
+
+      mesaElegida = mesa;
+      agregados += await tableManager.asegurarMinimoAsientos(
+        mesa.tableId,
+        fresco.targetField ?? 3,
+      );
+      // Un Spin & Go es una sola mesa. Se completa la primera mesa con
+      // humanos y no se reparte a los jugadores en mesas distintas.
+      break;
+    }
+
+    if (!mesaElegida) return false;
+
+    // Si la mesa ya tenía los asientos necesarios, `agregados` es 0 pero el
+    // campo sigue en `filling`: hay que arrancarlo igualmente.
+    const activos = mesaElegida.seats.filter(
+      (s) => s.status === 'active' && s.chips > 0,
+    ).length;
+    if (agregados === 0 && activos < (fresco.targetField ?? 3)) return false;
+
+    const ok = await fieldManager.startField(fresco);
+    if (ok) {
+      logger.info(
+        `Spin ${fresco.fieldId}: mesa completada; arranca con la mesa llena.`,
       );
     }
     return ok;
@@ -394,9 +510,9 @@ export const tournamentManager = {
         }
       }
 
-      // Spin & Go: arranca al llenarse. `trySeat` ya lo hace cuando el tercer
-      // jugador se sienta; aqui se recupera tras un reinicio y se limpian los
-      // que llevan horas esperando sin llenarse.
+      // Spin & Go: arranca al llenarse. Si a los 6 minutos sigue esperando,
+      // una parte de los campos se completa automáticamente; el resto se
+      // reembolsa al cumplir 9 minutos. `trySeat` ya arranca al tercer humano.
       const spins = await Field.find({
         kind: 'tournament',
         format: 'spingo',
@@ -412,12 +528,29 @@ export const tournamentManager = {
         }
 
         const edad = ahora.getTime() - new Date(spin.createdAt).getTime();
-        if (humanos === 0 && edad > 30 * 60_000) {
-          await this.cancelar(spin, 'Spin & Go sin jugadores');
+
+        // Nueve minutos es el máximo: se devuelve la entrada, tanto si hay
+        // jugadores esperando como si el campo quedó vacío.
+        if (edad >= SPIN_REEMBOLSO_MS) {
+          await this.cancelar(
+            spin,
+            humanos > 0
+              ? 'Spin & Go sin llenarse: reembolso automático'
+              : 'Spin & Go sin jugadores',
+          );
           cancelados++;
-        } else if (edad > SPIN_ABANDONADO_MS) {
-          await this.cancelar(spin, 'Spin & Go sin llenarse');
-          cancelados++;
+          continue;
+        }
+
+        // A los seis minutos, solo algunos campos se completan. El hash del
+        // `fieldId` mantiene la decisión estable entre reinicios.
+        if (
+          humanos > 0 &&
+          edad >= SPIN_COMPLETAR_MS &&
+          spinSeCompleta(spin.fieldId)
+        ) {
+          const ok = await this.completarSpin(spin);
+          if (ok) arrancados++;
         }
       }
     } catch (error) {

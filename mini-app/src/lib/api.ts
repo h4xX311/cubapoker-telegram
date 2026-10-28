@@ -201,10 +201,6 @@ export const api = {
       body: { fieldId },
     }),
 
-  // Centrolls: buy-in de saldo real, premio en fichas de promocion
-  centroll: () => request<any>('/game/centroll'),
-  joinCentroll: () => request<any>('/game/centroll/join', { method: 'POST' }),
-
   // Campos multi-mesa. Ojo: entrar a un campo NO es sentarse en una mesa.
   // El campo gestiona la cola, el reparto por mesas y las posiciones.
   fields: () => request<any>('/game/fields'),

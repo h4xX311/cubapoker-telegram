@@ -675,13 +675,11 @@ export function Table({ tableId, onBack, onBalanceChange }: Props) {
         title={
           view.kind === 'freeroll'
             ? 'Freeroll'
-            : view.kind === 'centroll'
-              ? 'Centroll'
-              : view.kind === 'tournament'
-                ? 'Torneo'
-                : view.mode === 'USDT'
-                  ? 'Mesa cash'
-                  : 'Mesa'
+            : view.kind === 'tournament'
+              ? 'Torneo'
+              : view.mode === 'USDT'
+                ? 'Mesa cash'
+                : 'Mesa'
         }
         onBack={spectator ? onBack : leave}
       />

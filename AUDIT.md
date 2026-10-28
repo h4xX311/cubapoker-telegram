@@ -92,8 +92,8 @@ Sin esto no hay producto: un usuario entra en un campo y espera para siempre.
 
 ### 3.3 GRAVE · La interfaz no tiene ninguna vía para jugar
 
-La UI **nunca llama a `api.sit`**. Todo lo que ofrece pasa por un campo, un freeroll o un
-centroll, y **los tres arrancan cuando se llenan**.
+La UI **nunca llama a `api.sit`**. Todo lo que ofrece pasa por un campo o un freeroll, y
+**ambos arrancan cuando se llenan**.
 
 `fieldSize` está a **300 para todos los tiers** (fábrica `tier()`, línea 217). O sea: para
 jugar hacen falta 300 registros con saldo cada uno. No es un detalle de configuración, es
